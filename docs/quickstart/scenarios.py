@@ -35,22 +35,26 @@ SERVER = {
                  ("Model choice", "main.go uses DemoModel without a key. Set OPENAI_API_KEY "
                   "and GENT_MODEL to use models.NewOpenAI instead."),
              ], "The same agent can run now and continue on a fresh worker later."),
-        step("save", "Save to the database", "Implement gent.Recorder.Save.",
-             "Gent groups pending events at model and tool boundaries, or a configured size limit. "
-             "Save blocks until commit. Streaming chunks do not each require a transaction.",
-             "Add store.go. Put this method on Writer. Commit all state in one database "
-             "transaction and return nil only after the transaction succeeds.",
-             "server/store.go", "// Save is the Gent", None, [
-                 ("gent.ApplyBatch", "Checks the previous cursor, consecutive event numbers, "
-                  "batch digest, and duplicate identity. An identical retry is safe."),
-                 ("CodecRegistry.Marshal / Unmarshal", "Keep concrete Go content and metadata "
-                  "types. Ordinary JSON decoding of a RunView is not a restoration format."),
-                 ("Writer fence", "The transaction rejects a worker whose owner number is old. "
-                  "Canceling a context alone cannot prevent an old worker from saving."),
-                 ("Database choice", "bbolt is a real file database with atomic transactions. "
-                  "This short-run example rewrites one full RunView; a larger store should keep "
-                  "append-only batches and maintain its view in the same transaction."),
-             ], "A saved view and its cursor always describe the same committed data."),
+        step("save", "Save to the database", "Connect gent.Recorder to Insert and Get.",
+             "Gent calls Save with a complete SaveBatch. Your database adapter needs only two "
+             "operations here: Insert saves that batch; Get loads the full RunView for recovery.",
+             "Add store.go. Recorder implements gent.Recorder and passes each batch to Insert. "
+             "Use the supplied database adapter, or connect your own database to this interface.",
+             "server/store.go", "type Database interface", None, [
+                 ("Database belongs to your application", "This is the example's interface, "
+                  "not a Gent API. Each handle belongs to one run and its current worker."),
+                 ("gent.SaveBatch", "Gent supplies events, history changes, runtime state, "
+                  "and an optional checkpoint. Insert commits them together, accepts an identical "
+                  "retry, and rejects an old worker. It returns nil only after commit."),
+                 ("gent.RunView", "Get returns the complete saved run, including progress "
+                  "after the checkpoint. Pass this value to Resume to restore the agent."),
+                 ("gent.Recorder.Save", "This one method connects Gent to your database. "
+                  "An Insert error returns to Gent and stops further dependent work."),
+             ], "Attach Recorder with WithRecorder. Gent calls Save at its save boundaries.",
+             '<p class="scope-note">The complete database adapter is in <code>bolt.go</code> under '
+             '<strong>Complete files</strong>. <code>gent.ApplyBatch</code> checks batches and '
+             '<code>gent.CodecRegistry</code> preserves Go types. Transactions and worker '
+             'ownership stay inside that adapter.</p>'),
         step("observe", "Attach the recorder", "Separate live progress from blocking saves.",
              "trace.Sequencer.Follow receives live progress through a bounded queue. Events can "
              "arrive before Save. The accepted answer waits for the terminal save to succeed.",
@@ -233,34 +237,35 @@ RECOVERY = {
     "goal": "a replacement worker that continues the same run without starting the task over.",
     "project": "server",
     "steps": [
+        step("bindings", "Prepare fresh objects", "Rebuild the agent and register its types.",
+             "Recovery uses the same agent definition with fresh runtime objects. Its recovery "
+             "version must match the saved run. Register types before the database reads them.",
+             "Use newAgent from scenario 2 and a fresh gent.NewCodecRegistry. In API.start, "
+             "register the agent's codecs on the registry used by the database adapter.",
+             "server/runtime.go", "\tagent := newAgent(a.model())", "\t_, err := a.store.load", [
+                 ("The same agent definition", "newAgent keeps WithRecoveryVersion and the same "
+                  "tool definitions. The model and other runtime clients can be fresh objects."),
+                 ("RegisterCodecs", "Register the concrete tool and agent state types before "
+                  "Get decodes the saved RunView. Pass the same registry to Resume."),
+             ], "The fresh worker can read the types stored by the original agent."),
         step("load", "Load accepted state", "Read the saved RunView from scenario 2.",
              "A browser refresh and a worker restart are different operations. The browser "
              "rebuilds display state. A replacement worker needs the full saved RunView.",
-             "Create fresh model and agent objects. Register the agent's codecs before loading "
-             "the database bytes. Call Store.load with the existing run ID.",
-             "server/store.go", "func (s *Store) read", "type Writer", [
-                 ("RegisterCodecs before decode", "newAgent(model).RegisterCodecs(codecs) "
-                  "registers the tool and agent state types. Use that registry in openStore."),
-                 ("Keep progress beyond the checkpoint", "Do not trim Activity to "
-                  "Checkpoint.EventNumber. Saved model output and accounting may be newer."),
+             "Call database.Get with the existing run ID, then bind the database to Recorder. "
+             "The server has already assigned this handle to the replacement worker.",
+             "server/runtime.go", "\tsaved, err := database.Get", "\tvar seq *trace.Sequencer", [
+                 ("Get the whole run", "Keep Activity and runtime state beyond "
+                  "Checkpoint.EventNumber. Saved model output and accounting can be newer."),
+                 ("Bind the replacement recorder", "Future Save calls go through this worker's "
+                  "Insert handle. The adapter rejects writes from the old worker."),
              ], "You have the complete accepted run, including its continuation checkpoint."),
-        step("claim", "Replace the writer", "Fence the old worker before continuing.",
-             "The previous worker can still be saving after its context is canceled. A new owner "
-             "number makes its next database write fail inside the save transaction.",
-             "Call Store.claim for the existing run ID. Pass the returned Writer to the restored "
-             "context. The Save method from scenario 2 checks this number on every transaction.",
-             "server/store.go", "// A new owner fences", "func (s *Store) read", [
-                 ("Same transaction", "Checking the fence separately from the data write leaves "
-                  "a race. bbolt checks the owner and writes the complete view in one update."),
-                 ("Multiple processes", "bbolt locks its database file to one process. A shared "
-                  "SQL store needs an equivalent transactional lease or fencing check."),
-             ], "The replacement worker is the only writer allowed to advance this run."),
         step("tools", "Handle uncertain tools", "Do not blindly repeat an external write.",
              "A process can stop after a tool changes an external system but before its result "
              "is saved. A tool-ready checkpoint alone cannot prove whether the tool completed.",
              "Set Recovery(recoverOrder) on the tool builder in agent.go. This reports an unavailable "
              "lookup result. The model decides whether a fresh read is needed.",
-             "server/agent.go", "// The lookup has no durable receipt.", None, [
+             "server/agent.go", "// The lookup has no durable receipt.",
+             "func (m *DemoModel) PrepareRequest", [
                  ("ToolRecoveryCompleted", "Return the complete saved result when an external "
                   "receipt proves the operation finished."),
                  ("ToolRecoveryNotStarted", "Use this only when evidence proves that the action did not "
@@ -290,7 +295,8 @@ RECOVERY = {
              "cancellation. Its database keeps the last accepted progress and checkpoint.",
              "Start an order lookup in the React page. Stop the Go process with Ctrl+C during "
              "the preview, restart it with the same RUN_DB, then select Resume saved run.",
-             "server/http.go", "func (a *API) resumeRun", "func (a *API) getState", [
+             "server/README.md", "# Use the same command before and after Ctrl+C.",
+             "\n```\n\nStart an order lookup", [
                  ("Keep the run ID", "The React page keeps it in the URL. POST resume uses "
                   "that ID and returns HTTP 409 if a worker is already active."),
                  ("Worker cancellation", "Stopping the service interrupts the worker. "

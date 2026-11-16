@@ -17,4 +17,16 @@
 // application callbacks and implementation behavior that cannot be derived from schemas.
 // Recovery reuses completed results. Uncertain outcomes produce guidance for a new model plan.
 // Interrupted JavaScript returns partial evidence without restarting the script.
+//
+// Recovery can repeat work whose result was not accepted, including model calls that can return
+// different content. Agent restores its saved response and tool-plan progress internally; callers
+// do not need a custom step enum. Accepted tool results keep their operation identities and are
+// reused instead of executing those operations again.
+//
+// Custom Output.Process implementations, validators, and hooks can run again after interruption.
+// Keep external effects in these callbacks safe to repeat. For example, a database write inside
+// Output.Process can repeat if execution stops after the write but before the terminal output is
+// durably accepted. Managed tool recovery does not protect external effects in these callbacks.
+// Use managed tools when an action needs the tool recovery contract. A durably accepted terminal
+// output is restored without calling Output.Process again.
 package react

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -40,37 +39,97 @@ func TestSaveTransaction(t *testing.T) {
 	type input struct {
 		number, previous uint64
 		replaceWriter    bool
+		cancel           bool
 	}
-	type expected struct{ err error }
+	type expected struct {
+		view gent.RunView
+		err  error
+	}
 	type testCase struct {
 		name     string
 		input    input
 		expected expected
 	}
+	first, next := savedBatch(t, 1, 0), savedBatch(t, 2, 1)
+	firstView := gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "test",
+		LastAppliedEventNumber: 1, Activity: first.Events,
+		Batches: map[string]string{first.BatchId: first.BatchId}}
+	nextView := gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "test",
+		LastAppliedEventNumber: 2, Activity: []*gent.RecordedEvent{first.Events[0], next.Events[0]},
+		Batches: map[string]string{first.BatchId: first.BatchId, next.BatchId: next.BatchId}}
 	cases := []testCase{
-		{"duplicate is idempotent", input{1, 0, false}, expected{}},
-		{"gap is rejected", input{3, 1, false}, expected{gent.ErrEventGap}},
-		{"stale cursor is rejected", input{2, 0, false}, expected{gent.ErrEventGap}},
-		{"old worker is fenced", input{2, 1, true}, expected{errStaleWriter}},
+		{"next batch advances the full view", input{2, 1, false, false}, expected{nextView, nil}},
+		{"duplicate is idempotent", input{1, 0, false, false}, expected{firstView, nil}},
+		{"gap is rejected", input{3, 1, false, false}, expected{firstView, gent.ErrEventGap}},
+		{"stale cursor is rejected", input{2, 0, false, false}, expected{firstView, gent.ErrEventGap}},
+		{"old worker is fenced", input{2, 1, true, false}, expected{firstView, errStaleWriter}},
+		{"canceled save is rejected", input{2, 1, false, true}, expected{firstView, context.Canceled}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			store := testStore(t, filepath.Join(t.TempDir(), "runs.db"))
-			writer, err := store.claim("test")
+			database, err := store.claim("test")
 			assert.NoError(t, err)
-			assert.NoError(t, writer.Save(context.Background(), savedBatch(t, 1, 0)))
-			before, err := store.load("test")
+			writer := Recorder{DB: database}
+			assert.NoError(t, writer.Save(context.Background(), first))
+			before, err := database.Get(context.Background(), "test")
 			assert.NoError(t, err)
+			assert.Equal(t, firstView, before)
 			if test.input.replaceWriter {
 				_, err := store.claim("test")
 				assert.NoError(t, err)
 			}
-			err = writer.Save(context.Background(),
-				savedBatch(t, test.input.number, test.input.previous))
-			assert.True(t, errors.Is(err, test.expected.err), "unexpected error: %v", err)
-			after, err := store.load("test")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if test.input.cancel {
+				cancel()
+			}
+			err = writer.Save(ctx, savedBatch(t, test.input.number, test.input.previous))
+			assert.ErrorIs(t, err, test.expected.err)
+			after, err := database.Get(context.Background(), "test")
 			assert.NoError(t, err)
-			assert.Equal(t, before, after)
+			assert.Equal(t, test.expected.view, after)
+		})
+	}
+}
+
+func TestDatabaseGet(t *testing.T) {
+	type input struct {
+		runID  string
+		cancel bool
+	}
+	type expected struct {
+		view gent.RunView
+		err  error
+	}
+	type testCase struct {
+		name     string
+		input    input
+		expected expected
+	}
+	batch := savedBatch(t, 1, 0)
+	view := gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "test",
+		LastAppliedEventNumber: 1, Activity: batch.Events,
+		Batches: map[string]string{batch.BatchId: batch.BatchId}}
+	cases := []testCase{
+		{"complete saved run", input{"test", false}, expected{view, nil}},
+		{"wrong run", input{"other", false}, expected{gent.RunView{}, gent.ErrWrongRun}},
+		{"canceled read", input{"test", true}, expected{gent.RunView{}, context.Canceled}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			store := testStore(t, filepath.Join(t.TempDir(), "runs.db"))
+			database, err := store.claim("test")
+			assert.NoError(t, err)
+			assert.NoError(t, Recorder{DB: database}.Save(context.Background(), batch))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if test.input.cancel {
+				cancel()
+			}
+			actual, err := database.Get(ctx, test.input.runID)
+			assert.ErrorIs(t, err, test.expected.err)
+			assert.Equal(t, test.expected.view, actual)
 		})
 	}
 }

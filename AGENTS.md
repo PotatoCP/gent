@@ -30,6 +30,9 @@
 
 - Prefer explicit interfaces. Result structs and typed enums must show possible states and fields to
   check. This keeps expected control flow visible in the interface.
+- Define each enum with its own named string type. Declare each allowed value as a typed const.
+  Add a Go documentation comment immediately above each enum constant. Start the comment with the
+  constant name and explain what the value means and when it applies.
 - Use explicit result types for expected failures and other conditions that callers must handle.
 - Do not use error types or error constructors to represent expected states.
 - Use `error` for an unexpected operation failure with no accepted result. Use explicit result
@@ -38,7 +41,46 @@
   to the model. Keep raw errors and rejected returns in private diagnostic records.
 - Cancellation, storage failures, and run limits retain their separate run-level contracts.
 - Do not clone for defensive safety. Use ownership transfer and read-only getters. Copy only when
-  a feature needs independent mutable values or a stable saved snapshot. Document that reason.
+  a feature needs independent mutable values or a stable saved value. Document that reason.
+- Support recovery and continuation with updated agent code and configuration wherever saved state
+  remains usable. Do not require a saved run to use a matching Runner version. Preserve accepted
+  evidence and counters. Allow changes to tools, limits, and steering messages. Require migration
+  or report an explicit result when saved data or provider state cannot be used.
+- Keep loop-specific models, prompts, retries, and checks on the Loop. Put common services and
+  execution policies in gent.Config. Ask the owner before moving a setting with unclear scope.
+- Store recoverable custom LoopData in checkpointed SaveBatch values. Treat RunStateSnapshots as
+  optional replay acceleration. Batch-only replay must restore the same accepted custom data.
+- Use RunStateSnapshot for a captured serializable RunState or its encoded form. Use this term in
+  discussions, documentation, and related identifiers. It does not introduce another public state
+  type. Keep quoted current-code and third-party names accurate when explaining older APIs.
+- User recovery guarantee: when an application correctly stores complete SaveBatch values through
+  Recorder.Save and follows the documented LoopData and managed-execution contracts, Gent must
+  restore the same logical agent state at every accepted savepoint. The application can then use
+  Continue, or NewTurn after a completed turn. Full batch replay and a RunStateSnapshot plus its
+  accepted tail must produce the same state, including custom data, resume position, history,
+  counters, accepted output, and tool/recovery evidence. Reuse accepted results and completed
+  recovery preparation. Treat this as an implementation and test invariant. This guarantees saved
+  logical state and continuation; it does not promise identical future model output or undo external
+  effects. Use the managed recovery contract for unfinished external operations.
+- Teach the Quick Start with short examples that show inputs, calls, and results. Keep setup and
+  unrelated application code outside each example. Complete Go files are optional references.
+- Keep public interfaces simple, intuitive, elegant, and quick to understand.
+
+Keys to controlling complexity:
+
+1. The number of methods/interface you have. We always strive for the smallest amount of methods and
+   interfaces that still achieves our goals. If we can simplify, simplify. If we can consolidate,
+   consolidate. Reducing the interface surface makes it easier and more intuitive, and it will look
+   more elegant. Doing this while still having correct semantics is the real challenge. Don't
+   sacrifice one for another.
+2. The number of ways to do things. We always strive to only have 1 way to do the exact same thing.
+   There shouldn't be multiple ways of achieving the same exact goal. If we have multiple ways of
+   doing things, that is usually a part that can be simplified. Having multiple ways of doing things
+   mean we have to continuously support them, and it's not maintainable.
+3. Start with good defaults, allow customization of those defaults. When we want to have simple and
+   advanced ways of doing the exact same thing, have single unified interface with good defaults.
+   Have the user customize through the same unified interface. This achieves #2 without sacrificing
+   customizability.
 </gent_design_principles>
 
 <critical_constraints>
@@ -205,7 +247,9 @@ goal is to make it easy to write and experiment with custom agent loops.
 - Assert exact string matches. Do NOT use `Contains`, `HasPrefix`, or other partial match shortcuts. If the full expected output is known, assert it exactly.
 
 **Running Tests**
-- Always run full test suites over `./...` after the final changes, including native, CGO-disabled,
+- For Markdown-only design changes, check the documents. Do not run Go suites. Use focused tests
+  only when needed to verify a design assumption.
+- After code changes, run full test suites over `./...`, including native, CGO-disabled,
   and race configurations. Targeted checks never replace a full suite.
 - Run tests without `-v` and without piping to `grep`. Go test already prints full output for failing packages — no filtering needed.
 - Use 300s timeout to accommodate ONNX embedder index builds in policy/search tests.
@@ -238,6 +282,9 @@ goal is to make it easy to write and experiment with custom agent loops.
 <standards_convention>
 - MAX line length: 100 characters, DO NOT break line before 100 chars.
 - NEVER swallow errors. Errors must be either returned, or logged.
+- Use ctx for context.Context and execCtx for gent.ExecutionContext in code and examples. Use
+  role-specific names when a scope has multiple contexts. Apply this rule across the repository
+  when implementing the approved API changes.
 </standards_convention>
 
 <critical_rules>

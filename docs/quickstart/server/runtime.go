@@ -44,7 +44,7 @@ func (a *API) start(runID, question string, resume bool) error {
 	if err := agent.RegisterCodecs(a.store.codecs); err != nil {
 		return err
 	}
-	saved, err := a.store.load(runID)
+	_, err := a.store.load(runID)
 	if resume && err != nil {
 		return err
 	}
@@ -54,10 +54,16 @@ func (a *API) start(runID, question string, resume bool) error {
 		}
 		return fmt.Errorf("run already exists")
 	}
-	writer, err := a.store.claim(runID)
+	database, err := a.store.claim(runID)
 	if err != nil {
 		return err
 	}
+	// Claim first. A read before the old writer is fenced can miss its final committed batch.
+	saved, err := database.Get(a.worker, runID)
+	if err != nil {
+		return err
+	}
+	writer := Recorder{DB: database}
 	var seq *trace.Sequencer
 	if resume {
 		seq, err = trace.RestoreSequencer(saved, displayConfig(a.store.codecs))

@@ -27,8 +27,8 @@ TARGETS = {
                       "return answer, nil"],
     "basic/run": ["runner := newRunner", ("ctx, cancel :=", "defer cancel()"), None],
     "server/model": ["WithRecoveryVersion", "func newAgent(model gent.Model)"],
-    "server/save": ["next, err := gent.ApplyBatch", "data, err := w.store.codecs.Marshal",
-                    ("if bucket == nil", "return errStaleWriter"), "return w.store.db.Update"],
+    "server/save": ["type Database interface", "Insert(context.Context", "Get(context.Context",
+                    ("func (r Recorder) Save", "return r.DB.Insert")],
     "server/observe": ["feed, err := seq.Follow",
                        "ctx := gent.NewExecutionContext(worker", "_, _, runErr = runner.Execute"],
     "server/state": ["seq, err := trace.RestoreSequencer", "return browserState",
@@ -52,13 +52,11 @@ TARGETS = {
     "react/render": ['<Content parts={answer.content} />',
                      ".flatMap((answer) => answer.sourceMessageIds", None],
     "react/run": [None, '"/api":', None],
-    "recovery/load": ["err := s.codecs.Unmarshal", "view, err = s.read(bucket, runID)"],
-    "recovery/claim": ["err := s.db.Update", None],
-    "recovery/tools": [None, "return &gent.ToolRecoveryResponse",
-                       None, None],
-    "recovery/resume": ["result, err := runner.Resume", "feed, err = seq.Follow",
-                        "worker context.Context", None],
-    "recovery/try": ["id := r.PathValue", None, "writeError(w, err)", None],
+    "recovery/bindings": ["agent := newAgent", "agent.RegisterCodecs"],
+    "recovery/load": ["saved, err := database.Get", "writer := Recorder"],
+    "recovery/tools": [None, None, "return &gent.ToolRecoveryResponse", None],
+    "recovery/resume": ["result, err := runner.Resume", None, None, None],
+    "recovery/try": [None, None, None, None],
 }
 
 STEP_NOTES = {
@@ -78,14 +76,26 @@ STEP_NOTES = {
         ("const parts = preview.parts.filter", "Hide only the replaced preview",
          "Keep unrelated metadata. Remove the parts named by the accepted answer's source IDs."),
     ],
-    "recovery/claim": [
-        ("w.fence, err = bucket.NextSequence()", "Give the new owner a higher number",
-         "The Save transaction checks this value. An older worker cannot advance the run."),
+    "recovery/resume": [
+        ("Recorder: writer, Codecs: codecs", "Bind fresh runtime objects",
+         "Resume uses this recorder for new saves and this registry for saved Go types."),
+        ("feed, err = seq.Follow", "Attach live progress to the restored context",
+         "Configure receives the actual restored context. Omit this callback without a live feed."),
     ],
 }
 
 # Supporting files also get useful explanations when opened in the complete-source view.
 FILE_NOTES = {
+    "server/bolt.go": [
+        ("w.fence, err = bucket.NextSequence()", "Replace the writer before reading",
+         "The new owner number blocks old writes. Read the saved run after this change."),
+        ("return w.store.db.Update", "Commit one complete batch",
+         "The owner check and state write share a transaction. Insert returns after commit."),
+        ("next, err := gent.ApplyBatch", "Use Gent's batch checks",
+         "Check the previous cursor, event order, digest, and duplicate batch identity."),
+        ("data, err := w.store.codecs.Marshal", "Preserve concrete Go types",
+         "Use the same codec registry for encoding and decoding the saved run."),
+    ],
     "server/main.go": [
         ("signal.NotifyContext", "Own the worker context",
          "Service shutdown cancels workers. A browser disconnect does not cancel them."),

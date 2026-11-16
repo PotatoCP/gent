@@ -1,9 +1,9 @@
 # Saved Gent streaming API
 
-This is the complete Go project for scenarios 2 and 4. It saves accepted Gent batches in bbolt,
-provides a full saved display state, and sends live events over WebSocket. Live previews can precede
-persistence; the final accepted answer waits for the terminal save. The database is the source of
-saved state. A disconnected browser does not stop the agent.
+This is the complete Go project for scenarios 2 and 4. It connects Gent to a database through
+`Insert` and `Get`, provides a full saved display state, and sends live events over WebSocket.
+Live previews can precede persistence; the final accepted answer waits for the terminal save.
+The database is the source of saved state. A disconnected browser does not stop the agent.
 
 ## Run
 
@@ -53,6 +53,11 @@ serialized recovery object. The database holds the full `gent.RunView` through `
 
 ## Restart and resume
 
+```bash
+# Use the same command before and after Ctrl+C.
+RUN_DB=runs.db CGO_ENABLED=0 go run .
+```
+
 Start an order lookup in React. Stop the service with Ctrl+C while its preview arrives. Restart
 with the same database, keep the browser's `?run=...` URL, and select **Resume saved run**.
 Do this within the original two-minute deadline. Recovery keeps the original deadline and limits.
@@ -63,14 +68,30 @@ preview, resets to the saved cursor even if it is lower, and rejects old callbac
 `WithRecoveryVersion` on the original agent so the new worker can check its
 behavior. A terminal run returns the saved outcome without another model call.
 
-The writer's owner number is checked in the same database transaction as the state write. This
-prevents an old owner from accepting new batches. The API allows only one active worker per run.
-bbolt also locks its file to one process; this is not a shared database for multiple servers.
-
 The sample tool only reads data. Its recovery handler reports that the old lookup result is
 unavailable. The model decides whether to make a fresh call. For writes, inspect an external
 receipt and return Completed, NotStarted, or Unresolved. No report authorizes automatic execution.
 A saved checkpoint alone cannot establish whether an external operation completed.
+
+## Database adapter
+
+The lessons show `store.go`: the application's `Database` interface and a `Recorder` that implements
+`gent.Recorder`. The interface has two methods. `Insert` saves a complete `gent.SaveBatch` and `Get`
+loads the full `gent.RunView`. Each handle belongs to one run and worker. This keeps the lesson
+about Gent's save and restore contracts while the database driver stays in `bolt.go`.
+
+`Insert` is a batch operation, not a single row insert. The adapter must commit the complete batch,
+its cursor, and its duplicate receipt in one transaction. It must check the worker's owner number
+in that transaction and accept an identical retry. Return nil only after durable commit; return
+any storage error to Gent. A failed acknowledgment can occur after commit, so a retry must use the
+same batch. `gent.ApplyBatch` checks the batch, but the adapter supplies the transaction.
+
+The supplied adapter uses bbolt and `gent.CodecRegistry` to preserve concrete Go types. Register
+the agent's codecs before `Get`. On recovery, `runtime.go` replaces the owner before it reads the
+saved view. An old worker can commit between an earlier read and the owner change, so that earlier
+read cannot supply the recovery state. A canceled worker context alone does not prevent old writes.
+The API allows one active worker per run. bbolt locks its file to one process. A database shared by
+multiple servers needs an equivalent owner check in each save transaction.
 
 ## Scope
 

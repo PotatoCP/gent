@@ -161,7 +161,8 @@ go get github.com/rickchristie/gent`,
       );
     }
   }
-  console.log("PASS all 26 coding steps and all source-file choices match the tested files");
+  const stepCount = data.scenarios.reduce((count, scenario) => count + scenario.steps.length, 0);
+  console.log(`PASS all ${stepCount} steps and all file choices match the tested source`);
   console.log("PASS source line numbers, connector positions, and notes without overlap");
 
   await go("basic", "agent");
@@ -335,6 +336,10 @@ with zipfile.ZipFile(sys.argv[1]) as archive:
   await expect(page.locator("#basic-execute")).toBeVisible();
   await go("server", "save");
   await page.screenshot({ path: fileURLToPath(new URL("gent-quick-start-server.png", shots)) });
+  await go("recovery", "load");
+  await page.screenshot({ path: fileURLToPath(new URL("gent-quick-start-load.png", shots)) });
+  await go("recovery", "resume");
+  await page.screenshot({ path: fileURLToPath(new URL("gent-quick-start-resume.png", shots)) });
   await go("react", "cursor");
   await page.screenshot({ path: fileURLToPath(new URL("gent-quick-start-react.png", shots)) });
   console.log("PASS keyboard use, history, reload, and old direct links");

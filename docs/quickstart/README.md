@@ -10,7 +10,7 @@ connection to read. There is no completion tracker or stored lesson progress.
 1. **Simple agent:** a shipment tool with structured data, a PDF fixture, and explicit recovery.
 2. **Saved streaming API:** the same loop with grouped saves, live events, and API routes.
 3. **React streaming client:** buffer events, load state, skip covered events, and keep listening.
-4. **Resume a saved run:** load the full saved state, fence the writer, and restore fresh bindings.
+4. **Resume a saved run:** register fresh bindings, load the full saved state, and call `Resume`.
 
 The simple agent uses live model credentials when run. The server also supplies a local model
 for a complete browser and recovery demo with no credentials. The guide does not run Go or React
@@ -56,9 +56,11 @@ with the same API when running the projects. The downloaded server README explai
 its local Go module replacement. The simple guide provides an editable checkout path.
 The default path is a placeholder so a committed guide contains no local checkout path.
 
-The saved-state API is small enough to teach each boundary. It uses one bbolt process and short
-runs. Its browser view is a declared subset of the full trace. The server README explains the
-storage tradeoff, local access scope, and safe handling of uncertain tool outcomes.
+The save and recovery lessons use the application's `Database` interface with `Insert` and `Get`.
+They show Gent's `SaveBatch`, `RunView`, recorder, and restore bindings. Keep database transactions,
+owner checks, and driver setup in `server/bolt.go`, available under Complete files. This keeps the
+main steps short without removing those checks from the runnable example. The server README defines
+the adapter's atomic save and retry contract. Its browser view contains part of the full trace.
 
 ## Verification
 

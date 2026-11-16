@@ -12,7 +12,7 @@ import (
 )
 
 type stopWriter struct {
-	writer *Writer
+	writer gent.Recorder
 	phase  gent.ExecutionPhase
 	cancel context.CancelFunc
 }
@@ -69,17 +69,17 @@ func TestRecoveryFromReopenedDatabase(t *testing.T) {
 			if !assert.NoError(t, err) {
 				return
 			}
-			writer, err := store.claim("recover")
+			database, err := store.claim("recover")
 			assert.NoError(t, err)
 			worker, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			ctx := gent.NewExecutionContext(worker, "order-helper",
 				gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Check order-1001"})),
 				gent.WithRunId("recover"), gent.WithCodecs(codecs),
-				gent.WithRecorder(&stopWriter{writer, test.input.stop, cancel}))
+				gent.WithRecorder(&stopWriter{Recorder{DB: database}, test.input.stop, cancel}))
 			_, _, err = executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
 			assert.ErrorIs(t, err, context.Canceled)
-			before, err := store.load("recover")
+			before, err := database.Get(context.Background(), "recover")
 			assert.NoError(t, err)
 			assert.Equal(t, test.input.stop, before.Checkpoint.Phase)
 			assert.Equal(t, test.expected.firstCalls, first.requests)
@@ -87,26 +87,23 @@ func TestRecoveryFromReopenedDatabase(t *testing.T) {
 
 			// Reopen with a fresh codec registry, model, agent, recorder, and trace projection.
 			freshStore := testStore(t, path)
-			saved, err := freshStore.load("recover")
+			replacement, err := freshStore.claim("recover")
+			assert.NoError(t, err)
+			saved, err := replacement.Get(context.Background(), "recover")
 			assert.NoError(t, err)
 			assert.Equal(t, before, saved)
 			freshModel := &countedModel{}
-			freshRunner := executor.NewRunner(newAgent(freshModel), executor.DefaultConfig())
-			replacement, err := freshStore.claim("recover")
-			assert.NoError(t, err)
 			seq, err := trace.RestoreSequencer(saved, displayConfig(freshStore.codecs))
 			assert.NoError(t, err)
 			defer seq.Close()
-			_, result, err := freshRunner.Resume(context.Background(), saved, gent.RestoreBindings{
-				Recorder: replacement, Codecs: freshStore.codecs,
-				Observers: []gent.RecordedEventObserver{seq},
-			})
+			_, result, err := resumeSaved(context.Background(), saved, newAgent(freshModel),
+				Recorder{DB: replacement}, seq, freshStore.codecs)
 			if !assert.NoError(t, err) {
 				return
 			}
 			assert.Equal(t, test.expected.answer, result.Output)
 			assert.Equal(t, test.expected.resumedCalls, freshModel.requests)
-			terminal, err := freshStore.load("recover")
+			terminal, err := replacement.Get(context.Background(), "recover")
 			assert.NoError(t, err)
 			assert.Equal(t, gent.PhaseTerminal, terminal.Checkpoint.Phase)
 			assert.Greater(t, terminal.LastAppliedEventNumber, saved.LastAppliedEventNumber)
