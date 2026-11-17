@@ -167,6 +167,27 @@ type SaveBatch struct {
 // Recorder is the application's persistence boundary. Attach it with WithRecorder when execution
 // must survive worker replacement. Without a recorder, accepted state remains only in memory.
 // Loading the stored RunView and assigning worker ownership belong to the application.
+//
+// # Recovery invariant
+//
+// The approved multi-turn design requires the following invariant at each accepted savepoint:
+//
+//	full batch replay == RunStateSnapshot + accepted tail == accepted logical state
+//
+// Both replay paths must reach the same accepted event sequence position. Gent must retain all
+// custom LoopData, required history, counters, accepted results, operation IDs, and framework
+// continuation and recovery evidence. A RunStateSnapshot is optional replay acceleration; it must
+// never be the only saved copy of custom data or the last completed turn's result. The application
+// stores complete batches through Save; Gent owns coherent state capture, encoding, and replay.
+//
+// This is a design and test constraint for the RunState refactor, not a claim that the new APIs are
+// implemented here. Keep it on Recorder and the future RunState capture/replay APIs. See
+// req-multi-turn.md, decisions D53, D62, D65, D72, D74, and D77.
+//
+// The invariant restores saved logical state, not a Go stack or identical future model output.
+// Custom Next restarts at its entry point on restored data. Its author owns safe repeated local
+// work and new operations. Managed recovery must reuse accepted results for the same operation and
+// completed recovery preparation; it does not undo external effects or cover unmanaged calls.
 type Recorder interface {
 	// Save blocks until the full batch has committed. Return nil only after durable acceptance;
 	// adding the request to an asynchronous queue does not satisfy this contract.

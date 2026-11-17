@@ -37,6 +37,21 @@
 - Do not use error types or error constructors to represent expected states.
 - Use `error` for an unexpected operation failure with no accepted result. Use explicit result
   states for expected conditions that the caller must handle.
+- **Propagate, Fix, Restore, Continue**: propagate unexpected execution errors from Hooks,
+  Loop.Next, output processing, and request construction/validation to the application. This
+  includes invalid requests or unusable native context caused by selected code/configuration.
+  NewTurn/Continue return zero T, nil ExecutionResult, and non-nil error. End the attempt and
+  release its owned resources; do not make a terminal error save or accept broken provisional state.
+  Preserve the unfinished accepted turn, earlier accepted batches, and last completed result. The
+  application can log the error, fix its code/configuration, restore full batches or
+  RunStateSnapshot plus the accepted tail, then call Continue. Do not resubmit an accepted task or
+  automatically retry unchanged failing code. Include as much relevant diagnostic detail as
+  available: the failing stage, component, operation, run/turn/context/call identities, and the
+  failed requirement with known actual/required values. Wrap the original cause so
+  errors.Is/errors.As still work. Preserve available source/stack detail; do not invent it. Cleanup
+  or diagnostic failures must not mask the main error. Keep raw diagnostics in application
+  errors/private records, not model steering. The separate handled-tool, Subscriber, cancellation,
+  storage, and limit contracts still apply. See D103 in [req-multi-turn.md](req-multi-turn.md).
 - A `Tool.Call` or `Tool.Recover` error ends that operation, not the agent run. Send safe steering
   to the model. Keep raw errors and rejected returns in private diagnostic records.
 - Cancellation, storage failures, and run limits retain their separate run-level contracts.
@@ -53,15 +68,44 @@
 - Use RunStateSnapshot for a captured serializable RunState or its encoded form. Use this term in
   discussions, documentation, and related identifiers. It does not introduce another public state
   type. Keep quoted current-code and third-party names accurate when explaining older APIs.
+- Use EventSequenceNumber, PreviousEventSequenceNumber, and LastAppliedEventSequenceNumber for
+  the corresponding ordered event positions. The approved rename must cover code, wire names,
+  trace cursors, tests, documentation, in-code documentation, and Quick Start material together.
+  Keep exact historical and current-code names only when clearly identified as evidence.
 - User recovery guarantee: when an application correctly stores complete SaveBatch values through
   Recorder.Save and follows the documented LoopData and managed-execution contracts, Gent must
   restore the same logical agent state at every accepted savepoint. The application can then use
   Continue, or NewTurn after a completed turn. Full batch replay and a RunStateSnapshot plus its
-  accepted tail must produce the same state, including custom data, resume position, history,
+  accepted tail must produce the same state, including custom data, framework continuation, history,
   counters, accepted output, and tool/recovery evidence. Reuse accepted results and completed
   recovery preparation. Treat this as an implementation and test invariant. This guarantees saved
   logical state and continuation; it does not promise identical future model output or undo external
   effects. Use the managed recovery contract for unfinished external operations.
+- Subagent recovery and ease of use: Gent must give each child agent loop the same recovery
+  guarantees and ease of use as the root loop. A custom AgentLoop must have a managed way to
+  create and run subagent Runners. The application must save and recover that loop through the
+  same root process used for a single loop: Recorder.Save, full batch replay or RunStateSnapshot
+  plus its accepted tail, then Continue or NewTurn as permitted by the root turn state. Gent must
+  restore the subagents, their accepted tasks and results, custom data, and managed recovery
+  evidence. Gent owns their saved relationships, result reuse, and recovery order. Do not require
+  the application to list, replay, or restart subagents separately. Apply the existing LoopData,
+  managed-operation, archive, and external-effect contracts. Prove this with tests that use the
+  same root save/load code for loops with and without subagents. Remove the old child-context
+  feature in the current refactor; defer its replacement until this full contract is supported.
+  See D116 in [req-multi-turn.md](req-multi-turn.md).
+- User archive guarantee: when an application correctly stores complete SaveBatch values through
+  Recorder.Save at approved savepoints and retains the archive, Gent must reconstruct the complete
+  accepted run history in RunView, from the first batch through the last accepted savepoint, without
+  rerunning models, tools, or output processing. Keep readable content, native evidence, original
+  prompts, effective requests, responses, tool results, validation decisions, and compaction changes
+  so the application can inspect what happened. Compaction must not delete archived originals.
+  A compact RunStateSnapshot plus its tail restores execution but cannot replace the earlier archive
+  for full troubleshooting. Unsaved live output and unexposed provider reasoning are outside this
+  guarantee. Treat archive reconstruction as an implementation and test invariant.
+- Keep the recovery invariant in Go documentation on Recorder and on RunState capture/replay APIs
+  when implemented. Custom Next restarts at its entry point on restored data; its author owns safe
+  repeated local work and new operations. Gent does not require custom step enums. Preserve accepted
+  managed results and recovery preparation for the same operation.
 - Teach the Quick Start with short examples that show inputs, calls, and results. Keep setup and
   unrelated application code outside each example. Complete Go files are optional references.
 - Keep public interfaces simple, intuitive, elegant, and quick to understand.

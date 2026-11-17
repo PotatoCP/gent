@@ -4,6 +4,9 @@ Checkpoint behavior is implemented. Its contracts are documented in [history and
 storage](docs/history.md) and [live delivery](docs/native-tools.md). This file keeps only the
 remaining decisions and the context needed to review them.
 
+For child execution scope, follow D116 in [req-multi-turn.md](req-multi-turn.md). The current
+refactor removes that feature. Its future replacement must use the same root recovery process.
+
 The discussion started on 2026-10-29. On 2026-10-30, the user postponed the interface field-name
 review. The API still uses `Run`, `EventNumber`, `RunSchemaVersion`, and a string for
 `RecordedEvent.Type`. The naming and typed-constant decisions below are not implemented. Open
@@ -26,7 +29,7 @@ type already identifies an event. Keep qualifiers where they identify a differen
 Apply the same name to `BaseEvent`, `StreamChunk`, and trace events where they carry this same run
 sequence. Use matching JSON field names, such as `sequenceNumber`, when implementation changes.
 
-The name does not replace the contract: each run has one event sequence shared by all its contexts.
+The name does not replace the contract: each run has one ordered event sequence.
 The first event is 1, each next event adds 1, and the saved sequence has no gaps. An exact save
 retry keeps the same numbers. The saved position advances only after commit. An application that
 subscribes to only some events can observe gaps in this shared sequence because of its filter.
@@ -40,7 +43,7 @@ The rename must preserve recovery from the saved position and discard unsaved pr
 
 The user prefers a clear noun to `Run` for this central concept. Recommend `Execution`, which
 already appears in `ExecutionContext` and `ExecutionResult`. Define one execution as the complete
-agent operation, including its iterations and child contexts. It keeps its identity across worker
+agent operation, including its iterations. It keeps its identity across worker
 replacement and recovery. A worker attempt is only one attempt to continue that execution.
 
 | Term | Assessment |
@@ -80,9 +83,9 @@ Application event names do not require arbitrary values in `RecordedEvent.Type`:
 
 - Framework events use fixed categories such as `model_call_started` and `tool_call_finished`.
 - `CommonEvent` uses `Type = "common"`. It is Gent's generic event struct with a name, description,
-  and data. `PublishCommonEvent` puts its name argument in `EventName`. Applications can call it,
-  but Gent also calls it for child-context creation and completion. Thus `common` does not mean
-  only application events, nor does it mean events used more frequently than other events.
+  and data. `PublishCommonEvent` puts its name argument in `EventName`. Applications can call it
+  to publish data through that generic struct. The category describes the Go event type, not how
+  often the event occurs.
 - `Type = "custom"` is the fallback for an event struct that `recordedEventType` does not recognize.
   An application can define its own struct, embed `BaseEvent`, register its codec, and use
   `ExecutionContext.Publish`. The payload keeps that type. Gent copies `BaseEvent.EventName`

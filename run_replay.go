@@ -10,6 +10,8 @@ import (
 // ApplyBatch reconstructs accepted state without running hooks, models, tools, or live stats.
 // A rejected batch leaves its inputs untouched. Supply the registry for custom content types;
 // codecs must be deterministic local serialization functions. Exact duplicate batches are safe.
+// Replay changes must preserve the accepted-state equivalence documented on [Recorder], including
+// the required RunStateSnapshot-plus-tail path when the RunState refactor is implemented.
 func ApplyBatch(view RunView, batch *SaveBatch, registries ...*CodecRegistry) (RunView, error) {
 	registry := registryOrDefault(registries)
 	owned, err := cloneOwned(registry, batch)

@@ -404,9 +404,11 @@ metadata. Text, media, structured tool results, errors, expiry metadata, and imp
 trip without changes to behavior. Custom content/metadata must have a supported codec mechanism or fail with a clear
 error. Reject unsupported checkpoint versions and invalid references; do not silently omit unknown required state.
 
-If nested executions are supported for continuation, preserve parent/child relationships, aggregate limits, IDs, and
-child state. Otherwise, reject checkpoints containing unsupported active child execution explicitly. State that
-limitation; do not restore only the parent and report successful recovery.
+Child execution is removed from the current refactor under D116 in
+[req-multi-turn.md](../../req-multi-turn.md). Future subagents must have the root's recovery
+guarantees and use the same application root save/load process. Gent must restore their accepted
+state and coordinate recovery. Reject unsupported saved formats; do not report a partial restore
+as a complete recovery.
 
 ## Checkpoint boundaries and interruption semantics
 
@@ -492,7 +494,7 @@ Tests must verify values and subsequent model requests, not only event counts or
 | Full-history reload after lost completion | Reloading an unfinished view after a lost final notification exposes the saved terminal outcome, even when no later event arrives. |
 | Concurrent observers | Observers cannot mutate one another's data; slow live subscribers do not corrupt persistence. |
 | Cancellation and terminal errors | Outstanding accepted events are accounted for; outcome is accurate; restore does not convert failure into success. |
-| Unsupported state | Unknown versions, missing entries, incompatible configuration, and unsupported child/custom state fail explicitly. |
+| Unsupported state | Reject unknown versions, missing entries, and unsupported saved data. |
 | Diff removal | State-change events still reach numbered trace subscriptions. Public event structures, serialized output, trace adapters, examples, and tests no longer expose or compute the removed text `Diff`. |
 
 ## Verification and deliverables
