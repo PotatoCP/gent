@@ -1,10 +1,11 @@
 # Multi-turn execution and RunStateSnapshots
 
-Status: **Design review; implementation not authorized**. Repository APIs were checked on
+Status: **Requirements ready for implementation; no runtime edits authorized here**.
+D143 closes the public stop decision; D142 closes the Hook set. Repository APIs were checked on
 2026-11-16. Compaction, assistant-phase, and prompt-caching documentation was checked on 2026-11-09.
 The owner decides which designs and interfaces become **Locked**. The owner selected one run for
 the complete conversation as the main direction on 2026-11-09. The registers below distinguish
-approved behavior and APIs from remaining drafts. The owner requested no implementation yet.
+approved behavior and APIs from historical drafts. This update records requirements only.
 The proposed additions do not exist in Gent yet; current API excerpts are labelled separately.
 
 **Status rules.** Use these labels throughout review:
@@ -614,8 +615,8 @@ remains Draft.
 The getter performs no model/tool calls, output processing, execution events, or saves. It must work
 after Continue returns and must not hide invalid data or unsupported codecs as absence. The getter
 signature, typed-value behavior, nil semantics, and these retained-result rules are Locked. Private
-field layouts, exact codec checks, and migration details remain Draft. The separate decision about
-when cancellation or a limit completes a turn, and whether that turn can reopen, is unchanged.
+field layouts and exact codec checks are implementation details. D111/D133/D143 settle the
+lifecycle: Stop and limits pause; NewTurn can close/replace an unfinished task.
 
 **Locked final enum review D75, 2026-11-16.** The owner requires a final implementation step to
 review all Gent-owned code in the repository and apply D70 to every enum. This includes existing
@@ -730,6 +731,10 @@ They cannot change accepted facts. Expected tool/output conditions retain their 
 contracts. D73 still documents callback repetition after interruption. These two fields are approved
 members of Hooks, not a complete final list of mutation stages. Other stages, configuration field
 details, and exact failure mappings remain Draft.
+
+**Later Hook approval D142.** The initial Hook set is now complete with these two fields. D103
+settles Hook errors, and D114 settles Config.Hooks. Keep the original D82 approval scope above as
+history; do not treat it as an open request for more callbacks.
 
 **Locked LoopData factory D83, 2026-11-16.** The owner approved Config.NewLoopData func() LoopData.
 It allocates an empty data instance independently of a Task and performs no model/tool calls or
@@ -1230,9 +1235,8 @@ their approved roles. Under D103, a propagated code error returns nil ExecutionR
 additional result status would not describe that error path. Any later public status addition
 needs a concrete caller need that existing contracts cannot express, followed by owner review.
 
-This decision locks the TurnId field and its identity meaning. It does not settle cancellation,
-limit completion, cannot-start field details, or other Draft lifecycle policies. It authorizes
-requirement updates only, not implementation.
+This decision locks TurnId and its identity meaning. D111, D121-D124, D133, and D143 supply the
+complete current lifecycle, result, and Stop contracts. These requirements do not implement them.
 
 **Locked shared retention data D106, 2026-11-16.** The owner approved the data representation in
 side-chat annotation 1 after asking whether it represents retained user messages. It does: use one
@@ -1450,11 +1454,12 @@ the saved unfinished turn and continue it. Keep D69's cannot-start behavior and 
 | Status | Meaning | Normal next action |
 | --- | --- | --- |
 | ExecutionFinished | A completed-turn result was accepted | NewTurn or read the saved result |
-| ExecutionPaused | Execution stopped with the turn unfinished | Adjust limits, Restore, Continue |
+| ExecutionPaused | Execution stopped with the turn unfinished | Continue or NewTurn |
 | ExecutionBusy | Another execution call owns the context | Wait for that call |
 | ExecutionNoActiveTurn | No unfinished turn exists | NewTurn or GetLastTurnResult |
 
-For an accepted limit stop, NewTurn or Continue returns zero T, a non-nil ExecutionResult with
+D143 also uses Paused for a saved user Stop. For an accepted limit stop, NewTurn or Continue
+returns zero T, a non-nil ExecutionResult with
 Status = ExecutionPaused and TerminationReason = TerminationLimitExceeded, and nil error. Keep the
 same TurnId. The ExceededLimit field carries the limit details; this approval does not finalize
 F01's separate proposed LimitExceeded struct or the remaining ExecutionResult field layout.
@@ -1489,10 +1494,9 @@ now leaves an unfinished turn; reopening a completed turn is not the mechanism. 
 of an additional TurnStatus remains in effect. Earlier conflicting declarations, comments, and
 examples below are historical for these points, not implementation instructions.
 
-Other F01-F10 proposals remain Draft. This approval does not settle explicit cancellation, context
-reuse/release details, limit scope/gauge APIs, or the other proposed result fields. Internal phase
-names and encoding must implement the approved resumable boundary without changing the existing
-managed recovery and accepted-output guarantees. Implementation is not authorized by this lock.
+D117, D121-D124, and D143 settle statistics, reuse/release, result fields, and Stop. Internal
+phase names and encoding must implement the approved resumable boundary without changing managed
+recovery or accepted-output guarantees. Implementation is not authorized by this document edit.
 
 Extend D63's future verification to cover a limit stop, restart, and Continue after increasing the
 limit through both replay paths. Verify stable TurnId/task and counters, no replacement of the last
@@ -1900,8 +1904,8 @@ runtime implementation, Go suite, or provider call was performed.
 **Side-review approvals D121-D125, 2026-11-17.** The owner approved items 2-5 of the cancellation
 and execution-lifetime review. Its item 6 originally requested an explanation of SavedError reuse;
 D134 now locks that reuse. Item 7 clarifies late Stop behavior. D133 later locks NewTurn on idle
-unfinished state. The public stop-surface choice remains separate from these approvals. No
-implementation is authorized by this review.
+unfinished state. D143 now settles Stop as the single public pause control. No runtime
+implementation is authorized by these requirement updates.
 
 **Locked reusable execution context D121.** Keep ExecutionContext reusable after accepted turn
 completion while its owner context is alive. This includes success, refusal, and accepted
@@ -1911,7 +1915,7 @@ was accepted. Join attempt-owned producers, streams, and workers before the exec
 Keep configured tool/model/recorder services and conversation state across turns; turn completion
 does not destroy those services. Their own ownership and concurrency contracts still apply.
 
-An accepted limit pause can reuse the context, but Continue rechecks the same configured limits
+An accepted Stop or limit pause can reuse the context. Continue rechecks configured limits
 and accepted usage. A fresh attempt does not grant another allowance. Changed Runner configuration
 still requires a new Runner and restoration under D33/D34. Unexpected execution errors, worker
 interruption, and failed or uncertain saves require accepted-state restoration before execution;
@@ -1921,7 +1925,7 @@ cannot execute again. Apply the existing cannot-start checks before allocating a
 During managed work, execCtx.Context() supplies the current attempt's Go context. Do not cache it
 across turns. An old canceled Go context stays canceled. Preserve accepted RunId/TurnId/counters
 under their existing contracts; NewTurn resets only its approved turn-scoped state. This locks
-resource separation and reuse, not the still-reviewed public stop methods.
+resource separation and reuse. D143 defines Stop without adding another public stop method.
 
 **Locked final runtime cleanup D122.** Keep the existing signature:
 
@@ -1937,11 +1941,12 @@ conversation handle after each accepted answer. The application normally defers 
 
 Release can block while cooperative callbacks finish. Call it from the owner, not synchronously
 from a Hook, tool, or Subscriber callback whose completion it must wait for. A callback can request
-a stop through the selected nonblocking mechanism. Removing a public Interrupt method would not
-remove the internal interruption used by Release. Disposal does not decide task completion.
+a pause through Stop without waiting on its own completion. D143 removes public Interrupt;
+Release retains internal interruption. Disposal does not decide task completion.
 
-**Locked execution-result declaration D123.** Use this flat result and termination-reason set.
-Status and TurnId keep their existing meanings. The remaining field declarations are now Locked:
+**Locked execution-result declaration D123, extended by D143.** Use this flat result and
+termination-reason set. D143 adds the user Stop reason; TerminationCanceled still means completed
+task closure. Status, TurnId, and the result fields retain their approved meanings:
 
 ```go
 type ExecutionResult struct {
@@ -1963,8 +1968,11 @@ const (
     // TerminationRefused means the turn completed with a provider refusal.
     TerminationRefused TerminationReason = "refused"
 
-    // TerminationCanceled means explicit cancellation completed the turn.
+    // TerminationCanceled means the unfinished turn was closed, such as by NewTurn.
     TerminationCanceled TerminationReason = "canceled"
+
+    // TerminationStopped means Stop paused the turn without completing it.
+    TerminationStopped TerminationReason = "stopped"
 
     // TerminationLimitExceeded means a limit paused the unfinished turn.
     TerminationLimitExceeded TerminationReason = "limit_exceeded"
@@ -1981,11 +1989,10 @@ result contract. Unexpected execution failures use the returned error under D103
 TerminationContextCanceled to TerminationCanceled; parent-context interruption does not itself
 create that completed outcome. An accepted completed cancellation has nil returned error.
 
-This approval fixes the representation and meaning of an accepted canceled outcome. It does not
-approve the separate item 1 CancelTurn/Interrupt API or require every stop request to create that
-outcome. CancellationCause's *SavedError type is approved here, and D134 locks SaveError conversion
-and ordinary saved-result encoding. Public stop-method defaults follow that method's own contract.
-D111's paused-limit contract remains; D133 extends admission and updates D74 for replaced turns.
+D143 keeps completed cancellation separate from a user pause. Stop returns Paused/Stopped after
+its recoverable save; NewTurn can close a replaced unfinished task as Finished/Canceled under
+D133. Neither outcome requires a public CancelTurn method. D134 keeps SaveError conversion and
+normal replay for CancellationCause when a completed canceled result contains diagnostics.
 
 **Locked actual limit measurement D124.** Use the existing limit-event terminology:
 
@@ -2005,10 +2012,9 @@ proposal and match the current LimitExceededEvent terminology. The float64 value
 limit measurement; use the integer counter APIs for exact accounting. D117's threshold and scope
 rules remain unchanged.
 
-**Locked conditional cancellation name D125.** The owner agrees that if Gent exposes the existing
-CancelRun operation in the new API, its name must be CancelTurn. This locks the name, not a final
-signature, the choice to keep Interrupt, or the completion/pause meaning of a user Stop command.
-The conversation's RunId remains available for later tasks.
+**D125 superseded by D143.** The conditional CancelTurn naming decision is withdrawn. Use Stop
+for a resumable pause. Do not expose CancelTurn, CancelRun, or a second public Interrupt operation
+in the target API. Task replacement already uses NewTurn under D133.
 
 **SavedError explanation — reuse now Locked D134.** SavedError is an existing
 Gent type, not another cancellation mechanism already approved elsewhere. It stores Message,
@@ -2019,7 +2025,7 @@ terminal outcomes for unexpected code failures in the target design.
 
 D134 approves calling SaveError when Gent creates the accepted result's CancellationCause, then
 using normal framework encoding and replay. It adds no second serializer and does not require the
-application to encode causes itself. Public stop-method defaults follow that method's own contract.
+application to encode causes itself. Stop has no caller-supplied cancellation cause under D143.
 Status/TerminationReason select control flow; the saved cause supplies diagnostics without automatic
 model-prompt or chat-content publication.
 
@@ -2029,24 +2035,15 @@ an arbitrary private Go error type does not reappear merely because its message 
 codec can preserve supported custom fields when explicitly used. D123's field type is not a promise
 to recreate arbitrary concrete error types in CancellationCause.
 
-**Late Stop clarification — owner intent and existing save invariant.** The owner accepts that
-Stop can arrive after an answer has been accepted and saved. Such a stop request can be satisfied
-because work has already ended. Keep the accepted success result; do not relabel it Canceled,
-rewrite its SaveBatch, or promise that Stop always prevents a final answer. Request satisfaction
-and the saved turn outcome are different facts. A late request for one turn must not carry a
-cancellation flag into the next turn. Remote UI targeting still needs an agreed turn-identity rule.
-The save-consistency requirement is already covered by D53/D65. This clarification does not approve
-all of item 7's separate cleanup and cancellation-timing proposals.
+**Late Stop and accepted results — D143.** A saved completion remains unchanged if Stop arrives
+after it. Do not relabel accepted success as stopped or canceled, rewrite a SaveBatch, or carry a
+stop flag into the next attempt. The method selects current active work when it is called; remote
+applications must discard stale turn-targeted commands through their serialized run controls.
+D143 defines the same rule for a terminal save already in progress.
 
-**Revised stop and input direction — stop surface Draft; input extension Locked D133.**
-The physical stop mechanism can be shared. The older proposal used CancelTurn for completed task
-cancellation and Interrupt for recoverable worker interruption. Two public methods are not required
-to express that distinction. The current recommendation is to remove public Interrupt, keep
-CancelTurn for intentional task cancellation, and use Go context cancellation/deadline or Release
-for recoverable worker interruption. Keep the locked resource and error contracts above. A single
-user Stop that returns Paused and permits Continue is also possible, but would require an explicit
-change to the newly approved TerminationCanceled meaning if that reason were used for the pause.
-No stop-surface simplification is locked by this question.
+**Stop and new input — Locked D143/D133.** Stop pauses the unfinished task. Continue resumes it;
+NewTurn can replace it with explicit new input. These operations share the existing recovery and
+save mechanisms. Do not add a separate permanent-cancellation or public worker-interruption API.
 
 D133 now permits NewTurn on an idle unfinished context. Prepare required managed recovery and
 preserve prior task/effect evidence, then accept old-turn closure and new-task admission/reset
@@ -2064,10 +2061,9 @@ Do not silently turn NewTurn into steering based only on whether execution happe
 D28 still defers implementation of live steering; the owner has asked about the design, not yet
 approved its implementation or a queue/receipt API.
 
-**Review scope after D121-D125, updated by D133/D134.** Context reuse, Release, result and limit
-details, flexible NewTurn, and SavedError reuse are approved. Public stop methods remain under
-review; live steering stays deferred. Older readiness lists and F01 text are historical where these
-approvals supersede them. Other independently open items keep their own status.
+**Review scope after D121-D125, updated by D133/D134/D143.** Context reuse, Release, result and
+limit details, flexible NewTurn, saved diagnostics, and Stop are settled. Live steering remains
+deferred. The former CancelTurn/Interrupt choice is superseded; do not reopen it as a prerequisite.
 
 **Locked replay-constructor identity validation D126, 2026-11-17.** The owner approved the
 empty-ID proposal with "Okay please lock this in then." NewRunState and NewRunView accept an empty
@@ -2357,9 +2353,8 @@ checks, not claims that the unimplemented interfaces have already passed runtime
 
 **Review scope after D127-D132.** The Subscriber data, delivery, envelope, and UI requirements are
 now Locked. Older F04/R02 declarations and readiness lists are historical where they differ.
-This approval does not settle the separate Hook-set completeness proposal, assistant-content
-containers or the ongoing lifecycle/stop discussion after D121-D125. D126 closes the separate
-constructor edge case and remains unchanged.
+D135-D141 separately settle content containers, D142 completes the Hook set, and D143 settles
+Stop. D126 closes the constructor edge case. None of those choices remains a Subscriber blocker.
 
 **Locked flexible NewTurn admission D133, 2026-11-17.** The owner approved NewTurn on an idle
 unfinished turn and requested removal or revision of the superseded restrictions. Users can stop
@@ -2434,8 +2429,8 @@ Keep message text, supported codes, and nested causes. Do not promise reconstruc
 private Go error types from a message. Status and TerminationReason select control flow; the saved
 cause supplies diagnostics. Do not automatically insert it into model prompts or answer content.
 Unexpected execution errors still follow D103 and do not become accepted canceled outcomes. The
-public stop method and its nil-input normalization remain part of that method's separate contract;
-this approval does not select a new stop signature or preserve a redundant Interrupt method.
+public Stop method has no cause argument under D143. This saved diagnostic field does not
+require another public cancellation method or a second serialization path.
 
 **Future steering clarification after D133 — implementation remains deferred.** The owner's
 observation is correct: reusable execution contexts and ordered saved input provide useful shared
@@ -2454,10 +2449,9 @@ remains. Check changed-line lengths, Markdown fences, decision IDs, and reposito
 are document checks, not runtime verification of the proposed APIs. No Go suite or runtime code
 change is part of this approval update.
 
-**Current review scope after D133/D134.** Flexible NewTurn admission and cancellation serialization
-are settled. The remaining stop-surface choice and other independently open interfaces keep their
-own status. The D120 readiness audit below is historical where these and other later approvals
-close its listed gaps. No runtime implementation is authorized by this requirements update.
+**Current review scope after D133/D134/D143.** Flexible NewTurn admission, saved cancellation
+causes, and Stop are settled. Earlier readiness lists are superseded. This requirements update
+contains no runtime implementation and does not add live steering.
 
 **Side-review content approvals D135-D141, 2026-11-17.** The owner approved all six proposals in
 this side conversation. The owner then approved the event rename and changed the preferred name
@@ -2662,9 +2656,9 @@ contract and the Locked AssistantContentFinalAnswer value.
 
 **Content integration and verification scope.** D135-D141 complete F05's container, view, constant,
 helper, stream-payload, and event-name decisions. They supersede F05's value receiver, separate
-MetaContent channel, and remaining Draft labels for those exact scopes. Hook-set completeness and
-the public stop-surface review retain their own status. Do not reopen D121-D134 or add new
-cancellation, Subscriber, configuration, or execution-result choices here.
+MetaContent channel, and remaining Draft labels for those exact scopes. D142 and D143 separately
+close the Hook set and Stop. Do not reopen settled cancellation, Subscriber, configuration, or
+execution-result choices through an older review label.
 
 Extend D63/D100 implementation checks with mixed ordered items, text/media groups, invalid nesting,
 candidate source validation, empty selection, tool completion checks, and read-only derived views.
@@ -2674,56 +2668,171 @@ request items. Verify metadata survives outside StreamChunk, provider errors use
 operation error contract, and UI consumers distinguish deltas from complete accepted output.
 These are future implementation checks, not runtime results from this requirements-only update.
 
-**Implementation readiness after D120, 2026-11-17 — assessment, not approval.** The owner asked
-which unapproved details remain and whether implementation can start. The core architecture is
-settled enough to plan and implement its approved parts. The complete refactor does not yet have a
-fully approved public contract. This assessment does not authorize implementation or lock new APIs.
-Use the latest decisions below, not the stale Draft labels in older registers and review history.
+**Locked complete initial Hook set D142, 2026-11-17.** The owner approved the two-callback
+proposal and asked to lock it in. The following declaration is the complete Hooks type for this
+refactor. D82 already approved the fields; this decision closes the initial set and its scope.
 
-The remaining public review is limited to these groups:
+```go
+type Hooks struct {
+    BeforeModelCall func(ctx context.Context, event *BeforeModelCallEvent) error
+    BeforeToolCall  func(ctx context.Context, event *BeforeToolCallEvent) error
+}
+```
 
-1. **Cancellation, context lifetime, and result details — F01, limited by D111.** Decide the
-   proposed CancelTurn method and how explicit turn cancellation differs from parent-context
-   cancellation or Interrupt. Finish context reuse and Release behavior after completed, paused,
-   interrupted, or failed attempts. Finish the remaining ExecutionResult fields, LimitExceeded
-   layout, cancellation diagnostics, and TerminationReason cleanup. Status, TurnId, resumable
-   limit stops, cannot-start results, and D103 failures are already Locked. Do not restore F01's
-   superseded terminal-limit example or add TurnStatus.
-2. **Subscriber data and delivery settings — F04, limited by D80/D91/D114.** Finish SubscriberStop,
-   SubscriberStopReason, SubscriberDelivery constants, DeliveryConfig fields/defaults, and the
-   RecordedEvent envelope and payload layout. Review callback timeout coverage, normal queue drain,
-   and delivery cursor semantics. OnEvent, OnStop, the registration shape, ordered bounded delivery,
-   failure isolation, and waiting for an active OnEvent before OnStop are already Locked. These
-   remaining declarations affect a real UI consumer. RecordingConfig is a separate, already Locked
-   persistence allowance; its approval does not approve Subscriber buffer settings. The two
-   before-call Hooks are approved. F04's proposal to make those two the complete initial Hook set
-   remains Draft, but no additional Hook is required by the locked design.
-3. **Assistant-content containers — closed by D135-D141.** AssistantContent, StreamChunk,
-   ContentChoice, derived candidate/tool views, constant names, and the filtering helper are Locked.
-   D138 places metadata on the event envelope and errors on the existing operation path. D141
-   selects accepted_answer as the publication event. Keep D113's save barrier and native handling.
-   This item no longer needs review; the older F05 declarations are historical where they differ.
-4. **Constructor edge case — closed by D126.** NewRunState and NewRunView allow an empty RunId
-   without a panic. Apply rejects an empty target ID, empty batch ID, or mismatch with ApplyInvalid
-   and detailed text. Restore and decode use their existing Invalid results. No identity is
-   generated or inferred. This item no longer needs review.
+Both callback fields are optional. A nil callback means no Hook at that stage. Config.Hooks remains
+*Hooks under D114; nil means no Hooks. Keep one callback per stage. Applications compose several
+transformations inside that callback in an explicit order and return the first failure. Do not add
+an ordered Hook registry, a generic middleware API, or a mutation callback for each observed event.
 
-These are not additional prerequisites for owner review:
+Use the existing extension contracts for their separate responsibilities:
 
-- RunState's private fields, encoded layout, receipt indexes, package layout, and allocation
-  mechanics are implementation choices under D78/D79/D119 and the recovery/archive guarantees.
-- Replay/load/restore results, archive Apply, statistics/limits, shared Config, Task instructions,
-  LoopData/reset/factory signatures, compaction/retention behavior, and child removal are settled.
-- An extra session wrapper, admission call, public migration API, custom executor, native-reset
-  API, custom-data setter, field-scope registry, or extra Hook is not required to start this work.
-- Future subagents and the chat example keep their separately approved follow-up scope. They do
-  not require more interfaces in the current refactor.
+| Requirement | Extension |
+| --- | --- |
+| Add temporary model-request context | BeforeModelCall |
+| Normalize effective tool arguments | BeforeToolCall |
+| Display progress or record metrics and results | Subscriber |
+| Validate a proposed final answer | OutputCustomValidator |
+| Process or transform a proposed answer | Output.Process |
+| Change iteration logic or persistent custom state | Loop.Next |
+| Reset custom turn state | LoopData.ResetTurn |
 
-Readiness conclusion: the approved core can support an implementation plan. Before treating the
-whole refactor as ready to implement without further public design choices, finish the remaining
-contracts in the groups above, subject to later approvals. D126 closes the constructor rule. The
-next review should apply D111 and D113 to the older F01/F05 examples. Do not request another blanket
-approval of the already Locked decisions. No runtime code or test suite is part of this audit.
+Keep the following execution rules:
+
+- Run the Hook synchronously before the dependent operation and before freezing its effective
+  input. Validate the effective input after the Hook. Capture evidence under the existing D54/D61
+  savepoint schedule; the Hook does not add a model-response savepoint or weaken a save barrier.
+- Limit Hook mutation to the effective model request or tool arguments. Do not change operation
+  identities, the accepted task/history, or earlier saved evidence. After return, the callback
+  must not retain mutable access and change input that Gent now owns.
+- Apply D103 to a Hook error: prevent the dependent action, return the error to the application,
+  and preserve accepted state for restoration. Do not convert that error into ordinary model
+  steering or accept a terminal error result. Expected tool denial belongs in the tool's explicit
+  response, such as ToolBlocked. Keep the handled Tool.Call/Recover error contract separate.
+- Preserve D73's repeat-safety rule. A Hook can run again after interruption of unfinished work;
+  it has no exactly-once guarantee. Shared callbacks must support concurrent runs. Keep mutable
+  state in its proper scope. Use managed tools for external actions that need managed recovery.
+
+For example, BeforeModelCall can add current account information to the effective request while
+keeping the saved Task unchanged. BeforeToolCall can normalize a path before the tool receives it.
+Record the resulting effective inputs so accepted history shows what the operations received.
+
+The tradeoff is a smaller, clear mutation API with less lifecycle customization through callbacks.
+Persistent changes currently made from lifecycle subscribers must move into Loop.Next or a loop
+wrapper and checkpointed LoopData. The existing integration-test PolicySuggestionHook inserts
+persistent history from OnBeforeIteration; move that step and its completion flag into the loop's
+saved state during implementation. Request-only suggestions can use BeforeModelCall instead.
+Do not keep a mutable lifecycle Subscriber as a second way to change execution state.
+
+Additional before/after lifecycle, response, compaction, and output Hooks are outside this initial
+set. Observation uses Subscriber; behavior stays with the existing Loop, Tool, and Output contracts.
+A later concrete use case can justify another mutation stage, with its ownership, validation,
+interruption, and replay contract reviewed together. This decision does not forbid future growth.
+
+Update API documentation, migration examples, and Quick Start material to explain these roles,
+optional fields, explicit composition, read-only observation, repeat safety, and D103 failures.
+Extend D63 with omitted callbacks, effective-input capture and validation, no dependent action
+on Hook failure, preserved accepted state, and repeated callbacks after interruption. Verify both
+replay paths without introducing a new savepoint or rerunning accepted external effects.
+
+D142 supersedes the Hook-set Draft labels in F04/R03, I28, and earlier readiness assessments. The
+Subscriber/content/constructor approvals remain unchanged. D143 separately settles Stop. Neither
+decision adds live steering or authorizes runtime implementation in this documentation edit.
+
+**Locked single public Stop control D143, 2026-11-17.** The owner reaffirmed that Stop pauses
+execution and that the caller can then use Continue or NewTurn. The owner rejected the additional
+CancelTurn operation and requested removal of the superseded decisions and discussions. This is
+the current stop contract, not a new open question for the main implementation thread.
+
+```go
+// Stop requests a pause of the current active execution attempt without completing its turn.
+func (execCtx *ExecutionContext) Stop()
+```
+
+Stop is the one public operation for an intentional pause. Remove the existing public CancelRun
+and Interrupt methods in the refactor; do not introduce CancelTurn or keep compatibility aliases.
+Keep Go context cancellation/deadlines for worker interruption and Release for final cleanup.
+Release remains the already approved method under D122, not another way to complete a task.
+
+| Operation | Meaning | Next step |
+| --- | --- | --- |
+| Stop | Pause active work; keep the accepted task unfinished | Continue or NewTurn |
+| Continue | Resume that task with its TurnId and usage | Ordinary execution |
+| NewTurn | Close/replace an idle unfinished task and admit new input | Execute the new task |
+| Release | Dispose of the runtime handle; do not complete its task | Restore to execute |
+
+Stop is a concurrent-safe, nonblocking, idempotent request. It does not invoke the Loop or create a
+second execution worker. The running NewTurn or Continue call owns cleanup, managed evidence, and
+the recoverable pause save. Stop has no cause argument, completion result, or separate receipt.
+The running execution call supplies the actual result after its owned work has ended.
+
+On a successful user pause, return zero T, a non-nil ExecutionResult with Status = ExecutionPaused,
+TerminationReason = TerminationStopped, and nil error. Add TerminationStopped = "stopped" to the
+existing TerminationReason enum as shown in D123. Keep TerminationLimitExceeded for a limit pause.
+Keep TerminationCanceled for completed task closure, including NewTurn replacing an unfinished
+turn. Do not return Finished/Canceled from Stop or redefine a paused turn as a completed turn.
+This adds a reason to the existing result, not another lifecycle enum or a second result interface.
+
+Preserve the RunId, TurnId, accepted task, context/history, LoopData, counter baselines, counters,
+and managed-operation/recovery evidence. Stop does not call ResetTurn, grant a fresh allowance,
+erase prior work, or replace the last completed result. Accept a recoverable pause at the control
+boundary used for stopped execution; both replay paths must restore the same logical state.
+Publish no accepted answer merely because the pause completed. Continue clears the old attempt's
+stop request, creates fresh attempt resources, and resumes the same task under its existing limits.
+An accepted clean pause permits direct handle reuse under D121. D133 governs NewTurn replacement.
+
+Stop selects the active attempt atomically when called. If there is no active attempt, including
+fresh, paused, or completed state, it does nothing and must not affect a future attempt. Do not
+cancel an idle task or require Stop followed by Continue merely to save a cancellation. A remote
+UI command must be routed to its intended run/turn by the application. Serialize that validation
+with application admission of new work and discard stale commands; a no-argument Stop cannot infer
+an earlier UI target. Gent must never transfer a selected attempt's stop request to another one.
+This routing rule does not add a public CancelTurn or an unreviewed request/receipt interface.
+
+Stop prevents admission of more ordinary model/tool work and signals cancellation to in-flight
+work. Join owned producers, streams, and delivery workers under D121/D129. Keep truthful tool and
+native-context evidence. External effects are not undone. Preserve unfinished operations for the
+managed recovery path; never mark them successful merely to finish a pause. A callback can call
+Stop without waiting on itself; callbacks and providers must still cooperate with cancellation.
+
+A Stop request does not prove persistence. Return Paused only after the pause save succeeds. A
+failed or uncertain save retains the storage-error and reconciliation contract; unexpected code
+failures retain D103. Restore accepted state before execution when the handle became unusable.
+An unsaved stop request can be lost after a process failure; accepted history remains the authority.
+
+If a terminal save was already fixed and submitted, it can win the race with Stop. Preserve any
+accepted completion; do not rewrite that batch or substitute a stopped result. A completed turn
+remains completed. NewTurn still reports Busy until the previous execution call releases ownership,
+including its cleanup. Applications wait for that call before Continue or NewTurn.
+
+Extend D63 verification with Stop during model/tool work, repeated Stop, Stop on idle state,
+Stop racing with a terminal save, cleanup failure, and failed/uncertain pause saves. Verify direct
+reuse after an accepted pause, full replay and RunStateSnapshot plus tail, stable task identity,
+no reset of turn/run usage, preserved last completion, managed recovery reuse, and no accepted
+answer on pause. Verify the next attempt does not inherit a previous stop request and the example
+UI rejects stale commands. Apply the API removal and new reason consistently to code, codecs,
+tests, comments, guides, and Quick Start during implementation. No runtime change is made here.
+
+**Current implementation readiness after D143, 2026-11-17 — assessment.** The public contracts
+identified in the earlier readiness reviews are now settled. D143 closes the stop choice and D142
+closes the complete initial Hook set. The requirements are ready for implementation; do not ask
+again whether to add CancelTurn, keep public Interrupt, or make Stop complete a task.
+
+| Earlier gap | Current decision |
+| --- | --- |
+| Context reuse, Release, result fields, and limit details | Locked D121-D124/D143 |
+| Cancellation cause conversion and persistence | Locked D134 |
+| Empty-ID constructor behavior | Locked D126 |
+| Subscriber data, delivery, buffers, shutdown, and UI use | Locked D127-D132 |
+| Content containers, views, stream payload, and helpers | Locked D135-D140 |
+| Accepted publication event name | Locked D141; accepted_answer |
+| Complete initial Hook set | Locked D142; two before-call callbacks |
+| Public stop control | Locked D143; Stop pauses, Continue resumes, NewTurn replaces |
+
+Use Finished, Paused, Busy, and NoActiveTurn. D133 removes ExecutionNeedsContinue and permits a new
+task on idle unfinished state. Private state fields, encoding/index details, package arrangement,
+and test implementation are implementer choices under the locked guarantees. Future live steering,
+replacement subagents, and the chat example retain their deferred or follow-up scope. This update
+records approval and removes stale review blockers; it does not authorize runtime implementation.
 
 **Historical protection and failure notes.** The following timing alternatives and protected-input
 error proposal predate D110. They are retained as discussion history. D110 closes those questions
@@ -3017,7 +3126,7 @@ change its presentation was raised as a question. No approval to rewrite answer 
 | D122 | Release performs final runtime cleanup without task completion | Locked |
 | D123 | Flat ExecutionResult and termination reasons; no result Error | Locked |
 | D124 | LimitExceeded with effective rule, MatchedKey, and CurrentValue | Locked |
-| D125 | Use CancelTurn if the CancelRun operation is exposed | Locked name only |
+| D125 | Conditional cancellation naming withdrawn; use Stop | Superseded D143 |
 | D126 | Empty replay IDs do not panic; validate on Apply, Restore, and decode | Locked |
 | D127 | Subscriber delivery enums, defaults, and consumer documentation | Locked |
 | D128 | Subscriber queue fields, defaults, and active-event accounting | Locked |
@@ -3034,10 +3143,12 @@ change its presentation was raised as a question. No approval to rewrite answer 
 | D139 | Complete assistant-content constants and unknown/late classifications | Locked |
 | D140 | One AssistantParts filter; read-only views and stable source identities | Locked |
 | D141 | Use accepted_answer for the saved accepted-answer publication event | Locked |
+| D142 | Complete initial Hook set; optional callbacks and explicit mutation boundaries | Locked |
+| D143 | One public Stop; saved resumable pause; no CancelTurn or public Interrupt | Locked |
 
 **Current Subscriber approval D127-D132.** Subscriber data and delivery are now Locked, including
 Go documentation for read-only values and the exact deduplication keys. Use the total drain deadline
-and shutdown-error rules above. F04's separate Hook-set completeness proposal remains Draft.
+and shutdown-error rules above. D142 separately locks F04's complete initial Hook set.
 These changes preserve the lifecycle review and approvals under D121-D125 and the D126 ID rules.
 
 **Current annotation approvals D117-D120.** F02's statistics and scope API, F09's archive API,
@@ -3132,7 +3243,7 @@ Session APIs need reassessment under D05, not automatic implementation.
 | I25 | `executor.NewRunner` | Loop plus pointer to gent.Config | Locked D37 |
 | I26 | Explicit custom-data update/commit API | Existing checkpoint versus update helper | Draft |
 | I27 | Original event consolidation | Separate UI feed and observer | Superseded by I29 |
-| I28 | Hooks | Two typed callbacks; full stage list still open | Locked D55/D82 scope |
+| I28 | Hooks | Complete initial set: BeforeModelCall and BeforeToolCall | Locked D82/D103/D142 |
 | I29 | Subscriber | Methods, registration, delivery data, and UI rules | Locked D80/D91/D127-D132 |
 | I30 | GetLastTurnResult | Typed tuple; nil result when absent; read accepted state | Locked D74 |
 | I31 | Config.NewLoopData | func() LoopData; pure task-independent allocation | Locked D83 |
@@ -3148,11 +3259,11 @@ Session APIs need reassessment under D05, not automatic implementation.
 | I41 | StreamChunk | Content and SourceMessageIds; metadata outside payload | Locked D138 |
 | I42 | AssistantContentType | Six constants; unknown/late classifications | Locked D139 |
 | I43 | AssistantParts | One type filter; borrowed read-only parts | Locked D140 |
+| I44 | ExecutionContext.Stop | Pause active work; then Continue or NewTurn | Locked D143 |
 
-**Interface closure review, updated 2026-11-17 — approval scope per item.** The owner requested
-concrete interfaces, examples, and tradeoffs, then approved the scopes recorded in D111-D114 and
-D116-D120. Only those scopes are Locked. Remaining declarations retain their Draft status; approval
-of one item does not approve adjacent alternatives. No runtime implementation is authorized.
+**Interface closure review, updated through D143 — approval scope per item.** The owner approved
+the current scopes shown below. Later decision declarations replace superseded review examples.
+The stop and Hook questions are closed. No runtime implementation is authorized by this edit.
 
 Use the approval records with their explicit later overrides. In particular, D111 makes limits
 resumable, D112 uses Detail, D113 unifies Content and distinguishes candidate/accepted answers,
@@ -3161,10 +3272,10 @@ from the nine annotations. The older R01-R10 sketches remain discussion history.
 
 | Review item | Approval scope |
 | --- | --- |
-| F01 | Turn completion, cancellation, result fields, and context lifetime |
+| F01 | Stop/continuation, result fields, and lifetime — Locked D111/D121-D124/D133/D143 |
 | F02 | Counter scope, gauges, limits, and deadline scope — Locked D117 |
 | F03 | Replay construction and complete expected-result declarations — Locked D112 |
-| F04 | Subscriber data/delivery — Locked D127-D132; Hook-set completeness Draft |
+| F04 | Subscriber data/delivery — Locked D127-D132; complete Hook set — Locked D142 |
 | F05 | Content containers/views/helpers and accepted_answer — Locked D113/D135-D141 |
 | F06 | Complete Config shape and bounded recording behavior — Locked D114 |
 | F07 | Remove child contexts; future root recovery contract — Locked D116 |
@@ -3172,131 +3283,35 @@ from the nine annotations. The older R01-R10 sketches remain discussion history.
 | F09 | Archive API and shared replay rules — Locked D118; caller details scoped below |
 | F10 | Selected scope limits — Locked D119; other approvals remain separately scoped |
 
-**Later approval D111.** The limit-completion rows, example, and TerminationLimitExceeded comment
-in the following F01/F02 drafts are superseded. An accepted limit stop returns ExecutionPaused and
-leaves the same turn available to restored Continue. D117 now locks F02's measurement rules;
-remaining F01 lifecycle/resource declarations keep their separate Draft status.
-
-**Later side-review approvals D121-D125.** The reusable-context and Release contracts, complete
-ExecutionResult/TerminationReason declaration, and LimitExceeded details are now Locked above.
-Use MatchedKey/CurrentValue, not the older Key/Value proposal below. CancelTurn is the approved name
-if that operation is exposed; its stop semantics and the need for public Interrupt remain under
-review. NewTurn on idle unfinished state is Locked D133; SavedError reuse is Locked D134. Earlier
-F01 declarations remain review history where later approvals differ. Remaining stop proposals are
-not approved merely because the result and admission interfaces are settled.
-
-**F01 — Draft: completed turns remain completed; attempts have separate resources.** Keep all
-approved Runner signatures. NewTurn and Continue are synchronous. An accepted terminal save ends
-a turn. Success, refusal, explicit cancellation, and a reached execution limit complete that turn.
-A later task uses NewTurn in the same RunId. Raising a limit does not reopen an accepted terminal
-turn. Worker interruption and D103 code/configuration failures leave the accepted turn unfinished.
+**F01 — Locked execution lifecycle and Stop.** Use the complete result declaration in D123/D143
+and LimitExceeded in D124; do not maintain a second copy with older fields or reason meanings.
+D111 defines limit pauses, D121/D122 define resource reuse and release, D133 defines new input, and
+D143 defines the one public Stop method. The former permanent-cancellation API proposal is removed.
 
 | Return case | T | ExecutionResult | error | Caller action |
 | --- | --- | --- | --- | --- |
-| Accepted successful terminal save | Saved value | Finished / Success | nil | Read or NewTurn |
-| Accepted refusal, cancellation, or limit | Zero | Finished / reason | nil | Read or NewTurn |
+| Accepted successful completion | Saved value | Finished / Success | nil | Read or NewTurn |
+| Accepted refusal | Zero | Finished / Refused | nil | Read or NewTurn |
+| Accepted user Stop | Zero | Paused / Stopped | nil | Continue or NewTurn |
+| Accepted execution-limit pause | Zero | Paused / LimitExceeded | nil | Continue or NewTurn |
 | Busy / NoActiveTurn | Zero | Approved call status | nil | Handle that status |
-| Parent cancellation or Interrupt | Zero | nil | Cancellation cause | Restore, Continue |
+| Owner/process interruption | Zero | nil | Cause | Restore accepted state |
 | D103 failure | Zero | nil | Wrapped cause | Fix, Restore, Continue |
 | Failed or uncertain Save | Zero | nil | Storage failure | Reconcile, Restore |
 
-The nil error for an accepted cancellation/limit is an explicit proposed change from current Gent,
-which can return both a terminal result and an error. It makes accepted expected outcomes visible
-in the result. It does not change D69's already approved cannot-start returns or D103's exceptional
-return. When a save has an uncertain outcome, storage determines whether a terminal result exists.
-Do not publish a candidate or assume a task is unaccepted solely because the local call failed.
+A limit must permit the dependent work before Continue can proceed. Stop never resets usage. A
+new task resets only its approved turn state; run limits remain. A terminal save already in progress
+can win a Stop race; preserve the accepted result. NewTurn returns Busy until the old attempt ends.
 
-Propose this complete result shape. Status and TurnId are already Locked; the cleanup of existing
-Error/ExceededLimit fields and cancellation detail is Draft:
+On idle unfinished state, NewTurn accepts old-task closure and new input/reset atomically after
+required managed recovery. The old task's Finished/Canceled result is retained under D74/D133; the
+call returns the new task's result. A pause alone preserves the previous completed result.
+GetLastTurnResult never treats a paused turn as completed or reruns output processing.
 
-```go
-type ExecutionResult struct {
-    Status            ExecutionStatus
-    TurnId            string
-    TerminationReason TerminationReason
-    Output            []ContentPart
-    Refusal           *ModelRefusal
-    ExceededLimit     *LimitExceeded
-    CancellationCause *SavedError
-}
-
-type LimitExceeded struct {
-    Limit *Limit
-    Key   StatKey
-    Value float64
-}
-
-type TerminationReason string
-
-const (
-    // TerminationSuccess means the accepted turn produced its validated output.
-    TerminationSuccess TerminationReason = "success"
-
-    // TerminationRefused means the accepted turn ended with a provider refusal.
-    TerminationRefused TerminationReason = "refused"
-
-    // TerminationCanceled means an explicit cancellation completed the accepted turn.
-    TerminationCanceled TerminationReason = "canceled"
-
-    // TerminationLimitExceeded means a configured limit completed the accepted turn.
-    TerminationLimitExceeded TerminationReason = "limit_exceeded"
-)
-```
-
-Remove TerminationError, TerminationCompactionFailed, and ExecutionResult.Error for new execution;
-D103 returns those failures without an accepted result. Rename TerminationContextCanceled to
-TerminationCanceled to distinguish explicit turn cancellation from worker-context interruption.
-CancellationCause is optional saved diagnostic data, not an error to branch on. ExceededLimit.Key
-identifies the actual matched key when a prefix limit fires; Limit retains the configured rule.
-Output is present only for success, Refusal only for refusal, and ExceededLimit only for a limit.
-These values are read-only. GetLastTurnResult keeps its Locked D74 return contract.
-
-Check Busy before admitting a task. D133 permits replacement of an idle unfinished turn. Busy
-reports the current accepted TurnId if one exists. NoActiveTurn has an empty TurnId and no old
-answer. All cannot-start results have empty termination/output fields and do not replace the saved
-result. A new turn identity becomes accepted with its initial save.
-
-Use the following context methods; Release and Interrupt already exist, while CancelTurn replaces
-CancelRun:
-
-```go
-func (execCtx *ExecutionContext) CancelTurn(cause error)
-func (execCtx *ExecutionContext) Interrupt(cause error)
-func (execCtx *ExecutionContext) Release()
-```
-
-CancelTurn is an idempotent request for the current unfinished turn. Nil cause selects the ordinary
-cancellation cause. Calling it on a fresh or completed context has no effect on a future turn.
-While running, the Runner stops new model/domain-tool work and prepares a safe terminal boundary.
-On an idle restored unfinished context, call CancelTurn then Continue to accept the cancellation.
-The request is not proof of a terminal save. If its intent is captured at an earlier approved
-savepoint, Continue must retain that intent; otherwise an interruption can lose the unsaved request.
-
-Cancellation/limit cleanup must join owned producers and workers. Keep accepted tool evidence.
-Close abandoned native tool groups with truthful NotStarted or Unresolved evidence. Follow the
-managed tool contract; never invent success. If an interrupted tool needs recovery, perform managed
-recovery and its approved After Recovery save before terminal completion. Do not execute queued
-domain calls.
-Use a cleanup context derived from the still-live owner context, separate from the stopped model
-call. Parent-context cancellation interrupts this preparation. If cleanup or its save cannot finish,
-return an error and leave accepted state recoverable instead of claiming a completed turn.
-
-An ExecutionContext remains reusable after an accepted completed turn while its owner context is
-alive. Each root NewTurn/Continue creates a fresh attempt identity, cancellation scope, and delivery
-workers, then joins them before return. It does not release the reusable context at every answer.
-Release is idempotent final cleanup; while active it requests interruption and joins owned work.
-A failed/interrupted attempt cannot be reused for execution: restore from accepted storage rather
-than trust its provisional memory. Calling execution methods on a released/failed handle is a
-caller error. The last accepted result remains readable without running output processing again.
-
-Example: a 25-iteration limit completes T1. Continue returns NoActiveTurn. GetLastTurnResult reads
-T1's limit result. NewTurn accepts T2 with a new turn allowance; a run allowance still applies.
-By contrast, a Hook error in T1 returns nil result and keeps T1 available to restored Continue.
-
-Tradeoff: completed turns never need a reopen operation. A follow-up task is required after a limit.
-The alternative, resumable limit stops, needs a distinct saved stopped-turn policy and changes what
-NewTurn is permitted to do. Reusable successful contexts avoid repeated loading between normal
-turns; requiring restoration after failure avoids a full defensive rollback copy on every call.
+Stop and limit pauses preserve unfinished external-operation evidence. Cleanup must not invent a
+completed effect, rerun an accepted effect, or execute queued business calls to force completion.
+Use the managed recovery contract and its existing save boundaries. Keep unexpected code failures
+on D103's error path and reconcile storage failures before another writer continues.
 
 **F02 — Locked D117: cumulative counters and explicit turn scope.** Keep current GetCounter
 semantics. Add the turn getter and Scope field below. D111 governs resumable limit stops; D114
@@ -3482,11 +3497,11 @@ ownership. Validate before committing a state transition. Do not implement this 
 history on every Apply. Tradeoff: explicit status cases require a switch, but identify the recovery
 action without error matching. One Incompatible result avoids a redundant Unsupported state.
 
-**F04 — Historical Subscriber proposal; Hook-set completeness remains Draft.** D127-D132 now
+**F04 — Locked D127-D132/D142; original Subscriber proposal retained below.** D127-D132
 provide the Locked Subscriber declarations and behavior. They add a total final-drain deadline,
 preserve unexpected shutdown errors without changing the primary stop reason, and require explicit
 read-only and deduplication documentation. Use those approvals instead of conflicting text below.
-The following original proposal remains as review history; its Hook-set completeness is unapproved:
+The following Subscriber proposal remains historical. D142 locks the complete two-field Hooks type:
 
 ```go
 type SubscriberDelivery string
@@ -3545,7 +3560,7 @@ type RecordedEvent struct {
     Payload             any
 }
 
-// These two fields are Locked D82. Their completeness is proposed here.
+// D82 locks these fields; D142 locks them as the complete initial Hook set.
 type Hooks struct {
     BeforeModelCall func(ctx context.Context, event *BeforeModelCallEvent) error
     BeforeToolCall  func(ctx context.Context, event *BeforeToolCallEvent) error
@@ -4032,7 +4047,8 @@ the approved Runner family and individually approved data/configuration interfac
 approval does not lock every F01-F10 declaration. Remove Execute/Start/Resume entry points;
 NewTurn handles initial and later tasks, Restore prepares, Continue executes saved unfinished work,
 and GetLastTurnResult reads completion. Do not add a session wrapper, separate admission call,
-public migration API, or custom executor. Export hooks, field-scope registries, update-on-assignment
+public migration API, or custom executor. Stop follows D143. Export hooks, field-scope registries,
+update-on-assignment
 APIs, and a separate Model.ValidateRequest method remain unapproved additions; this scope approval
 does not introduce them.
 
@@ -4062,7 +4078,7 @@ Consolidate implementation documentation and Quick Start around the approved API
 examples clearly historical. Unselected declarations still need their own approval. D81's chat
 example follows the refactor; its frontend transport and release packaging add no core interfaces.
 The verification cases below retain their D63/D100 and individual-decision scopes; they do not
-lock unapproved cancellation or delivery policies merely by requiring future tests.
+introduce another stop operation or change the Locked delivery policies through test wording.
 
 Implementation must satisfy D63/D100 plus these focused cases:
 
@@ -4095,101 +4111,14 @@ blocks parse with gofmt; this checks syntax only, not the unimplemented APIs. Re
 reproduces the complete pre-review document. Other changed files and all existing decisions remain
 unchanged. The repository whitespace check passed. No Go suite or provider call was run.
 
-**Later approval update D111-D120, 2026-11-17.** The following audit is historical. D111 closes
-resumable limit stops; D112 closes replay construction/results; D113 closes unified content and
-answer meanings; D114/D116 close configuration and remove child contexts. D117-D120 close
-statistics, archive replay, selected scope, and custom-state/compaction signatures. Only the
-remaining unapproved fields and policies need review. Do not use the older list to reopen those
-decisions.
+**Earlier readiness audits superseded by D143.** The former lists of unresolved lifecycle,
+delivery, content, constructor, and Hook choices have been removed. Use the current readiness table
+and the corresponding Locked declarations. Private layout and test work do not reopen those APIs.
+D63/D100 remain implementation verification gates; document approval is not a runtime test result.
 
-**Later replay approval D112, 2026-11-17.** The replay-constructor/result gap in the older audit
-below is now closed. The audit remains historical; unrelated public data and lifecycle choices
-retain their own approval status.
-
-**Implementation readiness audit, 2026-11-16 — assessment, not a new decision.** The owner asked
-whether decisions from other sessions resolve the preceding ten-point review and whether this
-requirement is ready for implementation. This audit checks the current D01-D110 register and the
-explicit later overrides. It does not lock another API or authorize implementation.
-
-Many earlier questions are closed. The whole refactor is not yet a complete approved implementation
-contract: the document still explicitly reserves some public interfaces and lifecycle policies for
-review. The core architecture and the items listed as settled below can support implementation
-planning. Do not treat a remaining private field or wire-layout choice as a new owner-level blocker.
-
-| Previous review point | Current governing decisions | Remaining scope |
-| --- | --- | --- |
-| Task input | D85-D89 | Task shape and instruction lifetime settled |
-| Subscriber registration | D80/D91 | Stop/event data, enums, and buffer settings still Draft |
-| Hooks | D82/D103 | Two callbacks and error path settled; complete surface still Draft |
-| Replay results | D39/D46/D78/D79 | Constructor and remaining result variants still Draft |
-| Turn lifecycle | D103/D105 | Error retry and TurnId settled; cancellation/lifetime still Draft |
-| Statistics and limits | D34/D43; R05 | Turn/run scope, reads, and limit completion still Draft |
-| User retention | D90/D92-D96/D102/D106-D110 | Data, settings, accounting, and behavior settled |
-| Provider validation | D87/D103 | Errors settled; explicit native conversion/reset still Draft |
-| Config | D114/D116 | Defaults settled; child configuration removed |
-| Extra APIs and private state | D30/D49/D78/D98/D104 | Unapproved helpers are not prerequisites |
-
-Apply these later decisions when reading older examples:
-
-- D89 fixes Task.Instructions and Task.Messages, including nil inheritance and an empty clear.
-- D91 requires Subscriber.OnStop. Do not implement the old optional registration callback.
-- D97/D101 use AssistantContentType per logical content item, not AssistantMessageKind. Exact
-  integration fields and constant identifiers still need their public declaration review.
-- D103 uses Propagate, Fix, Restore, Continue. Do not add ModelRequestCheck, ModelCallStartResult,
-  or an extra ExecutionResult condition merely to represent these code/configuration failures.
-- D105 keeps TurnId and rejects the additional public TurnStatus field/enum for this scope.
-- D90/D92-D96/D102/D106-D110 complete byte-based user retention. The default is 32 KiB, with
-  oldest-first removal, a retained text suffix, whole non-text parts, and a counted notice.
-  Retention is best effort. There is no user Required field, input-consumption tracking, or
-  protected-user CannotFit state. Do not revive CompactionResult for that removed failure case.
-
-**Later configuration approval D114.** The Config shape/defaults and pending-event bound mentioned
-in group 3 below are settled by F06. D116 removes child preparation from this refactor.
-D114 does not settle the remaining F02 statistic/limit-scope APIs or the other groups.
-
-**Remaining implementation prerequisites.** Finish these three groups without reopening the
-decisions above:
-
-1. **Lifecycle and limits.** Resolve limit-ended and explicitly cancelled turns, context reuse
-   between calls, and cleanup ownership. Finish the public turn/run limit and statistic contract.
-   D105 explicitly says that it does not settle cancellation or limit completion. D103 settles
-   exceptional code failures, not those separate policies.
-2. **Public data and replay outcomes.** Finish NewRunState construction, the remaining load/Apply/
-   Restore outcomes, and any receipt/cursor fields. Finish SubscriberStop, delivery declarations,
-   RecordedEvent's public payload, and AssistantContentType integration. Their behavior is largely
-   settled, but an implementer must not silently approve the remaining public declarations.
-3. **Configuration and resource behavior.** Apply the approved F06 defaults and pending-event
-   bound at approved savepoints. Subscriber queue bounds do not bound unsaved persistence evidence.
-   Preserve D54/D57's savepoint schedule and D98's accepted archive guarantee.
-
-**Scope and document cleanup.** Old register rows still describe Task as Draft, retention in terms
-of tokens/protected input, and the replaced AssistantMessageKind. Their later overrides settle
-those questions; these are stale summaries, not new design gaps. Before implementation, assemble
-one current public API section and make the registers point to it. Preserve historical discussion
-as historical evidence. This audit leaves the other sessions' text intact.
-
-Private RunState members, reducer/package layout, and codec encoding can be designed under the
-locked invariants. Extra Resume/export/update helpers are unapproved additions, not prerequisites.
-Explicit native-state conversion/reset can be separately deferred; normal request failures already
-have D103's contract. The separate compaction prompt/input redesign in req-compaction.md remains
-Draft; do not include it implicitly or let its older protection notes override D110. The follow-up
-chat example remains a later task under D81, not a blocker for starting the core refactor.
-
-D63/D100 define implementation verification, including replay equivalence and provider continuation.
-Those future tests are not evidence that unimplemented behavior already works. Readiness approval
-and permission to implement remain separate from this document review.
-
-**Audit verification.** Checked all 110 decision-register entries, the later D85-D110 approvals,
-the R01-R10 scopes, the relevant interface examples, AGENTS.md, and the compaction dependency
-record. Only this audit was added. Existing text and prior changes were preserved. No runtime
-code, Go tests, or provider calls were run for this requirement review.
-
-**Next interface review, updated 2026-11-16.** D64-D84 are Locked. The sections below
-mark the remaining Draft and Open choices. They do not reopen the approved Runner methods, Recorder
-signature, savepoint schedule, or single RunState role. D72 settles the custom-loop restart scope.
-The newly approved factory, reset, ownership, codec, Subscriber, and Hook scopes are marked below.
-Exact state fields, encoded layout, remaining result mappings, registration, and delivery stop
-reporting remain under review. D81 defines the separate follow-up examples project.
+**Historical interface review, 2026-11-16.** The R01-R10 discussion below predates the later
+approvals. Its remaining Draft labels are not current prerequisites. Use the latest decision and
+interface registers. D143 removes the superseded execution-stop alternatives from this history.
 
 **Remaining interface review, 2026-11-16: Draft proposals R01-R10.** The owner requested another
 review before approving more interfaces. This section records recommendations, examples, and
@@ -4204,7 +4133,7 @@ input-coverage choices are not approved by this review.
 | R02 | Subscriber registration and stop reports | One registration struct; typed stop callback |
 | R03 | Complete Hook surface | Keep the two approved mutation stages for this feature |
 | R04 | State construction and result variants | Empty replay constructor and actionable statuses |
-| R05 | Turn lifetime, resources, and limits | TurnId Locked D105; remaining lifecycle Draft |
+| R05 | Turn lifetime, resources, and limits | Settled by D111/D117/D121-D124/D133/D143 |
 | R06 | Task instructions and assistant kind | Instruction input; per-message kind |
 | R07 | Retention data and blocked compaction | Source IDs, token target, typed cannot-fit |
 | R08 | Provider checks after hooks | Propagate errors; preserve retry state under D103 |
@@ -4331,25 +4260,25 @@ into RecordedEvent would mix delivery failures with saved agent history and coul
 an event to the consumer that just failed. Polling separate Err/Done handles would restore a second
 subscription API. The callback is the recommended compromise.
 
-**R03 — Draft: the complete initial Hooks type contains the two approved fields.** Current
+**R03 — Locked D142: the complete initial Hooks type contains the two approved fields.** Current
 context.publishWithEventIteration passes mutable input only for BeforeModelCallEvent and
-BeforeToolCallEvent. Other dispatched event values are copied for observation. This supports using
-the two D82 fields as the full initial mutation surface:
+BeforeToolCallEvent. Other dispatched event values are copied for observation. D142 uses the two
+D82 fields as the complete initial mutation surface; persistent state changes belong in the Loop:
 
 ```go
-// Fields and signatures already Locked D82; the complete initial field set is Draft R03.
+// D82 locks the signatures; D142 locks the complete initial field set.
 type Hooks struct {
     BeforeModelCall func(ctx context.Context, event *BeforeModelCallEvent) error
     BeforeToolCall  func(ctx context.Context, event *BeforeToolCallEvent) error
 }
 ```
 
-Propose Config.Hooks *Hooks, with nil meaning no hooks. Use Subscriber for after-call, iteration,
-output, and diagnostic facts. Compose multiple transformations in one application callback in a
-visible order. Under D103, an unexpected before-model or before-tool Hook error prevents the
-operation and propagates to the application without accepting a terminal turn result. This replaces
-the earlier draft mapping of before-tool Hook errors to tool steering. Handled Tool.Call/Recover
-errors, storage failures, and cancellation keep their separate contracts.
+Use Config.Hooks *Hooks under D114, with nil meaning no Hooks. Use Subscriber for after-call,
+iteration, output, and diagnostic facts. Compose multiple transformations in one application
+callback in a visible order. Under D103, an unexpected before-model or before-tool Hook error
+prevents the operation and propagates to the application without accepting a terminal turn result.
+This replaces the earlier draft mapping of before-tool Hook errors to tool steering. Handled
+Tool.Call/Recover errors, storage failures, and cancellation keep their separate contracts.
 
 Tradeoff: a callback for every event offers broad customization but recreates the mixed event
 registry. The two-stage design is smaller and matches the current intentional input-mutation
@@ -4414,58 +4343,18 @@ is 700 reports CursorConflict with expected 620 and received 700. It does not pa
 state. The tradeoff is more explicit statuses and two cursor fields instead of error matching or
 silently ignoring a gap. Keep storage-missing outcomes in the application loader.
 
-**Later approval D111.** The following R05 review predates the fifth ExecutionStatus value.
-Limit stops now leave the turn unfinished and return ExecutionPaused. Its Completed/NewTurn limit
-row and statement that this limit choice is Open are superseded; other draft policies are unchanged.
+**R05 — Lifecycle settled by D105/D111/D117/D121-D124/D133/D143.** Stop pauses the same unfinished
+task. Continue resumes it without a new allowance; NewTurn can replace it on idle state. Release
+disposes of runtime resources. Do not add CancelTurn, a public Interrupt, or a separate TurnStatus.
+The earlier task-ending Stop and terminal-limit proposals are removed. Use F01 for the current
+return table and D123/D143 for the complete result declaration.
 
-**R05 — Turn identity Locked D105; lifecycle, resources, and limits Draft.** The four
-ExecutionStatus values are already Locked. Add the approved turn identity to ExecutionResult:
+TurnId remains stable across restoration and changes only for an accepted new task. An accepted
+pause does not replace the last completed result. Handle Busy before admission or resource changes.
+D121 permits direct reuse after clean completion/pause and requires restoration after an unusable
+attempt. D122 keeps Release idempotent and separate from task completion.
 
-```go
-// Locked D105 additional ExecutionResult field; existing fields remain.
-TurnId string
-```
-
-Do not add TurnStatus or its proposed public enum under D105. The lifecycle states in the table
-below describe saved behavior, not a new public result field. Their remaining policies are Draft.
-
-TurnId is stable across restoration and changes for a new accepted turn. Retain it with the last
-result under D74 and include it in event metadata for UI grouping. Do not derive it from a changing
-attempt identity. For cannot-start results, branch on ExecutionStatus first; they do not create a
-new turn or overwrite its result. Busy takes precedence over other lifecycle checks while another
-call owns that context. This precedence remains a proposal, not an addition to the four values.
-
-Recommended lifecycle defaults:
-
-| Cause | Turn treatment | Normal next action |
-| --- | --- | --- |
-| Success or refusal with an accepted terminal save | Completed | NewTurn or GetLastTurnResult |
-| Explicit user cancellation accepted at terminal save | Completed | NewTurn |
-| Turn limit | Completed | NewTurn with a follow-up task |
-| Propagated code/configuration error (D103) | Unfinished | Fix, restore, Continue |
-| Worker/process interruption or parent context cancellation | Unfinished | Restore and Continue |
-| Failed or uncertain Save | Preserve confirmed accepted state | Reconcile storage, then restore |
-
-D103 locks the propagated-error row; the other lifecycle recommendations above remain Draft.
-Recommend keeping accepted terminal outcomes final. Raising a limit does not reopen the completed
-turn; the user can submit a follow-up task in the same conversation. The alternative is to keep
-limit-ended turns unfinished and resume them after a limit change. That can be useful, but needs a
-separate durable stopped-turn policy. This lifecycle choice remains Open for owner review.
-
-Rename the current CancelRun request to CancelTurn for explicit user cancellation, keeping
-Interrupt as the interruption request. Do not add permanent run closure in this feature. A cancel
-request is not durable until the Runner accepts the terminal save. While execution is active, its
-normal finish path handles that save. For an idle restored unfinished turn, the application can
-request cancellation and call Continue to complete it through the managed path. Preserve required
-recovery evidence and safe context construction; do not silently abandon uncertain external work.
-This rename and the idle-cancellation flow remain Draft.
-
-Propose that an ExecutionContext remains usable between completed turns until its caller releases
-it or its parent context ends. Each NewTurn/Continue gets fresh per-call cancellation and delivery
-resources and joins them on return; it does not cancel the still-live parent merely because an
-answer completed. Explicit Release ends the context lifetime. A different parent context or Runner
-uses the locked Recorder capture/load and Restore path. Current Runner calls Release on return, so
-this is a real lifecycle change to review, not a claim about current behavior.
+The following statistics sketch is historical; D117 contains the Locked measurement contract.
 
 Add a scope to Limit rather than reset monotonic counters:
 
@@ -5595,16 +5484,16 @@ They check the saved terminal result and typed value, including repeated restore
 calls, model requests, output processing, or validation. These checks verify current behavior;
 they do not test the proposed Status API. This review changes Markdown only.
 
-Use ExecutionResult.Status with the Locked D68 enum. TerminationReason explains Finished; it does
-not have to encode admission failures too. T is usable only for Finished plus TerminationSuccess.
-Finished describes the end of an execution attempt; it does not close the conversation or imply
-successful output. Success, refusal, cancellation, and limits remain separate termination reasons.
+Use ExecutionResult.Status under D111/D133/D143. TerminationReason explains a completed or paused
+execution, not admission failures. T is usable only for Finished plus TerminationSuccess. Finished
+means accepted task completion; Paused keeps the task unfinished. Stop uses Paused/Stopped, limits
+use Paused/LimitExceeded, and replacement by NewTurn can close the old task as Finished/Canceled.
 Under Locked D69, a cannot-start result returns zero T, no new input, and no old answer presented as
 a fresh answer. It returns nil error and must not replace the active or saved execution result or
 release resources owned by another call. Status describes this call; accepted state does not change.
 This keeps the locked return tuple and adds no public admission receipt or separate submission call.
 
-The remaining state-transition choices still need approval. Unexpected operation failures use error.
+These state transitions are Locked. Unexpected operation failures use error.
 Storage, cancellation, run limits, and safe tool/output failures keep their established contracts.
 A codec or hook error must not be classified by guessing from its error string. Missing stored data
 belongs to the application loader, not the byte decoder.
@@ -7638,16 +7527,12 @@ limits, deadlines, and component initialization; the constructor and codec metho
 ownership contract. Same-process use has a path through Snapshot; a transfer without a capture copy
 is not required for this design. The examples do not lock these remaining interfaces by implication.
 
-**Turn completion and closure I15: shared execution result.** The draft separates a turn answer
-from permanent run closure. Keep the normal typed return and shared ExecutionResult. Exact run
-states, turn identity/result fields, and stop reasons remain open.
-Decide how success, refusal, cancellation, tool recovery uncertainty, turn limits, run limits,
-and operation failures map to those states. Resume must continue the same saved turn; it must
-not invent a new user turn. A completed turn can return its saved result without processing it
-again. Only explicit new input begins another turn. These recommendations do not lock new APIs.
+**Turn completion and Stop I15 — settled.** Use D123/D143's shared ExecutionResult. Stop pauses;
+Continue resumes the same task; NewTurn admits new input and can close an idle unfinished task
+under D133. Release disposes of the runtime handle under D122. TurnId identifies the task in results
+and events. Keep these lifecycle facts separate from assistant-content classification. The earlier
+open stop/cancellation alternatives are removed; see F01 for the current return table.
 
-Decide how callers close a conversation, whether closure can happen during active work, and how
-events and streams identify TurnId. Keep outcomes distinct from the AssistantMessageKind label.
 The typed output contract also needs a decision: one output type/schema for the whole run is
 simplest, while per-turn types require typed historical-result and restore compatibility rules.
 
@@ -7860,7 +7745,8 @@ Custom loops and tools need an explicit turn-boundary contract. Some mutable sta
 the conversation; other state belongs to one turn. A fresh Go context does not by itself reset
 a custom loop's completed flag, output-processing state, or application state correctly. The
 contract must work on both a live run handle and a restored run without replaying earlier work.
-Whether refusals, failures, cancellations, or run-limit stops admit a new turn is still open.
+D121/D133/D143 settle this: a usable idle context accepts NewTurn, including after a Stop or
+limit pause. Restore first after failure, interruption, release, or uncertain storage.
 
 **Statistics and limits — Draft D19.** The owner proposed resetting all statistics and limits and
 asked whether that is appropriate. That reset is not locked. The assistant recommends preserving
