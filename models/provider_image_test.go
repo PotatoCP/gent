@@ -15,7 +15,6 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/output"
 	"github.com/stretchr/testify/assert"
 )
@@ -55,8 +54,7 @@ func imageResponse(provider string, images []gent.BinaryContent, reference, extr
 			parts = append(parts, map[string]any{"type": "image_generation_call", "status": "completed",
 				"output_format": "jpeg", "result": encoded})
 		case "gemini", "vertexai":
-			part := map[string]any{"inlineData": map[string]any{"mimeType": part.MIMEType,
-				"data": encoded}}
+			part := map[string]any{"inlineData": map[string]any{"mimeType": part.MIMEType, "data": encoded}}
 			if reference {
 				part = map[string]any{"fileData": map[string]any{"mimeType": "image/jpeg", "fileUri": uri}}
 			}
@@ -159,8 +157,7 @@ func TestProvidersImageCorrectionAndOfflineRestore(t *testing.T) {
 					requests == 1), mime), nil
 			})}
 			newOutput := func() *output.ImageOutput {
-				return output.NewImageOutput().SetAllowedMIMETypes("image/jpeg").
-					SetMaxWidth(2).SetMaxHeight(1).
+				return output.NewImageOutput().SetAllowedMIMETypes("image/jpeg").SetMaxWidth(2).SetMaxHeight(1).
 					SetMaxFileSizeBytes(int64(max(len(images[0].Data), len(images[1].Data)))).
 					SetCustomValidator("image-rules/v1", func(_ *gent.ExecutionContext,
 						value []gent.BinaryContent,
@@ -170,51 +167,37 @@ func TestProvidersImageCorrectionAndOfflineRestore(t *testing.T) {
 						return &gent.OutputValidationResult{Accepted: true}, nil
 					})
 			}
-			ctx := gent.NewExecutionContext(context.Background(), "images", gent.NewBasicLoopData(
-				gent.NewTask(gent.TextContent{Text: "Return only two JPEG images."})))
-			runner := executor.NewRunner(react.NewWithOutput(fixtureModel(test.input.provider, client),
-				newOutput()), executor.DefaultConfig())
-			value, result, err := runner.Execute(ctx)
+			runner, execCtx := newModelExecution(t, context.Background(),
+				react.NewWithOutput(fixtureModel(test.input.provider, client), newOutput()), nil)
+			value, result, err := runner.NewTurn(execCtx,
+				gent.NewTask(gent.TextPart("Return only two JPEG images.")))
 			if !assert.NoError(t, err) {
 				return
 			}
 			delivery := []gent.ContentPart{images[0], images[1]}
 			assert.Equal(t, images, value)
-			assert.Equal(t, &gent.ExecutionResult{TerminationReason: gent.TerminationSuccess,
-				Output: delivery}, result)
+			assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished, TurnId: execCtx.TurnId(),
+				TerminationReason: gent.TerminationSuccess,
+				Output:            delivery}, result)
 			assert.Equal(t, test.expected, expected{requests, downloads, validations,
-				ctx.Stats().GetCounter(gent.SCOutputLocalRejectedTotal)})
+				execCtx.Stats().GetCounter(gent.SCOutputLocalRejectedTotal)})
 			assertImageRequest(t, test.input.provider, bodies[0])
-			saved, err := ctx.Export()
-			if !assert.NoError(t, err) {
-				return
-			}
-			wire, err := ctx.Codecs().Marshal(saved)
-			if !assert.NoError(t, err) {
-				return
-			}
-			var bundle gent.RunView
-			if !assert.NoError(t, ctx.Codecs().Unmarshal(wire, &bundle)) {
-				return
-			}
-			value[0].Data[0] = 0
-			result.Output[0] = gent.TextContent{Text: "changed"}
+			saved := execCtx.Config().Recorder.(*modelTestStore).saved
 			// Both the model endpoint and the image URL are unavailable after the terminal save.
 			client = &http.Client{Transport: responseTransport(func(*http.Request) (*http.Response, error) {
 				t.Error("terminal restore made an HTTP request")
 				return nil, errors.New("reference expired")
 			})}
-			runner = executor.NewRunner(react.NewWithOutput(fixtureModel(test.input.provider, client),
-				newOutput()), executor.DefaultConfig())
 			for range 2 {
-				restored, metadata, err := runner.Resume(context.Background(), bundle, gent.RestoreBindings{})
+				runner, restoredCtx := restoreModelExecution(t, context.Background(),
+					react.NewWithOutput(fixtureModel(test.input.provider, client), newOutput()), nil, saved)
+				restored, metadata, err := runner.GetLastTurnResult(restoredCtx)
 				assert.NoError(t, err)
 				assert.Equal(t, images, restored)
-				assert.Equal(t, &gent.ExecutionResult{TerminationReason: gent.TerminationSuccess,
-					Output: delivery}, metadata)
-				if len(restored) > 0 {
-					restored[0].Data[0] = 0
-				}
+				assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished, TurnId: execCtx.TurnId(),
+					TerminationReason: gent.TerminationSuccess,
+					Output:            delivery}, metadata)
+
 			}
 			assert.Equal(t, 1, validations, "restore must not run custom validation")
 		})

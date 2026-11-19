@@ -89,10 +89,6 @@ func (o *SchemaOutput[T]) SetCustomValidator(
 	return o
 }
 
-func (o *jsonOutput[T]) RecoveryConfig() any {
-	return map[string]any{"schema": o.schema.Raw(), "validator": o.validator.name}
-}
-
 func (o *jsonOutput[T]) Instructions() string { return o.instructions }
 
 func (o *jsonOutput[T]) Configure(request *gent.ModelCallRequest) error {
@@ -112,18 +108,18 @@ func (o *jsonOutput[T]) Configure(request *gent.ModelCallRequest) error {
 }
 
 func (o *jsonOutput[T]) Process(
-	ctx *gent.ExecutionContext, content []gent.ContentPart,
+	execCtx *gent.ExecutionContext, content []gent.ContentPart,
 ) (processed *gent.OutputResult[T], processErr error) {
 	local := true
 	defer func() {
 		if local {
-			publishLocalResult(ctx, "json", processed, processErr)
+			publishLocalResult(execCtx, "json", processed, processErr)
 		}
 	}()
 	if err := o.validator.check(); err != nil {
 		return nil, err
 	}
-	if err := ctx.Context().Err(); err != nil {
+	if err := execCtx.Context().Err(); err != nil {
 		return nil, err
 	}
 	text, _, ok := textContent(content)
@@ -166,8 +162,8 @@ func (o *jsonOutput[T]) Process(
 			"The stored JSON value does not match the schema: %v. Return corrected JSON.", err)), nil
 	}
 	local = false
-	ctx.PublishOutputValidation(gent.OutputValidationLocal, "json", true, nil, nil)
-	if result, err := o.validator.validate(ctx, value); result != nil || err != nil {
+	execCtx.PublishOutputValidation(gent.OutputValidationLocal, "json", true, nil, nil)
+	if result, err := o.validator.validate(execCtx, value); result != nil || err != nil {
 		return result, err
 	}
 	return &gent.OutputResult[T]{Accepted: true, Value: value,

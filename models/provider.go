@@ -197,23 +197,25 @@ func readSSE(reader io.Reader, consume func([]byte) (bool, error)) error {
 }
 
 func sendProviderText(ctx context.Context, stream *gent.StreamWithDuration,
-	options *gent.CallOptions, kind, id, value string,
+	options *gent.CallOptions, kind gent.AssistantContentType, id, value string,
 ) error {
 	if value == "" {
 		return nil
 	}
-	if kind == gent.MetaContentReasoning && options.StreamingReasoningFunc != nil {
+	if kind == gent.AssistantContentReasoning && options.StreamingReasoningFunc != nil {
 		if err := options.StreamingReasoningFunc(ctx, []byte(value), nil); err != nil {
 			return err
 		}
 	}
-	if kind == gent.MetaContentIntermediary && options.StreamingFunc != nil {
+	if (kind == gent.AssistantContentIntermediary ||
+		kind == gent.AssistantContentFinalAnswerCandidate) && options.StreamingFunc != nil {
 		if err := options.StreamingFunc(ctx, []byte(value)); err != nil {
 			return err
 		}
 	}
-	if !stream.SendMeta(&gent.MetaContent{Type: kind, MessageId: id,
-		Content: []gent.ContentPart{gent.TextContent{Text: value}}}) {
+	if !stream.Send(gent.StreamChunk{Content: []gent.ContentPart{&gent.AssistantContent{
+		Type: kind, MessageId: id, Content: []gent.ContentPart{gent.TextContent{Text: value}},
+	}}}) {
 		return ctx.Err()
 	}
 	return nil
@@ -225,20 +227,25 @@ func previewProviderResponse(ctx context.Context, stream *gent.StreamWithDuratio
 	options *gent.CallOptions, response *gent.ModelCallResponse,
 ) (*gent.ModelCallResponse, error) {
 	for _, choice := range response.Choices {
-		for _, meta := range choice.MetaContent {
+		for _, part := range choice.Parts {
+			meta, ok := part.(*gent.AssistantContent)
+			if !ok {
+				continue
+			}
 			text := gent.ContentText(meta.Content)
-			if text != "" && meta.Type == gent.MetaContentReasoning &&
+			if text != "" && meta.Type == gent.AssistantContentReasoning &&
 				options.StreamingReasoningFunc != nil {
 				if err := options.StreamingReasoningFunc(ctx, []byte(text), nil); err != nil {
 					return nil, err
 				}
 			}
-			if text != "" && meta.Type == gent.MetaContentIntermediary && options.StreamingFunc != nil {
+			if text != "" && (meta.Type == gent.AssistantContentIntermediary ||
+				meta.Type == gent.AssistantContentFinalAnswerCandidate) && options.StreamingFunc != nil {
 				if err := options.StreamingFunc(ctx, []byte(text)); err != nil {
 					return nil, err
 				}
 			}
-			if !stream.SendMeta(meta) {
+			if !stream.Send(gent.StreamChunk{Content: []gent.ContentPart{meta}}) {
 				return nil, ctx.Err()
 			}
 		}
@@ -305,4 +312,64 @@ func textOutputOnly(options *gent.CallOptions, provider string) error {
 		return fmt.Errorf("%s does not support output type %q", provider, options.ResponseMIMEType)
 	}
 	return nil
+}
+
+// Providers without per-item phases identify candidate text only after their terminal outcome is
+// known. Earlier intermediary deltas keep their frozen labels and the same item identities.
+func candidateKind(status gent.ModelStatus) gent.AssistantContentType {
+	if status == gent.ModelStatusAnswer {
+		return gent.AssistantContentFinalAnswerCandidate
+	}
+	return gent.AssistantContentIntermediary
+}
+
+func classifyAnswerItems(choice *gent.ContentChoice) {
+	if choice.Completion.Status != gent.ModelStatusAnswer {
+		choice.CandidateSource = nil
+		return
+	}
+	if choice.CandidateSource == nil {
+		return
+	}
+	selected := map[string]bool{}
+	for _, id := range choice.CandidateSource.MessageIds {
+		selected[id] = true
+	}
+	for _, part := range choice.Parts {
+		if item, ok := part.(*gent.AssistantContent); ok && selected[item.MessageId] {
+			item.Type = gent.AssistantContentFinalAnswerCandidate
+		}
+	}
+}
+
+// Endpoints without per-item phases use the readable content as ordinary assistant input when
+// no native continuation exists. Native continuation takes precedence at each adapter boundary.
+// Flattening allocates references only; it does not change or copy the saved text and media.
+func readableAssistantParts(parts []gent.ContentPart) ([]gent.ContentPart, error) {
+	var result []gent.ContentPart
+	for _, part := range parts {
+		item, ok := part.(*gent.AssistantContent)
+		if !ok {
+			result = append(result, part)
+			continue
+		}
+		for _, inner := range item.Content {
+			if err := checkAssistantInputPart(inner); err != nil {
+				return nil, fmt.Errorf("assistant item %q: %w", item.MessageId, err)
+			}
+			result = append(result, inner)
+		}
+	}
+	return result, nil
+}
+
+func checkAssistantInputPart(part gent.ContentPart) error {
+	switch part := partValue(part).(type) {
+	case gent.TextContent, gent.DataContent, gent.BinaryContent, gent.ImageURLContent:
+		return nil
+	case gent.CachedContent:
+		return checkAssistantInputPart(part.ContentPart)
+	default:
+		return fmt.Errorf("nested assistant group or embedded tool part %T", part)
+	}
 }

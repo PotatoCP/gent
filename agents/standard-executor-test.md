@@ -1,319 +1,167 @@
-# Executor Test Standards
+# Executor test standards
 
-This document is the canonical standard for tests around the executor, execution context,
-agent-loop lifecycle, stats, and limits.
+Use these rules for executor, context, lifecycle, statistics, and limit tests. Agent-specific limit
+coverage belongs in `agents/<agent_name>/agent_executor_limits_test.go`. General rules in
+[AGENTS.md](../AGENTS.md) also apply. The locked contract is in
+[req-multi-turn.md](../req-multi-turn.md); [history](../docs/content/storage/history.md) explains the public flow.
 
-Use it for tests in `executor/`, for agent-specific limit tests such as
-`agents/<agent_name>/agent_executor_limits_test.go`, and for any new framework stat that can
-trigger a limit.
+Tests must prove behavior visible to an application. Use public NewTurn, Continue, Restore, and
+Recorder flows. Internal reducer tests can isolate format validation, but cannot replace the public
+save/load tests. Do not modify private fields to simulate normal application behavior.
 
-General repository test rules still apply: use table-driven tests when there are multiple
-scenarios, define named `input` and `expected` structs inside the test function, use
-`testify/assert`, compare full known values, and run tests without `-v`.
+## Assertions and coordination
 
-## Goals
+- Use table-driven tests for multiple scenarios, with named input, mocks, and expected types.
+- Use testify/assert. Compare full known strings, values, statistics, results, and event sequences.
+- Do not use substring, nonempty, or nonzero checks as the only proof of a known result.
+- For time, compare against a measured lower bound. Do not use only `duration > 0`.
+- Use channels for blocked callbacks and save boundaries. A sleep alone does not prove ordering.
+- Assert the complete lifecycle order when it is part of the test. Focused API tests do not need
+  unrelated lifecycle detail. Do not force nondeterministic parallel events into a false total
+  order.
+- Compare wrapped causes with errors.Is as well as checking the required diagnostic details.
 
-Executor tests must prove user-visible framework behavior, not implementation trivia.
+## Public lifecycle
 
-- Test through public APIs whenever possible.
-- Verify lifecycle order when order is part of the contract.
-- Verify exact termination reasons, errors, stats, limits, and events.
-- Cover first-iteration and later-iteration boundaries for resource limits.
-- Cover parent/child context propagation where stats can cross context boundaries.
-- Keep public API tests focused; do not force full event sequences into unrelated tests.
+Cover a Runner configured with ordinary Config services. Nil or empty Limits must impose no hidden
+execution limits. The same Runner must safely serve separate conversation contexts.
 
-## Assertion Policy
+- NewTurn on a fresh context accepts the task and begins execution. Later NewTurn keeps RunId,
+  history, summaries, custom run data, and cumulative counters, and allocates a new TurnId.
+- NewTurn on idle unfinished state accepts closure of the old task and the new task atomically.
+  Required recovery preparation must not execute queued old business actions to finish that task.
+- Busy takes precedence and changes no task, data, subscriptions, or owned attempt resources.
+- Continue executes an accepted unfinished task without resubmitting its input or resetting usage.
+- Continue on a completed context returns NoActiveTurn. GetLastTurnResult reads the saved result.
+- Finished/Success returns the accepted typed value. Refusal returns Finished/Refused and zero T.
+- Restore performs local setup only. It does not call models, recover tools, reset turn fields,
+  or run output processing again. Register codecs before loading or restoring.
+- A clean completed or paused handle can execute again. A released or failed handle needs Restore.
 
-Use the strongest assertion that matches the behavior under test.
+Each iteration emits its before/after evidence in order. A terminal accepted outcome emits its
+completion and accepted output only after Save succeeds. Stop and limit pauses emit pause evidence
+at the approved pause save. There is no terminal error event/save for an unexpected code failure.
 
-- Use exact string comparisons when the full string is known.
-- Compare complete structs when the complete expected value is known.
-- Do not use `Contains`, `HasPrefix`, `NotNil`, `NotEmpty`, or `NotZero` as the only proof.
-- For timestamps and durations, assert `>=` an expected lower bound.
-- For lifecycle and limit tests, assert the complete event sequence in order.
-- For simple API tests, assert the exact API contract without unrelated lifecycle noise.
+## Failure, Stop, and cleanup
 
-Example exact error assertion:
+Keep these contracts distinct in tests:
 
-```go
-assert.Equal(t, "Loop.Next (iteration 2): boom", err.Error())
+| Condition | Expected result and next action |
+| --- | --- |
+| Stop | Paused/Stopped after accepted pause save; Continue or NewTurn |
+| Limit | Paused/LimitExceeded after accepted pause save; use a sufficient allowance to Continue |
+| Worker context cancellation | Zero T, nil result, cause; restore accepted state |
+| Unexpected operation failure | Zero T, nil result, wrapped cause; fix and Restore |
+| Failed or uncertain Save | Zero T, nil result, storage failure; reconcile, then Restore |
+| Subscriber failure | Stop/report that registration; execution and accepted state remain valid |
+| Tool Call or Recover error | Safe guidance and private diagnostics; normal loop policy applies |
+
+For unexpected errors, verify the previous completed result and accepted unfinished task remain
+available. No provisional broken state is accepted. Diagnostics include stage and available
+identities without changing errors.Is/errors.As behavior. Cleanup errors must not mask the cause.
+
+Test Stop during model and tool work, repeated Stop, idle Stop, terminal-save races, and stale
+application Stop commands. A later attempt must not inherit a previous request to stop. The owner
+must wait for the active attempt to finish before submitting NewTurn. A terminal save can win a Stop
+race; preserve that accepted result.
+
+Release is final idempotent cleanup. It interrupts active work and waits for owned workers without
+completing the task or making a terminal save. Verify stream producer cleanup and Subscriber worker
+joining after success, pause, cancellation, errors, and panic. For panic tests, recover in the test
+and check cleanup and the original panic; do not claim a panic becomes a normal execution result.
+
+## Saved-state and archive equivalence
+
+Prove both guarantees with real encoded SaveBatch values:
+
+```text
+Full batch replay == RunStateSnapshot + accepted tail == accepted logical execution state
+Full archive replay == complete accepted RunView history
 ```
 
-Example timestamp assertion:
+The second guarantee needs the earlier archive. A compact RunStateSnapshot cannot prove that old
+archive records exist. Test compact state separately from full archive reconstruction.
 
-```go
-assert.True(t, event.Timestamp.After(start) || event.Timestamp.Equal(start))
+At each approved savepoint, interrupt before Save, while Save is blocked, after storage commits
+without acknowledgment, and after acceptance before dependent work. Use both ReAct and a custom Loop
+without a required step enum. Restore custom nested fields, empty values, saved results, accepted
+counters, native context, tool progress, and completed recovery preparation exactly.
+
+Include no capture, stale capture, capture at the head, and capture plus a paged tail. An uncertain
+retry must reuse the exact batch and must not rerun ResetTurn or duplicate task admission. Reject
+wrong runs, gaps, reordering, conflicting duplicate batches, corrupt bytes, and missing codecs
+without partial state mutation or external work. An exact duplicate is idempotent.
+
+Use a real fixture ledger for tool effects. Cover Completed, NotStarted, Unresolved, recovery
+errors, missing handlers, interrupted PTC, and supported parallel plans. Repeat interruption after
+accepted After Recovery preparation; neither accepted effects nor completed recovery checks may
+repeat.
+
+Verify the original provider response and processed accepted answer both remain in the archive, with
+correct source IDs. A rejected candidate never becomes accepted output. Provider continuation and a
+later NewTurn need separate coverage, including both restore paths and repeated rejections.
+
+## Statistics and limits
+
+For each new statistic, prove its increment behavior and limit behavior. For a consecutive gauge,
+also prove its reset. Use first-iteration and later-iteration cases.
+
+- GetCounter is cumulative for the run. GetTurnCounter reads the current turn baseline difference.
+- NewTurn accepts a fresh baseline. Continue and Restore keep the prior baseline and saved usage.
+- All gauges are turn-scoped. NewTurn resets them and rebuilds context-size gauges from retained
+  data.
+- Scope defaults to LimitTurn. LimitRun changes counter measurement only; gauges remain turn-scoped.
+- Separate conversations do not affect each other's counters, limits, or custom data.
+- Include the same run across multiple turns and both replay paths to catch accidental usage resets.
+
+Most exact and prefix rules pause when the value is greater than MaxValue. Exact iteration rules use
+greater-than-or-equal at completed iteration boundaries. For positive N, permit N completed
+iterations and prevent iteration N+1. Verify zero and already-exhausted allowances with the public
+flow. Continue checks saved usage before starting another dependent action. A run allowance does not
+reset when NewTurn accepts new input.
+
+For every prefix rule, use at least two resource suffixes. A nonmatching suffix can exceed the
+threshold without triggering that rule. Then exceed the matching suffix and compare the exact key,
+rule, current value, all statistics, and Paused/LimitExceeded result. When several rules match the
+same update, check the documented rule order and one LimitExceeded event for that decision.
+
+Keep total-error counters and consecutive gauges distinct: a success can reset a gauge while the
+cumulative count remains high. Recovered or invalid tool results follow their own gauge contract; do
+not assume every response resets consecutive call errors.
+
+## Subscriber, Hook, and concurrency coverage
+
+- Compare both Accepted and Live delivery with the same recorded identities and concrete payloads.
+- Live data stays provisional. Reconcile unsaved positions against the accepted archive on restore.
+- Account for active callbacks in count and byte bounds. Cover one oversized event, queue overflow,
+  callback failure, drain timeout, cancellation, and stop reporting with exact cursors.
+- A disconnected display does not invalidate accepted execution. Replay can redeliver an event when
+  callback success was uncertain; the UI deduplicates against its accepted view.
+- Hooks run synchronously and can change only effective operation inputs. Compare the full frozen
+  request/input seen by the operation and the saved archive. A failed Hook blocks the operation.
+- Race capture against later saves and prove the captured value remains stable and independent.
+- Share configured services across contexts and test normal cleanup after repeated use. No child
+  hierarchy exists in this refactor; future subagent coverage must meet D116.
+
+## Locations and verification
+
+Use executor tests for lifecycle, agent tests for agent-produced limits, core tests for reducers,
+and provider fixtures for exact wire contracts. `internal/tt` has reusable public-flow helpers and
+expected event builders; read their current signatures before using them. Tests may build small
+local adapters where that makes the scenario clearer.
+
+For a new statistic, add increment, reset when applicable, first/later iteration limits, scope,
+restore, prefix, and competing-rule cases. For a new agent, cover its complete produced statistics,
+continued request messages, accepted output, and resource cleanup.
+
+After code changes, run all required suites, without `-v` or output filtering:
+
+```sh
+go test ./... -count=1 -timeout 300s
+CGO_ENABLED=0 go test ./... -count=1 -timeout 300s
+go test -race ./... -count=1 -timeout 300s
 ```
 
-Example complete event assertion:
-
-```go
-expectedEvents := []gent.Event{
-	tt.BeforeExec(0, 0),
-	tt.BeforeIter(0, 1),
-	tt.AfterIter(0, 1, tt.Continue()),
-	tt.BeforeIter(0, 2),
-	tt.AfterIter(0, 2, tt.Terminate("Done.")),
-	tt.AfterExec(0, 2, gent.TerminationSuccess),
-}
-tt.AssertEventsEqual(t, expectedEvents, tt.CollectLifecycleEvents(execCtx))
-```
-
-## Executor Core Coverage
-
-These tests belong in `executor/` unless the behavior is specific to one agent.
-
-### Public API
-
-Cover the public executor API directly and keep these tests focused.
-
-- `NewRunner()` creates a typed runner with default event registry behavior.
-- `NewRunner()` respects a custom event registry supplied in config.
-- `WithEvents()` replaces the registry, returns the same executor, and routes events there.
-- `Subscribe()` adds subscribers to the current registry, returns the same executor, and chains.
-- Multiple subscribers that implement the same subscriber interface all receive the event.
-
-### Lifecycle Events
-
-Every executor lifecycle test that runs `Execute()` must assert the complete lifecycle sequence.
-
-- `BeforeExecutionEvent` is published before the first iteration.
-- Each iteration publishes `BeforeIterationEvent` before `Loop.Next()`.
-- Each completed iteration publishes `AfterIterationEvent` after `Loop.Next()`.
-- `AfterExecutionEvent` is published exactly once after success, error, cancellation, or limit.
-- `AfterExecutionEvent` contains the final `TerminationReason` and final error.
-- Event order is `BeforeExecution`, repeated iteration events, then `AfterExecution`.
-
-### Successful Termination
-
-Cover the normal `LATerminate` path with exact result assertions.
-
-- Execution stops when `Loop.Next()` returns `LATerminate`.
-- `ExecutionContext.Result()` stores the exact `AgentLoopResult.Result` value.
-- `Execute()` and `Resume()` return the exact typed value, outcome, and operation error.
-- Terminal restore reads the saved value without another model call or validation callback.
-- `TerminationReason()` is `TerminationSuccess`.
-- `Error()` is nil.
-- The result iteration count matches the number of completed iterations.
-
-### Loop Errors
-
-Cover errors returned by `Loop.Next()`.
-
-- `AfterIterationEvent` is published before termination is set.
-- The termination reason is `TerminationError`.
-- The error wraps the loop error with the exact iteration number.
-- The error message format is `Loop.Next (iteration N): <cause>`.
-- If a limit is already exceeded, limit termination takes precedence over loop-error termination.
-
-### Context Cancellation
-
-Cover user cancellation separately from limit cancellation.
-
-- A canceled parent context terminates execution with `TerminationContextCanceled`.
-- The stored error is the context cancellation cause or `context.Canceled`.
-- Cancellation before the first iteration stops before `BeforeIterationEvent`.
-- Cancellation after an iteration stops before the next iteration starts.
-- Cancellation during `Loop.Next()` is only observed after the loop returns.
-
-### Stream Lifecycle
-
-Cover stream cleanup as executor behavior, not only as stream implementation behavior.
-
-- Streams are usable while execution is running.
-- `CloseStreams()` is called exactly once when execution ends.
-- Streams close on success, loop error, cancellation, limit termination, and compaction failure.
-- If a test intentionally exercises panic cleanup, recover in the test and only assert deferred
-  cleanup behavior. Do not imply that the executor converts panics to `TerminationError`.
-
-### Duration Tracking
-
-Duration tests must assert meaningful elapsed time.
-
-- `AfterIterationEvent.Duration` is at least the measured delay in that iteration.
-- Multiple iterations keep separate duration values.
-- Avoid `duration > 0` as the only assertion.
-
-### Subscribers
-
-Subscriber tests must prove routing and ordering.
-
-- `BeforeExecutionSubscriber` receives events before first iteration work.
-- `AfterIterationSubscriber` receives events after each completed iteration.
-- `AfterExecutionSubscriber` receives the final termination event.
-- Subscribers registered through `WithEvents()` and `Subscribe()` both receive matching events.
-- Multiple subscribers receive the same event without suppressing one another.
-
-### Concurrency
-
-Use race tests for behavior with shared stats, children, streams, or subscribers.
-
-- Run `go test -race ./... -count=1 -timeout 300s` across the full repository.
-- Cover concurrent child stat updates when changing stat propagation.
-- Cover concurrent subscribers or stream consumers when changing event or stream dispatch.
-- Do not rely on goroutine sleeps alone; use channels or `require.Eventually` with evidence.
-
-## Limit Coverage
-
-Limit tests belong in the agent package when the stat is produced by agent behavior. Executor-only
-limit behavior belongs in `executor/`.
-
-For each new stat or limit type, add tests that prove the stat increment/reset behavior and the
-limit enforcement behavior. A stat is not fully covered until both are tested.
-
-### Required Scenarios
-
-For every cumulative counter limit:
-
-- Limit exceeded at the first iteration.
-- Limit exceeded at the Nth iteration after earlier iterations remain under the limit.
-- Child context propagation when the counter can be produced by a child context.
-- Exact stats on the context that triggered the limit and any parent that aggregates it.
-
-For every consecutive gauge limit:
-
-- Limit exceeded at the first iteration.
-- Limit exceeded at the Nth consecutive failure.
-- Consecutive gauge resets to zero on success before the next iteration can exceed it.
-- Total error counters may exceed the limit while the consecutive gauge stays under it.
-
-For every prefix or per-resource limit:
-
-- Use at least two resource suffixes, such as two tool names or two model names.
-- Make a non-limited suffix exceed the numeric threshold without terminating execution.
-- Then make the limited suffix exceed and assert only that suffix triggers termination.
-- Assert the exact matched key and stats for all suffixes involved.
-
-For cross-cutting limit behavior:
-
-- Multiple limits exceeded in the same update report the first limit by check order.
-- Only one `LimitExceededEvent` is published for one exceeded-limit decision.
-- Deep propagation works through parent, child, and grandchild contexts.
-- Error and limit priority is explicit when both could apply.
-
-### Limit Semantics
-
-Most exact and prefix limits use this rule:
-
-- A limit is exceeded when the current stat value is greater than `MaxValue`.
-- The exact error format is `limit exceeded: <key> > <MaxValue>`.
-
-Exact iteration limits use executor-owned semantics:
-
-- Exact limits on `SCIterations` and `SCIterations.Self()` are checked after `AfterIteration`.
-- For positive `MaxValue=N`, the executor allows N completed loop iterations.
-- The executor then publishes `LimitExceededEvent` before iteration N+1 starts.
-- The exact error format is `limit exceeded: <key> >= <MaxValue>`.
-- A zero iteration limit is an edge case; because checks happen after `AfterIteration`, assert the
-  current behavior directly if a test covers it.
-
-### Stats Propagation
-
-Use current stat propagation rules from `stats_keys.go` as the source of truth.
-
-- Counter keys with the `SC` prefix propagate to parent contexts.
-- Each counter has a `$self:` variant from `StatKey.Self()` for local-only limits.
-- Gauge keys with the `SG` prefix are local-only and do not propagate.
-- Calling `Self()` on a gauge is unnecessary because gauges are already local-only.
-- `SCIterations` propagates as an aggregate counter across the execution tree.
-- Use `SCIterations.Self()` for per-context iteration limits.
-
-When a test involves children, assert both the parent aggregate and child-local value when either
-could affect the result. This prevents confusing aggregate limits with per-context limits.
-
-### Event Assertions For Limits
-
-Limit tests must assert complete lifecycle events unless the test is explicitly focused on a
-lower-level stat helper.
-
-- Include `BeforeExecutionEvent` and final `AfterExecutionEvent`.
-- Include every `BeforeIterationEvent` and `AfterIterationEvent` up to termination.
-- Include the exact `LimitExceededEvent` with limit, current value, and matched key.
-- Include `AfterModelCallEvent`, `BeforeToolCallEvent`, or parse-error events when they create the
-  stat that triggers the limit.
-- Compare the complete `AfterIterationEvent.Result` and its action.
-- Verify the exact candidate and steering messages in the next model request after rejection.
-
-Use `tt.Continue()` for a continued iteration. The next request comes from structured history;
-there is no separate text-only prompt field on the loop result.
-
-## Code Organization
-
-Use predictable locations and names so coverage gaps are easy to find.
-
-- Executor core tests: `executor/*_test.go`.
-- Agent limit tests: `agents/<agent_name>/agent_executor_limits_test.go`.
-- Test function pattern for limits: `TestExecutorLimits_<StatName>`.
-- Consecutive reset pattern: `TestExecutorLimits_ConsecutiveReset_<StatName>`.
-- Prefix limit pattern: `TestExecutorLimits_<StatName>For<Resource>`.
-
-Preferred subtest names:
-
-```go
-t.Run("stops when limit exceeded at first iteration", func(t *testing.T) { ... })
-t.Run("stops when limit exceeded at Nth iteration", func(t *testing.T) { ... })
-t.Run("consecutive counter resets on success", func(t *testing.T) { ... })
-t.Run("child context limit propagates to parent", func(t *testing.T) { ... })
-t.Run("prefix limit only triggers on matching suffix", func(t *testing.T) { ... })
-```
-
-## Helper Functions
-
-Use the `internal/tt` helpers for expected lifecycle events and agent results.
-
-Common event builders:
-
-```go
-tt.BeforeExec(depth, iteration)
-tt.AfterExec(depth, iteration, terminationReason)
-tt.BeforeIter(depth, iteration)
-tt.AfterIter(depth, iteration, result)
-tt.BeforeModelCall(depth, iteration, model)
-tt.AfterModelCall(depth, iteration, model, inputTokens, outputTokens)
-tt.BeforeToolCall(depth, iteration, toolName, args)
-tt.AfterToolCall(depth, iteration, toolName, args, output, err)
-tt.LimitExceeded(depth, iteration, limit, currentValue, matchedKey)
-tt.ParseError(depth, iteration, errorType, rawContent)
-```
-
-Common result builders:
-
-```go
-tt.Continue()
-tt.Terminate(text)
-```
-
-Common limit builders:
-
-```go
-tt.ExactLimit(key, maxValue)
-tt.PrefixLimit(key, maxValue)
-```
-
-## New Stat Checklist
-
-When adding or changing a framework stat:
-
-- Add stat increment tests.
-- Add reset tests when the stat is consecutive or last-iteration scoped.
-- Add first-iteration limit test.
-- Add Nth-iteration limit test.
-- Add child propagation test for counters.
-- Add local-only test for gauges or `Self()` limits.
-- Add prefix scoping test for prefix stats.
-- Add multiple-limit priority test if the stat can be updated with other limited stats.
-- Update docs if the stat's propagation or limit semantics are unusual.
-- Run `go test ./... -count=1 -timeout 300s`.
-- Run `CGO_ENABLED=0 go test ./... -count=1 -timeout 300s`.
-- Run `go test -race ./... -count=1 -timeout 300s`.
-
-## New Agent Checklist
-
-When implementing executor limit tests for a new agent:
-
-- Create `agents/<agent_name>/agent_executor_limits_test.go`.
-- Cover every counter, gauge, and prefix stat the agent can produce.
-- Cover child context propagation for agent behavior that can spawn child contexts.
-- Use exact expected stats, limits, termination reasons, errors, and lifecycle events.
-- Verify exact task and history messages for continued model requests.
-- Run the full native, CGO-disabled, and race suites over `./...`.
+Affected auxiliary modules need their own suites. Run configured live providers before release or
+remote compatibility claims; a skipped test is not proof. Measure capture, encoding, loading,
+allocations, and bytes separately from full archive replay for long histories and large active data.

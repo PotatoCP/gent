@@ -45,11 +45,3 @@ func (w *JsToolChainWrapper) Recover(ctx context.Context,
 		Instructions: "The script will not restart. Review partial results and choose the next action.",
 	}, nil
 }
-
-// Catalog definitions and discovery metadata can change on resume. Execution configuration still
-// contributes to compatibility; removing catalog hashes must not remove run-state checks.
-func (c *Registry) RecoveryConfig() any { return map[string]any{"toolContract": 2} }
-func (c *SearchChain) RecoveryConfig() any {
-	return map[string]any{"toolContract": 2, "pageSize": c.pageSize,
-		"noResults": c.noResultsMessage}
-}

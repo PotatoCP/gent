@@ -32,9 +32,9 @@ func NewSlidingWindow(
 
 // Compact implements gent.CompactionStrategy.
 func (s *SlidingWindowStrategy) Compact(
-	_ *gent.ExecutionContext, input gent.CompactionInput,
-) (gent.HistoryUpdate, error) {
-	result := gent.HistoryUpdate{ExpectedDraftRevision: input.Revision}
+	_ *gent.ExecutionContext, input *gent.CompactionInput,
+) (*gent.HistoryUpdate, error) {
+	result := &gent.HistoryUpdate{ExpectedDraftRevision: input.Revision}
 	unpinned := 0
 	for _, entry := range input.Entries {
 		if !isPinned(entry) {

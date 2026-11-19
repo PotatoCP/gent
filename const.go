@@ -1,195 +1,199 @@
 package gent
 
-// =============================================================================
-// OpenAI Models
-// https://platform.openai.com/docs/models/
-// =============================================================================
-
-const (
-	// GPT-6 Series
-	ModelOpenAIGPT6Astra = "gpt-6-astra"
-
-	// GPT-5.5 Series
-	ModelOpenAIGPT55 = "gpt-5.5"
-
-	// GPT-5.4 Series
-	ModelOpenAIGPT54     = "gpt-5.4"
-	ModelOpenAIGPT54Mini = "gpt-5.4-mini"
-	ModelOpenAIGPT54Nano = "gpt-5.4-nano"
-
-	// GPT-5 Series
-	ModelOpenAIGPT52      = "gpt-5.2"
-	ModelOpenAIGPT52Codex = "gpt-5.2-codex"
-	ModelOpenAIGPT5       = "gpt-5"
-	ModelOpenAIGPT5Mini   = "gpt-5-mini"
-	ModelOpenAIGPT5Nano   = "gpt-5-nano"
-
-	// GPT-4.1 Series
-	ModelOpenAIGPT41     = "gpt-4.1"
-	ModelOpenAIGPT41Mini = "gpt-4.1-mini"
-	ModelOpenAIGPT41Nano = "gpt-4.1-nano"
-
-	// GPT-4o Series
-	ModelOpenAIGPT4o      = "gpt-4o"
-	ModelOpenAIGPT4oMini  = "gpt-4o-mini"
-	ModelOpenAIGPT4oAudio = "gpt-4o-audio-preview"
-
-	// O-Series (Reasoning Models)
-	ModelOpenAIO3     = "o3"
-	ModelOpenAIO3Pro  = "o3-pro"
-	ModelOpenAIO4Mini = "o4-mini"
-	ModelOpenAIO1     = "o1"
-	ModelOpenAIO1Mini = "o1-mini"
+import (
+	core "github.com/rickchristie/gent/internal/core"
 )
 
-// =============================================================================
-// Anthropic Claude Models
-// https://docs.anthropic.com/en/docs/about-claude/models/overview
-// =============================================================================
+// GPT-6 Series
+const ModelOpenAIGPT6Astra = core.ModelOpenAIGPT6Astra
 
-const (
-	// Claude Fable 5.1
-	ModelAnthropicClaude51Fable = "claude-fable-5-1"
+// GPT-5.5 Series
+const ModelOpenAIGPT55 = core.ModelOpenAIGPT55
 
-	// Claude 4.6 Series
-	ModelAnthropicClaude46Opus   = "claude-opus-4-6"
-	ModelAnthropicClaude46Sonnet = "claude-sonnet-4-6"
+// GPT-5.4 Series
+const ModelOpenAIGPT54 = core.ModelOpenAIGPT54
 
-	// Claude 4.5 Series
-	ModelAnthropicClaude45Opus   = "claude-opus-4-5-20251101"
-	ModelAnthropicClaude45Sonnet = "claude-sonnet-4-5-20250929"
-	ModelAnthropicClaude45Haiku  = "claude-haiku-4-5-20251001"
+const ModelOpenAIGPT54Mini = core.ModelOpenAIGPT54Mini
 
-	// Claude 4.x Series (Legacy)
-	ModelAnthropicClaude41Opus  = "claude-opus-4-1-20250805"
-	ModelAnthropicClaude4Opus   = "claude-opus-4-20250514"
-	ModelAnthropicClaude4Sonnet = "claude-sonnet-4-20250514"
-)
+const ModelOpenAIGPT54Nano = core.ModelOpenAIGPT54Nano
 
-// =============================================================================
-// Google Gemini Models
-// https://ai.google.dev/gemini-api/docs/models
-// =============================================================================
+// GPT-5 Series
+const ModelOpenAIGPT52 = core.ModelOpenAIGPT52
 
-const (
-	// Gemini 4 Series
-	ModelGoogleGemini4Argon = "gemini-4-argon"
+const ModelOpenAIGPT52Codex = core.ModelOpenAIGPT52Codex
 
-	// Gemini 3.1 Series
-	ModelGoogleGemini31Pro       = "gemini-3.1-pro-preview"
-	ModelGoogleGemini31FlashLite = "gemini-3.1-flash-lite-preview"
+const ModelOpenAIGPT5 = core.ModelOpenAIGPT5
 
-	// Gemini 3 Series
-	ModelGoogleGemini3Pro   = "gemini-3-pro-preview"
-	ModelGoogleGemini3Flash = "gemini-3-flash-preview"
+const ModelOpenAIGPT5Mini = core.ModelOpenAIGPT5Mini
 
-	// Gemini 2.5 Series
-	ModelGoogleGemini25Pro       = "gemini-2.5-pro"
-	ModelGoogleGemini25Flash     = "gemini-2.5-flash"
-	ModelGoogleGemini25FlashLite = "gemini-2.5-flash-lite"
-)
+const ModelOpenAIGPT5Nano = core.ModelOpenAIGPT5Nano
 
-// =============================================================================
-// xAI Grok Models
-// https://docs.x.ai/docs/models
-// =============================================================================
+// GPT-4.1 Series
+const ModelOpenAIGPT41 = core.ModelOpenAIGPT41
 
-const (
-	// Grok 4.7 Series
-	ModelXAIGrok47 = "grok-4.7"
+const ModelOpenAIGPT41Mini = core.ModelOpenAIGPT41Mini
 
-	// Grok 4.3 Series
-	ModelXAIGrok43       = "grok-4.3"
-	ModelXAIGrok43Latest = "grok-4.3-latest"
-	ModelXAIGrokLatest   = "grok-latest"
+const ModelOpenAIGPT41Nano = core.ModelOpenAIGPT41Nano
 
-	// Grok 4.20 Series
-	ModelXAIGrok420Reasoning    = "grok-4.20-0309-reasoning"
-	ModelXAIGrok420NonReasoning = "grok-4.20-0309-non-reasoning"
-	ModelXAIGrok420MultiAgent   = "grok-4.20-multi-agent-0309"
+// GPT-4o Series
+const ModelOpenAIGPT4o = core.ModelOpenAIGPT4o
 
-	// Grok 4.1 Series (retiring May 15, 2026)
-	ModelXAIGrok41Fast             = "grok-4-1-fast"
-	ModelXAIGrok41FastReasoning    = "grok-4-1-fast-reasoning"
-	ModelXAIGrok41FastNonReasoning = "grok-4-1-fast-non-reasoning"
+const ModelOpenAIGPT4oMini = core.ModelOpenAIGPT4oMini
 
-	// Grok 4 Series
-	ModelXAIGrok4FastReasoning    = "grok-4-fast-reasoning"
-	ModelXAIGrok4FastNonReasoning = "grok-4-fast-non-reasoning"
-	ModelXAIGrok4                 = "grok-4"
+const ModelOpenAIGPT4oAudio = core.ModelOpenAIGPT4oAudio
 
-	// Grok 3 Series
-	ModelXAIGrok3     = "grok-3"
-	ModelXAIGrok3Mini = "grok-3-mini"
+// O-Series (Reasoning Models)
+const ModelOpenAIO3 = core.ModelOpenAIO3
 
-	// Specialized Models
-	ModelXAIGrokCodeFast1 = "grok-code-fast-1"
-	ModelXAIGrok2Vision   = "grok-2-vision-1212"
-	ModelXAIGrok2Image    = "grok-2-image-1212"
-)
+const ModelOpenAIO3Pro = core.ModelOpenAIO3Pro
 
-// =============================================================================
-// Mistral AI Models
-// https://docs.mistral.ai/getting-started/models
-// =============================================================================
+const ModelOpenAIO4Mini = core.ModelOpenAIO4Mini
 
-const (
-	// Large Models
-	ModelMistralLarge3  = "mistral-large-latest"
-	ModelMistralMedium3 = "mistral-medium-latest"
-	ModelMistralSmall   = "mistral-small-latest"
+const ModelOpenAIO1 = core.ModelOpenAIO1
 
-	// Multimodal
-	ModelMistralPixtralLarge = "pixtral-large-latest"
+const ModelOpenAIO1Mini = core.ModelOpenAIO1Mini
 
-	// Reasoning Models
-	ModelMistralMagistral       = "magistral-latest"
-	ModelMistralMagistralMedium = "magistral-medium-latest"
-	ModelMistralMagistralSmall  = "magistral-small-latest"
+// Claude Fable 5.1
+const ModelAnthropicClaude51Fable = core.ModelAnthropicClaude51Fable
 
-	// Code Models
-	ModelMistralCodestral = "codestral-latest"
-	ModelMistralDevstral  = "devstral-latest"
+// Claude 4.6 Series
+const ModelAnthropicClaude46Opus = core.ModelAnthropicClaude46Opus
 
-	// Edge Models
-	ModelMistralMinistral3B = "ministral-3b-latest"
-	ModelMistralMinistral8B = "ministral-8b-latest"
-)
+const ModelAnthropicClaude46Sonnet = core.ModelAnthropicClaude46Sonnet
 
-// =============================================================================
-// Meta Llama Models
-// https://llama.developer.meta.com/docs/models/
-// =============================================================================
+// Claude 4.5 Series
+const ModelAnthropicClaude45Opus = core.ModelAnthropicClaude45Opus
 
-const (
-	// Llama 4 Series (Latest)
-	ModelMetaLlama4Maverick = "llama-4-maverick"
-	ModelMetaLlama4Scout    = "llama-4-scout"
-	ModelMetaLlama4Behemoth = "llama-4-behemoth"
+const ModelAnthropicClaude45Sonnet = core.ModelAnthropicClaude45Sonnet
 
-	// Llama 3.3 Series
-	ModelMetaLlama33_70B = "llama-3.3-70b-instruct"
+const ModelAnthropicClaude45Haiku = core.ModelAnthropicClaude45Haiku
 
-	// Llama 3.2 Series
-	ModelMetaLlama32_90BVision = "llama-3.2-90b-vision-instruct"
-	ModelMetaLlama32_11BVision = "llama-3.2-11b-vision-instruct"
-	ModelMetaLlama32_3B        = "llama-3.2-3b-instruct"
-	ModelMetaLlama32_1B        = "llama-3.2-1b-instruct"
-)
+// Claude 4.x Series (Legacy)
+const ModelAnthropicClaude41Opus = core.ModelAnthropicClaude41Opus
 
-// =============================================================================
-// DeepSeek Models
-// https://api-docs.deepseek.com/
-// =============================================================================
+const ModelAnthropicClaude4Opus = core.ModelAnthropicClaude4Opus
 
-const (
-	// Main API Models
-	ModelDeepSeekChat     = "deepseek-chat"     // DeepSeek-V3.2 non-thinking mode
-	ModelDeepSeekReasoner = "deepseek-reasoner" // DeepSeek-V3.2 thinking mode
+const ModelAnthropicClaude4Sonnet = core.ModelAnthropicClaude4Sonnet
 
-	// Versioned Models
-	ModelDeepSeekV32    = "deepseek-v3.2"
-	ModelDeepSeekV3     = "deepseek-v3"
-	ModelDeepSeekR1     = "deepseek-r1"
-	ModelDeepSeekR10528 = "deepseek-r1-0528"
-)
+// Gemini 4 Series
+const ModelGoogleGemini4Argon = core.ModelGoogleGemini4Argon
+
+// Gemini 3.1 Series
+const ModelGoogleGemini31Pro = core.ModelGoogleGemini31Pro
+
+const ModelGoogleGemini31FlashLite = core.ModelGoogleGemini31FlashLite
+
+// Gemini 3 Series
+const ModelGoogleGemini3Pro = core.ModelGoogleGemini3Pro
+
+const ModelGoogleGemini3Flash = core.ModelGoogleGemini3Flash
+
+// Gemini 2.5 Series
+const ModelGoogleGemini25Pro = core.ModelGoogleGemini25Pro
+
+const ModelGoogleGemini25Flash = core.ModelGoogleGemini25Flash
+
+const ModelGoogleGemini25FlashLite = core.ModelGoogleGemini25FlashLite
+
+// Grok 4.7 Series
+const ModelXAIGrok47 = core.ModelXAIGrok47
+
+// Grok 4.3 Series
+const ModelXAIGrok43 = core.ModelXAIGrok43
+
+const ModelXAIGrok43Latest = core.ModelXAIGrok43Latest
+
+const ModelXAIGrokLatest = core.ModelXAIGrokLatest
+
+// Grok 4.20 Series
+const ModelXAIGrok420Reasoning = core.ModelXAIGrok420Reasoning
+
+const ModelXAIGrok420NonReasoning = core.ModelXAIGrok420NonReasoning
+
+const ModelXAIGrok420MultiAgent = core.ModelXAIGrok420MultiAgent
+
+// Grok 4.1 Series (retiring May 15, 2026)
+const ModelXAIGrok41Fast = core.ModelXAIGrok41Fast
+
+const ModelXAIGrok41FastReasoning = core.ModelXAIGrok41FastReasoning
+
+const ModelXAIGrok41FastNonReasoning = core.ModelXAIGrok41FastNonReasoning
+
+// Grok 4 Series
+const ModelXAIGrok4FastReasoning = core.ModelXAIGrok4FastReasoning
+
+const ModelXAIGrok4FastNonReasoning = core.ModelXAIGrok4FastNonReasoning
+
+const ModelXAIGrok4 = core.ModelXAIGrok4
+
+// Grok 3 Series
+const ModelXAIGrok3 = core.ModelXAIGrok3
+
+const ModelXAIGrok3Mini = core.ModelXAIGrok3Mini
+
+// Specialized Models
+const ModelXAIGrokCodeFast1 = core.ModelXAIGrokCodeFast1
+
+const ModelXAIGrok2Vision = core.ModelXAIGrok2Vision
+
+const ModelXAIGrok2Image = core.ModelXAIGrok2Image
+
+// Large Models
+const ModelMistralLarge3 = core.ModelMistralLarge3
+
+const ModelMistralMedium3 = core.ModelMistralMedium3
+
+const ModelMistralSmall = core.ModelMistralSmall
+
+// Multimodal
+const ModelMistralPixtralLarge = core.ModelMistralPixtralLarge
+
+// Reasoning Models
+const ModelMistralMagistral = core.ModelMistralMagistral
+
+const ModelMistralMagistralMedium = core.ModelMistralMagistralMedium
+
+const ModelMistralMagistralSmall = core.ModelMistralMagistralSmall
+
+// Code Models
+const ModelMistralCodestral = core.ModelMistralCodestral
+
+const ModelMistralDevstral = core.ModelMistralDevstral
+
+// Edge Models
+const ModelMistralMinistral3B = core.ModelMistralMinistral3B
+
+const ModelMistralMinistral8B = core.ModelMistralMinistral8B
+
+// Llama 4 Series (Latest)
+const ModelMetaLlama4Maverick = core.ModelMetaLlama4Maverick
+
+const ModelMetaLlama4Scout = core.ModelMetaLlama4Scout
+
+const ModelMetaLlama4Behemoth = core.ModelMetaLlama4Behemoth
+
+// Llama 3.3 Series
+const ModelMetaLlama33_70B = core.ModelMetaLlama33_70B
+
+// Llama 3.2 Series
+const ModelMetaLlama32_90BVision = core.ModelMetaLlama32_90BVision
+
+const ModelMetaLlama32_11BVision = core.ModelMetaLlama32_11BVision
+
+const ModelMetaLlama32_3B = core.ModelMetaLlama32_3B
+
+const ModelMetaLlama32_1B = core.ModelMetaLlama32_1B
+
+// Main API Models
+const ModelDeepSeekChat = core.ModelDeepSeekChat
+
+const ModelDeepSeekReasoner = core.ModelDeepSeekReasoner
+
+// Versioned Models
+const ModelDeepSeekV32 = core.ModelDeepSeekV32
+
+const ModelDeepSeekV3 = core.ModelDeepSeekV3
+
+const ModelDeepSeekR1 = core.ModelDeepSeekR1
+
+const ModelDeepSeekR10528 = core.ModelDeepSeekR10528

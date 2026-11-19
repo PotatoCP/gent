@@ -3,6 +3,8 @@ package react
 import (
 	"context"
 	"errors"
+	"fmt"
+	"github.com/rickchristie/gent/executor"
 	"testing"
 
 	"github.com/rickchristie/gent"
@@ -50,10 +52,7 @@ func (m *mockModel) response(request *gent.ModelCallRequest) (*gent.ModelCallRes
 
 	return &gent.ModelCallResponse{
 		Choices: []*gent.ContentChoice{
-			{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: ""}},
-			},
+			answerChoice(""),
 		},
 	}, nil
 }
@@ -78,8 +77,87 @@ func newMockToolChain() *toolchain.Registry { return toolchain.New() }
 // Helper to create ExecutionContext for tests
 // ----------------------------------------------------------------------------
 
-func newTestExecCtx(data gent.LoopData) *gent.ExecutionContext {
-	return gent.NewExecutionContext(context.Background(), "test", data)
+func answerChoice(text string) *gent.ContentChoice {
+	return &gent.ContentChoice{
+		Completion:      gent.ModelCompletion{Status: gent.ModelStatusAnswer},
+		CandidateSource: &gent.ContentSource{MessageIds: []string{"answer"}},
+		Parts: []gent.ContentPart{&gent.AssistantContent{
+			Type: gent.AssistantContentFinalAnswerCandidate, MessageId: "answer",
+			Content: []gent.ContentPart{gent.TextPart(text)},
+		}},
+	}
+}
+
+func newTestExecution[T any](t *testing.T, loop gent.Loop[T], config *gent.Config) (
+	*executor.Runner[T], *gent.ExecutionContext,
+) {
+	t.Helper()
+	if recorder, ok := config.Recorder.(*testRecorder); ok {
+		if config.Codecs == nil {
+			config.Codecs = gent.NewCodecRegistry()
+		}
+		recorder.codecs = config.Codecs
+	}
+	runner := executor.NewRunner(loop, config)
+	execCtx, err := runner.NewExecutionContext(context.Background(), t.Name())
+	require.NoError(t, err)
+	t.Cleanup(execCtx.Release)
+	return runner, execCtx
+}
+
+// testRecorder retains independent saved values so tests can inspect the full accepted archive.
+// The execution context keeps only the active working state.
+type testRecorder struct {
+	codecs  *gent.CodecRegistry
+	view    *gent.RunView
+	state   *gent.RunState
+	batches []*gent.SaveBatch
+}
+
+func (recorder *testRecorder) Save(_ context.Context, batch *gent.SaveBatch,
+	capture func() (*gent.RunState, error),
+) error {
+	if recorder.codecs == nil {
+		recorder.codecs = gent.NewCodecRegistry()
+	}
+	data, err := recorder.codecs.Marshal(batch)
+	if err != nil {
+		return err
+	}
+	var saved gent.SaveBatch
+	if err := recorder.codecs.Unmarshal(data, &saved); err != nil {
+		return err
+	}
+	if recorder.view == nil {
+		recorder.view = gent.NewRunView(batch.RunId)
+	}
+	applied, err := recorder.view.Apply(&saved, recorder.codecs)
+	if err != nil {
+		return err
+	}
+	if applied.Status != gent.ApplyApplied {
+		return fmt.Errorf("save batch: %s", applied.Status)
+	}
+	recorder.batches = append(recorder.batches, &saved)
+	recorder.state, err = capture()
+	return err
+}
+
+func savedAssistantId(t *testing.T, recorder *testRecorder, call, part int) string {
+	t.Helper()
+	index := 0
+	for _, event := range recorder.view.Activity {
+		response, ok := event.Payload.(*gent.AfterModelCallEvent)
+		if !ok {
+			continue
+		}
+		if index == call {
+			return response.Response.Choices[0].Parts[part].(*gent.AssistantContent).MessageId
+		}
+		index++
+	}
+	t.Fatal("saved model response is absent")
+	return ""
 }
 
 // ----------------------------------------------------------------------------
@@ -88,19 +166,17 @@ func newTestExecCtx(data gent.LoopData) *gent.ExecutionContext {
 
 func TestAgent_Next_ModelError(t *testing.T) {
 	model := newMockModel().WithErrors(errors.New("model failed"))
-	format := format.NewXML()
-	tc := newMockToolChain()
-
-	loop := NewAgent(model).
-		WithToolResultFormat(format).
-		WithToolChain(tc)
-
-	data := gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Hello"}))
-	execCtx := newTestExecCtx(data)
-	_, err := loop.Next(execCtx)
-
+	loop := NewAgent(model).WithToolResultFormat(format.NewXML())
+	runner, execCtx := newTestExecution(t, loop, &gent.Config{})
+	value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Hello")))
 	require.Error(t, err)
-	assert.EqualError(t, err, "model call failed: model failed")
+	assert.Equal(t, "", value)
+	assert.Nil(t, result)
+	assert.ErrorIs(t, err, model.errors[0])
+	assert.EqualError(t, err, fmt.Sprintf(
+		"gent: Loop.Next %T failed in run %q turn %q iteration 1: model call failed: model failed",
+		loop, execCtx.RunId(), execCtx.TurnId()))
+
 }
 
 // mockNamerModel implements Model with ModelNamer for
@@ -194,19 +270,14 @@ func TestAgent_WithCallOptions(t *testing.T) {
 			model := newMockModel(
 				&gent.ModelCallResponse{
 					Choices: []*gent.ContentChoice{
-						{
-							Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-							CandidateContent: []gent.ContentPart{gent.TextContent{Text: "done"}},
-						},
+						answerChoice("done"),
 					},
 				},
 			)
 
 			format := format.NewXML()
 
-			agent := NewAgent(model).
-				WithToolResultFormat(format).
-				WithToolChain(newMockToolChain())
+			agent := NewAgent(model).WithToolResultFormat(format)
 
 			if tc.input.callOptions != nil {
 				agent.WithCallOptions(
@@ -214,15 +285,9 @@ func TestAgent_WithCallOptions(t *testing.T) {
 				)
 			}
 
-			data := gent.NewBasicLoopData(
-				gent.NewTask(gent.TextContent{Text: "test"}),
-			)
-			execCtx := gent.NewExecutionContext(
-				context.Background(), "test", data,
-			)
-			execCtx.SetLimits(nil)
-
-			_, err := agent.Next(execCtx)
+			recorder := &testRecorder{}
+			runner, execCtx := newTestExecution(t, agent, &gent.Config{Recorder: recorder})
+			_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("test")))
 			require.NoError(t, err)
 			require.Len(t, model.capturedOptions, 1)
 
@@ -303,10 +368,7 @@ func TestAgent_SamplingParams_ForbiddenModel(
 			inner := newMockModel(
 				&gent.ModelCallResponse{
 					Choices: []*gent.ContentChoice{
-						{
-							Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-							CandidateContent: []gent.ContentPart{gent.TextContent{Text: "done"}},
-						},
+						answerChoice("done"),
 					},
 				},
 			)
@@ -317,9 +379,7 @@ func TestAgent_SamplingParams_ForbiddenModel(
 
 			format := format.NewXML()
 
-			agent := NewAgent(model).
-				WithToolResultFormat(format).
-				WithToolChain(newMockToolChain())
+			agent := NewAgent(model).WithToolResultFormat(format)
 
 			if tc.input.callOptions != nil {
 				agent.WithCallOptions(
@@ -327,15 +387,9 @@ func TestAgent_SamplingParams_ForbiddenModel(
 				)
 			}
 
-			data := gent.NewBasicLoopData(
-				gent.NewTask(gent.TextContent{Text: "test"}),
-			)
-			execCtx := gent.NewExecutionContext(
-				context.Background(), "test", data,
-			)
-			execCtx.SetLimits(nil)
-
-			_, err := agent.Next(execCtx)
+			recorder := &testRecorder{}
+			runner, execCtx := newTestExecution(t, agent, &gent.Config{Recorder: recorder})
+			_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("test")))
 			require.NoError(t, err)
 			require.Len(t, model.capturedOptions, 1)
 
@@ -469,10 +523,7 @@ func TestAgent_SamplingWarnings(t *testing.T) {
 				inner := newMockModel(
 					&gent.ModelCallResponse{
 						Choices: []*gent.ContentChoice{
-							{
-								Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-								CandidateContent: []gent.ContentPart{gent.TextContent{Text: "ok"}},
-							},
+							answerChoice("ok"),
 						},
 					},
 				)
@@ -484,10 +535,7 @@ func TestAgent_SamplingWarnings(t *testing.T) {
 				model = newMockModel(
 					&gent.ModelCallResponse{
 						Choices: []*gent.ContentChoice{
-							{
-								Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-								CandidateContent: []gent.ContentPart{gent.TextContent{Text: "ok"}},
-							},
+							answerChoice("ok"),
 						},
 					},
 				)
@@ -495,9 +543,7 @@ func TestAgent_SamplingWarnings(t *testing.T) {
 
 			format := format.NewXML()
 
-			agent := NewAgent(model).
-				WithToolResultFormat(format).
-				WithToolChain(newMockToolChain())
+			agent := NewAgent(model).WithToolResultFormat(format)
 
 			if tc.input.callOptions != nil {
 				agent.WithCallOptions(
@@ -505,21 +551,15 @@ func TestAgent_SamplingWarnings(t *testing.T) {
 				)
 			}
 
-			data := gent.NewBasicLoopData(
-				gent.NewTask(gent.TextContent{Text: "test"}),
-			)
-			execCtx := gent.NewExecutionContext(
-				context.Background(), "test", data,
-			)
-			execCtx.SetLimits(nil)
-
-			_, err := agent.Next(execCtx)
+			recorder := &testRecorder{}
+			runner, execCtx := newTestExecution(t, agent, &gent.Config{Recorder: recorder})
+			_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("test")))
 			require.NoError(t, err)
 
 			// Count warning events by name.
 			var restrictive, forbidden int
-			for _, evt := range execCtx.Events() {
-				ce, ok := evt.(*gent.CommonEvent)
+			for _, evt := range recorder.view.Activity {
+				ce, ok := evt.Payload.(*gent.CommonEvent)
 				if !ok {
 					continue
 				}
@@ -551,8 +591,8 @@ func samplingValue(value *float64) float64 {
 	}
 	return *value
 }
-func (m *mockModel) PrepareRequest(ctx *gent.ExecutionContext,
+func (m *mockModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

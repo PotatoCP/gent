@@ -38,22 +38,16 @@ func IsLifecycleEvent(event gent.Event) bool {
 // CollectLifecycleEvents collects all lifecycle events from an ExecutionContext.
 // Filters out StateChangeEvent and CommonEvent which are state change tracking events.
 // Events are returned as-is without normalization.
-func CollectLifecycleEvents(execCtx *gent.ExecutionContext) []gent.Event {
+func CollectLifecycleEvents(events []*gent.RecordedEvent) []gent.Event {
 	var result []gent.Event
-	for _, event := range execCtx.Events() {
+	for _, saved := range events {
+		event, ok := saved.Payload.(gent.Event)
+		if !ok {
+			continue
+		}
 		if IsLifecycleEvent(event) {
 			result = append(result, event)
 		}
-	}
-	return result
-}
-
-// CollectLifecycleEventsWithChildren collects lifecycle events from ExecutionContext and
-// all children. Filters out StateChangeEvent and CommonEvent. Events are returned as-is.
-func CollectLifecycleEventsWithChildren(execCtx *gent.ExecutionContext) []gent.Event {
-	result := CollectLifecycleEvents(execCtx)
-	for _, child := range execCtx.Children() {
-		result = append(result, CollectLifecycleEventsWithChildren(child)...)
 	}
 	return result
 }
@@ -140,8 +134,7 @@ func assertEventEqual(
 	case *gent.AfterExecutionEvent:
 		act := actual.(*gent.AfterExecutionEvent)
 		assertBaseEvent(t, index, exp.BaseEvent, act.BaseEvent, prevTimestamp)
-		assert.Equal(t, exp.TerminationReason, act.TerminationReason,
-			msgFmt("TerminationReason"), index)
+		assert.Equal(t, exp.TerminationReason, act.TerminationReason, msgFmt("TerminationReason"), index)
 
 	case *gent.BeforeIterationEvent:
 		act := actual.(*gent.BeforeIterationEvent)
@@ -152,8 +145,7 @@ func assertEventEqual(
 		assertBaseEvent(t, index, exp.BaseEvent, act.BaseEvent, prevTimestamp)
 		// Compare the full loop result, including its typed value and delivery content.
 		assert.Equal(t, exp.Result, act.Result, msgFmt("Result"), index)
-		assert.GreaterOrEqual(t, act.Duration, time.Duration(0),
-			msgFmt("Duration"), index)
+		assert.GreaterOrEqual(t, act.Duration, time.Duration(0), msgFmt("Duration"), index)
 
 	case *gent.BeforeModelCallEvent:
 		act := actual.(*gent.BeforeModelCallEvent)
@@ -169,8 +161,7 @@ func assertEventEqual(
 		// Skip Response comparison - compare InputTokens/OutputTokens instead
 		assert.Equal(t, exp.InputTokens, act.InputTokens, msgFmt("InputTokens"), index)
 		assert.Equal(t, exp.OutputTokens, act.OutputTokens, msgFmt("OutputTokens"), index)
-		assert.GreaterOrEqual(t, act.Duration, time.Duration(0),
-			msgFmt("Duration"), index)
+		assert.GreaterOrEqual(t, act.Duration, time.Duration(0), msgFmt("Duration"), index)
 		assert.Equal(t, exp.Error, act.Error, msgFmt("Error"), index)
 
 	case *gent.BeforeToolCallEvent:
@@ -185,8 +176,7 @@ func assertEventEqual(
 		assert.Equal(t, exp.ToolName, act.ToolName, msgFmt("ToolName"), index)
 		assert.Equal(t, exp.Args, act.Args, msgFmt("Args"), index)
 		assert.Equal(t, exp.Output, act.Output, msgFmt("Output"), index)
-		assert.GreaterOrEqual(t, act.Duration, time.Duration(0),
-			msgFmt("Duration"), index)
+		assert.GreaterOrEqual(t, act.Duration, time.Duration(0), msgFmt("Duration"), index)
 		// Skip exact Error comparison - just verify error presence matches
 		if exp.Error != nil {
 			assert.NotNil(t, act.Error, msgFmt("Error should not be nil"), index)
@@ -253,16 +243,11 @@ func assertBaseEvent(
 ) {
 	t.Helper()
 
-	assert.Equal(t, expected.EventName, actual.EventName,
-		"event[%d].EventName", index)
-	assert.Equal(t, expected.Iteration, actual.Iteration,
-		"event[%d].Iteration", index)
-	assert.Equal(t, expected.Depth, actual.Depth,
-		"event[%d].Depth", index)
+	assert.Equal(t, expected.EventName, actual.EventName, "event[%d].EventName", index)
+	assert.Equal(t, expected.Iteration, actual.Iteration, "event[%d].Iteration", index)
 
 	// Timestamp must be non-zero
-	assert.False(t, actual.Timestamp.IsZero(),
-		"event[%d].Timestamp should not be zero", index)
+	assert.False(t, actual.Timestamp.IsZero(), "event[%d].Timestamp should not be zero", index)
 
 	// Timestamp must be >= previous timestamp (monotonically non-decreasing)
 	if !prevTimestamp.IsZero() {

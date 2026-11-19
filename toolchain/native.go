@@ -48,7 +48,7 @@ func nativeDefinitions(tools []any, outputSchema bool) ([]*gent.ToolDefinition, 
 
 // Request hooks can edit nested schemas. Preparation creates the independent request view at
 // the managed boundary; catalog reads themselves need no defensive copy.
-func (c *Registry) NativeTools(ctx *gent.ExecutionContext) ([]*gent.ToolDefinition, error) {
+func (c *Registry) NativeTools(execCtx *gent.ExecutionContext) ([]*gent.ToolDefinition, error) {
 	var available []any
 	for _, tool := range c.tools {
 		if !c.deprecated[tool.(gent.IndexableTool).Name()] {
@@ -58,18 +58,21 @@ func (c *Registry) NativeTools(ctx *gent.ExecutionContext) ([]*gent.ToolDefiniti
 	return nativeDefinitions(available, c.printOutputSchema)
 }
 
-func prepareNativeCalls(ctx *gent.ExecutionContext, chain gent.ToolChain,
+func prepareNativeCalls(execCtx *gent.ExecutionContext, chain gent.ToolChain,
 	calls []*gent.ModelToolCallRequest,
 ) (*gent.ToolPlan, error) {
-	if err := chain.RegisterCodecs(ctx.Codecs()); err != nil {
+	if err := chain.RegisterCodecs(execCtx.Codecs()); err != nil {
 		return nil, err
 	}
-	plan := &gent.ToolPlan{Version: 1, AttemptId: ctx.AttemptId()}
+	plan := &gent.ToolPlan{Version: 1, AttemptId: execCtx.AttemptId()}
 	for _, call := range calls {
 		if call.FunctionCall == nil || call.FunctionCall.Name == "" {
 			return nil, gent.ErrMissingToolName
 		}
-		id := ctx.NewToolCallId()
+		id, err := execCtx.NewToolCallId()
+		if err != nil {
+			return nil, err
+		}
 		modelID := call.ID
 		if modelID == "" {
 			modelID = id
@@ -102,16 +105,16 @@ func decodeArguments(raw string) (map[string]any, error) {
 	return args, nil
 }
 
-func (c *Registry) PrepareCalls(ctx *gent.ExecutionContext,
+func (c *Registry) PrepareCalls(execCtx *gent.ExecutionContext,
 	calls []*gent.ModelToolCallRequest,
 ) (*gent.ToolPlan, error) {
-	return prepareNativeCalls(ctx, c, calls)
+	return prepareNativeCalls(execCtx, c, calls)
 }
 
-func (c *SearchChain) PrepareCalls(ctx *gent.ExecutionContext,
+func (c *SearchChain) PrepareCalls(execCtx *gent.ExecutionContext,
 	calls []*gent.ModelToolCallRequest,
 ) (*gent.ToolPlan, error) {
-	plan, err := prepareNativeCalls(ctx, c, calls)
+	plan, err := prepareNativeCalls(execCtx, c, calls)
 	if err != nil {
 		return nil, err
 	}

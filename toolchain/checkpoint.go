@@ -38,23 +38,23 @@ type rawToolExecutor func(*gent.ExecutionContext, []*parsedCall, gent.TextFormat
 	[]*gent.ToolCallRecord, error,
 )
 
-func executeNextTool(ctx *gent.ExecutionContext, plan *gent.ToolPlan, format gent.TextFormat,
+func executeNextTool(execCtx *gent.ExecutionContext, plan *gent.ToolPlan, format gent.TextFormat,
 	chain gent.ToolChain, execute rawToolExecutor, recover gent.ToolRecoveryFunc[gent.EncodedValue],
 ) (*gent.ToolCallRecord, error) {
-	if err := checkToolPlan(ctx, plan); err != nil {
+	if err := checkToolPlan(execCtx, plan); err != nil {
 		return nil, err
 	}
-	unbind := ctx.BindToolCall(plan)
+	unbind := execCtx.BindToolCall(plan)
 	defer unbind()
 	expectedSchema := chain.GetToolSchema(plan.Calls[plan.NextCall].Name)
-	result, completed, err := ctx.RecoverTool(plan, recover, expectedSchema)
+	result, completed, err := execCtx.RecoverTool(plan, recover, expectedSchema)
 	if err != nil {
 		return nil, err
 	}
 	if completed {
-		return completePlannedTool(ctx, plan, result)
+		return completePlannedTool(execCtx, plan, result)
 	}
-	if err := ctx.SetToolPlan(plan); err != nil {
+	if err := execCtx.SetToolPlan(plan); err != nil {
 		return nil, err
 	}
 	call := plan.Calls[plan.NextCall]
@@ -65,12 +65,12 @@ func executeNextTool(ctx *gent.ExecutionContext, plan *gent.ToolPlan, format gen
 	calls := []*parsedCall{{Id: call.Id, Name: call.Name, Args: args,
 		ModelCallID: call.ModelCallID, ModelName: call.ModelName, RawArguments: call.RawArguments,
 		parseError: parseErr}}
-	output, err := execute(ctx, calls, format)
-	if recordErr := ctx.RecordingError(); recordErr != nil {
+	output, err := execute(execCtx, calls, format)
+	if recordErr := execCtx.RecordingError(); recordErr != nil {
 		return nil, recordErr
 	}
-	if ctx.IsWorkerInterrupted() {
-		return nil, ctx.Context().Err()
+	if execCtx.IsWorkerInterrupted() {
+		return nil, execCtx.Context().Err()
 	}
 	if err != nil {
 		return nil, err
@@ -78,47 +78,47 @@ func executeNextTool(ctx *gent.ExecutionContext, plan *gent.ToolPlan, format gen
 	if len(output) != 1 {
 		return nil, errors.New("gent: planned call must produce one record")
 	}
-	return completePlannedTool(ctx, plan, output[0])
+	return completePlannedTool(execCtx, plan, output[0])
 }
 
-func checkToolPlan(ctx *gent.ExecutionContext, plan *gent.ToolPlan) error {
+func checkToolPlan(execCtx *gent.ExecutionContext, plan *gent.ToolPlan) error {
 	if plan.Version != 1 || plan.NextCall < 0 || plan.NextCall > len(plan.Calls) {
 		return errors.New("gent: invalid tool plan")
 	}
 	if plan.NextCall == len(plan.Calls) {
 		return gent.ErrToolPlanComplete
 	}
-	if err := ctx.RecordingError(); err != nil {
+	if err := execCtx.RecordingError(); err != nil {
 		return err
 	}
-	return ctx.Context().Err()
+	return execCtx.Context().Err()
 }
 
-func completePlannedTool(ctx *gent.ExecutionContext, plan *gent.ToolPlan,
+func completePlannedTool(execCtx *gent.ExecutionContext, plan *gent.ToolPlan,
 	result *gent.ToolCallRecord,
 ) (*gent.ToolCallRecord, error) {
 	plan.Results = append(plan.Results, result)
 	plan.NextCall++
 	plan.ReadyCall = nil
-	if err := ctx.SetToolPlan(plan); err != nil {
+	if err := execCtx.SetToolPlan(plan); err != nil {
 		return nil, err
 	}
-	if err := ctx.CommitCheckpoint(gent.PhaseToolCompleted); err != nil {
+	if err := execCtx.CommitCheckpoint(gent.PhaseToolCompleted); err != nil {
 		return nil, err
 	}
 	return result, nil
 }
 
-func (c *Registry) ExecuteNext(ctx *gent.ExecutionContext, plan *gent.ToolPlan,
+func (c *Registry) ExecuteNext(execCtx *gent.ExecutionContext, plan *gent.ToolPlan,
 	format gent.TextFormat,
 ) (*gent.ToolCallRecord, error) {
-	return executeNextTool(ctx, plan, format, c, c.executeParsed, c.Recover)
+	return executeNextTool(execCtx, plan, format, c, c.executeParsed, c.Recover)
 }
 
-func (c *SearchChain) ExecuteNext(ctx *gent.ExecutionContext, plan *gent.ToolPlan,
+func (c *SearchChain) ExecuteNext(execCtx *gent.ExecutionContext, plan *gent.ToolPlan,
 	format gent.TextFormat,
 ) (*gent.ToolCallRecord, error) {
-	return executeNextTool(ctx, plan, format, c, c.executeParsed,
+	return executeNextTool(execCtx, plan, format, c, c.executeParsed,
 		func(recoveryCtx context.Context, request *gent.ToolRecoveryRequest[gent.EncodedValue]) (
 			*gent.ToolRecoveryResponse, error,
 		) {
@@ -131,7 +131,7 @@ func (c *SearchChain) ExecuteNext(ctx *gent.ExecutionContext, plan *gent.ToolPla
 				return nil, err
 			}
 			input := bound.(*gent.ToolRecoveryRequest[gent.ToolSearchRequest]).Input()
-			response, err := c.localSearchTool(ctx, func([]string) {}).Call(recoveryCtx, input)
+			response, err := c.localSearchTool(execCtx, func([]string) {}).Call(recoveryCtx, input)
 			if err != nil {
 				return nil, err
 			}

@@ -2,25 +2,26 @@ package trace
 
 import (
 	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 
+	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/internal/buffer"
 )
 
 // Sequencer projects frozen events into display snapshots and bounded subscriptions.
-// Follow receives live progress; ObserveCommitted receives saved progress only.
+// Register it as a Config Subscriber. The registration selects Live or Accepted delivery.
 type Sequencer struct {
 	observeMu sync.Mutex
 	closeMu   sync.Mutex
 	mu        sync.RWMutex
 
-	runId string
-	cfg   config
+	lastDeliveryStop *gent.SubscriberStop
+	runId            string
+	cfg              config
 
-	closed          bool
-	nextEventNumber uint64
+	closed                  bool
+	nextEventSequenceNumber uint64
 
 	snapshot Snapshot
 
@@ -37,11 +38,10 @@ type Sequencer struct {
 	nextLiveSubscriber uint64
 }
 
-// NewSequencer creates a trace sequencer for a run.
+// NewSequencer creates one conversation view. Empty runId binds the first observed event. This
+// lets Config register the Subscriber before Runner allocates the conversation identity. Use a
+// separate Sequencer per conversation; a bound view rejects events from another run.
 func NewSequencer(runId string, cfg Config) (*Sequencer, error) {
-	if runId == "" {
-		return nil, fmt.Errorf("trace: empty run identity")
-	}
 	normalized := normalizeConfig(cfg)
 	now := time.Now()
 	seq := &Sequencer{
@@ -77,15 +77,15 @@ func (s *Sequencer) record(event *Event) *Event {
 		return nil
 	}
 
-	if event.EventNumber == 0 || event.EventNumber <= s.nextEventNumber {
+	if event.EventSequenceNumber == 0 || event.EventSequenceNumber <= s.nextEventSequenceNumber {
 		return nil
 	}
-	s.nextEventNumber = event.EventNumber
+	s.nextEventSequenceNumber = event.EventSequenceNumber
 	event.RunId = s.runId
 	s.fillErrorMetadata(event)
 	s.applyEvent(event)
 	event.Payload = jsonSafeValue(event.Payload)
-	s.snapshot.LastEventNumber = event.EventNumber
+	s.snapshot.LastEventSequenceNumber = event.EventSequenceNumber
 	s.snapshot.LastUpdatedTs = event.Ts
 
 	stored := cloneEvent(event)
@@ -101,27 +101,28 @@ func (s *Sequencer) Snapshot() *Snapshot {
 	return cloneSnapshot(&s.snapshot)
 }
 
-// EventsAfter returns replay events after lastEventNumber from the contiguous recent buffer.
-func (s *Sequencer) EventsAfter(lastEventNumber uint64) ([]*Event, error) {
+// EventsAfter returns replay events after lastEventSequenceNumber from the contiguous recent
+// buffer.
+func (s *Sequencer) EventsAfter(lastEventSequenceNumber uint64) ([]*Event, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if lastEventNumber == s.snapshot.LastEventNumber {
+	if lastEventSequenceNumber == s.snapshot.LastEventSequenceNumber {
 		return []*Event{}, nil
 	}
 	if len(s.recentEvents) == 0 {
 		return nil, ErrReplayUnavailable
 	}
-	first := s.recentEvents[0].EventNumber
-	if lastEventNumber+1 < first {
+	first := s.recentEvents[0].EventSequenceNumber
+	if lastEventSequenceNumber+1 < first {
 		return nil, ErrReplayUnavailable
 	}
 	result := make([]*Event, 0)
 	for _, event := range s.recentEvents {
-		if event.EventNumber > lastEventNumber {
+		if event.EventSequenceNumber > lastEventSequenceNumber {
 			result = append(result, cloneEvent(event))
 		}
 	}
-	if len(result) == 0 && lastEventNumber < s.snapshot.LastEventNumber {
+	if len(result) == 0 && lastEventSequenceNumber < s.snapshot.LastEventSequenceNumber {
 		return nil, ErrReplayUnavailable
 	}
 	return result, nil
@@ -154,8 +155,8 @@ func (s *Sequencer) fillErrorMetadata(event *Event) {
 	if event.Error == nil {
 		return
 	}
-	if event.Error.EventNumber == 0 {
-		event.Error.EventNumber = event.EventNumber
+	if event.Error.EventSequenceNumber == 0 {
+		event.Error.EventSequenceNumber = event.EventSequenceNumber
 	}
 	if event.Error.Ts.IsZero() {
 		event.Error.Ts = event.Ts
@@ -169,14 +170,8 @@ func (s *Sequencer) fillErrorMetadata(event *Event) {
 	if event.Error.Iteration == 0 {
 		event.Error.Iteration = event.Iteration
 	}
-	if event.Error.Depth == 0 {
-		event.Error.Depth = event.Depth
-	}
 	if event.Error.ContextId == "" {
 		event.Error.ContextId = event.ContextId
-	}
-	if event.Error.ParentContextId == "" {
-		event.Error.ParentContextId = event.ParentContextId
 	}
 	if event.Error.ModelCallId == "" {
 		event.Error.ModelCallId = event.ModelCallId
@@ -274,31 +269,31 @@ func (s *liveSubscriber) send(event *Event) bool {
 		select {
 		case s.bounded <- event:
 			s.notifyOverflow(OverflowInfo{
-				Policy:             s.policy,
-				DroppedEventNumber: eventNumber(dropped),
-				NewEventNumber:     event.EventNumber,
+				Policy:                     s.policy,
+				DroppedEventSequenceNumber: eventSequenceNumber(dropped),
+				NewEventSequenceNumber:     event.EventSequenceNumber,
 			})
 			return true
 		default:
 			s.notifyOverflow(OverflowInfo{
-				Policy:             OverflowDropNewest,
-				DroppedEventNumber: event.EventNumber,
-				NewEventNumber:     event.EventNumber,
+				Policy:                     OverflowDropNewest,
+				DroppedEventSequenceNumber: event.EventSequenceNumber,
+				NewEventSequenceNumber:     event.EventSequenceNumber,
 			})
 			return true
 		}
 	case OverflowDropNewest:
 		s.notifyOverflow(OverflowInfo{
-			Policy:             s.policy,
-			DroppedEventNumber: event.EventNumber,
-			NewEventNumber:     event.EventNumber,
+			Policy:                     s.policy,
+			DroppedEventSequenceNumber: event.EventSequenceNumber,
+			NewEventSequenceNumber:     event.EventSequenceNumber,
 		})
 		return true
 	default:
 		s.notifyOverflow(OverflowInfo{
-			Policy:           OverflowCloseSubscriber,
-			NewEventNumber:   event.EventNumber,
-			SubscriberClosed: true,
+			Policy:                 OverflowCloseSubscriber,
+			NewEventSequenceNumber: event.EventSequenceNumber,
+			SubscriberClosed:       true,
 		})
 		s.close()
 		return false
@@ -341,9 +336,9 @@ func (s *liveSubscriber) discard() {
 	}
 }
 
-func eventNumber(event *Event) uint64 {
+func eventSequenceNumber(event *Event) uint64 {
 	if event == nil {
 		return 0
 	}
-	return event.EventNumber
+	return event.EventSequenceNumber
 }

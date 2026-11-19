@@ -37,9 +37,7 @@ const (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr,
-			"%sError: %v%s\n",
-			colorRed, err, colorReset)
+		fmt.Fprintf(os.Stderr, "%sError: %v%s\n", colorRed, err, colorReset)
 		os.Exit(1)
 	}
 }
@@ -48,18 +46,13 @@ func run() error {
 	// Create log directory
 	logDir := ".logs"
 	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return fmt.Errorf(
-			"failed to create log directory: %w", err)
+		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
 	// Create readline instance for menu
-	rl, err := readline.New(
-		colorCyan +
-			"Enter selection (or 'q' to quit): " +
-			colorReset)
+	rl, err := readline.New(colorCyan + "Enter selection (or 'q' to quit): " + colorReset)
 	if err != nil {
-		return fmt.Errorf(
-			"failed to create readline: %w", err)
+		return fmt.Errorf("failed to create readline: %w", err)
 	}
 	defer rl.Close()
 
@@ -201,9 +194,7 @@ func run() error {
 		)
 		logFile, logErr := os.Create(logPath)
 		if logErr != nil {
-			fmt.Fprintf(os.Stderr,
-				"%sFailed to create log: %v%s\n",
-				colorRed, logErr, colorReset)
+			fmt.Fprintf(os.Stderr, "%sFailed to create log: %v%s\n", colorRed, logErr, colorReset)
 		} else {
 			config.LogWriter = logFile
 			fmt.Printf(
@@ -213,18 +204,13 @@ func run() error {
 		}
 
 		// Run
-		ctx, cancel := context.WithCancel(
-			context.Background())
+		ctx, cancel := context.WithCancel(context.Background())
 
 		sigCh := make(chan os.Signal, 1)
-		signal.Notify(
-			sigCh, os.Interrupt, syscall.SIGTERM)
+		signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 		go func() {
 			<-sigCh
-			fmt.Printf(
-				"\n%sReceived interrupt, "+
-					"cancelling...%s\n",
-				colorYellow, colorReset)
+			fmt.Printf("\n%sReceived interrupt, "+"cancelling...%s\n", colorYellow, colorReset)
 			cancel()
 		}()
 
@@ -233,9 +219,7 @@ func run() error {
 			config,
 		)
 		if runErr != nil {
-			fmt.Fprintf(os.Stderr,
-				"%sError: %v%s\n",
-				colorRed, runErr, colorReset)
+			fmt.Fprintf(os.Stderr, "%sError: %v%s\n", colorRed, runErr, colorReset)
 		}
 
 		if logFile != nil {
@@ -245,10 +229,7 @@ func run() error {
 		signal.Stop(sigCh)
 		cancel()
 
-		fmt.Printf("\n%s%s%s\n\n",
-			colorDim,
-			strings.Repeat("-", 60),
-			colorReset)
+		fmt.Printf("\n%s%s%s\n\n", colorDim, strings.Repeat("-", 60), colorReset)
 	}
 }
 
@@ -266,23 +247,16 @@ func promptMenu(
 	options []menuOption,
 ) (string, error) {
 	fmt.Println()
-	fmt.Printf(
-		"%s%s%s:%s\n",
-		colorBold, colorYellow, title, colorReset)
-	fmt.Printf("%s%s%s\n",
-		colorYellow,
-		strings.Repeat("-", len(title)+1),
-		colorReset)
+	fmt.Printf("%s%s%s:%s\n", colorBold, colorYellow, title, colorReset)
+	fmt.Printf("%s%s%s\n", colorYellow, strings.Repeat("-", len(title)+1), colorReset)
 	for i, opt := range options {
-		fmt.Printf("  %s%d.%s %s\n",
-			colorCyan, i+1, colorReset, opt.label)
+		fmt.Printf("  %s%d.%s %s\n", colorCyan, i+1, colorReset, opt.label)
 	}
 	fmt.Println()
 
 	for {
 		oldPrompt := rl.Config.Prompt
-		rl.SetPrompt(
-			colorCyan + "Select [1]: " + colorReset)
+		rl.SetPrompt(colorCyan + "Select [1]: " + colorReset)
 		input, err := rl.Readline()
 		rl.SetPrompt(oldPrompt)
 		if err != nil {
@@ -294,18 +268,14 @@ func promptMenu(
 			return options[0].value, nil
 		}
 		if input == "q" || input == "Q" {
-			fmt.Printf(
-				"%sGoodbye!%s\n",
-				colorGreen, colorReset)
+			fmt.Printf("%sGoodbye!%s\n", colorGreen, colorReset)
 			os.Exit(0)
 		}
 
 		num, err := strconv.Atoi(input)
 		if err != nil || num < 1 ||
 			num > len(options) {
-			fmt.Printf(
-				"%sInvalid. Enter 1-%d.%s\n",
-				colorRed, len(options), colorReset)
+			fmt.Printf("%sInvalid. Enter 1-%d.%s\n", colorRed, len(options), colorReset)
 			continue
 		}
 		return options[num-1].value, nil
@@ -315,9 +285,7 @@ func promptMenu(
 // handleMenuErr handles errors from menu prompts.
 func handleMenuErr(err error) error {
 	if err == readline.ErrInterrupt {
-		fmt.Printf(
-			"\n%sGoodbye!%s\n",
-			colorGreen, colorReset)
+		fmt.Printf("\n%sGoodbye!%s\n", colorGreen, colorReset)
 		return nil
 	}
 	return err
@@ -361,10 +329,8 @@ func runOneShot(
 	scenario, tcType string,
 	config testutil.TestConfig,
 ) error {
-	name := fmt.Sprintf(
-		"%s — One shot (%s)", scenario, tcType)
-	fmt.Printf("\n%sRunning: %s%s\n",
-		colorGreen, name, colorReset)
+	name := fmt.Sprintf("%s — One shot (%s)", scenario, tcType)
+	fmt.Printf("\n%sRunning: %s%s\n", colorGreen, name, colorReset)
 
 	switch scenario {
 	case "airline":
@@ -386,8 +352,7 @@ func runOneShot(
 			ctx, os.Stdout, config,
 		)
 	default:
-		return fmt.Errorf(
-			"unknown scenario: %s", scenario)
+		return fmt.Errorf("unknown scenario: %s", scenario)
 	}
 }
 
@@ -416,8 +381,7 @@ func runChat(
 			newChat = ecommerce.NewEcommerceInteractiveChat
 		}
 	default:
-		return fmt.Errorf(
-			"unknown scenario: %s", scenario)
+		return fmt.Errorf("unknown scenario: %s", scenario)
 	}
 
 	return runInteractiveChat(ctx, config, newChat)
@@ -429,13 +393,8 @@ func promptCompaction(
 	rl *readline.Instance,
 ) (testutil.CompactionConfig, error) {
 	fmt.Println()
-	fmt.Printf(
-		"%s%sScratchpad Context Management:%s\n",
-		colorBold, colorYellow, colorReset)
-	fmt.Printf("%s%s%s\n",
-		colorYellow,
-		strings.Repeat("-", 30),
-		colorReset)
+	fmt.Printf("%s%sScratchpad Context Management:%s\n", colorBold, colorYellow, colorReset)
+	fmt.Printf("%s%s%s\n", colorYellow, strings.Repeat("-", 30), colorReset)
 	fmt.Printf(
 		"  %s1.%s None            - "+
 			"No context management (default)\n",
@@ -453,10 +412,7 @@ func promptCompaction(
 
 	for {
 		oldPrompt := rl.Config.Prompt
-		rl.SetPrompt(
-			colorCyan +
-				"Select strategy [1]: " +
-				colorReset)
+		rl.SetPrompt(colorCyan + "Select strategy [1]: " + colorReset)
 		input, err := rl.Readline()
 		rl.SetPrompt(oldPrompt)
 		if err != nil {
@@ -478,9 +434,7 @@ func promptCompaction(
 		case "3":
 			return promptSummarization(rl)
 		default:
-			fmt.Printf(
-				"%sInvalid. Enter 1, 2, or 3.%s\n",
-				colorRed, colorReset)
+			fmt.Printf("%sInvalid. Enter 1, 2, or 3.%s\n", colorRed, colorReset)
 		}
 	}
 }
@@ -490,24 +444,15 @@ func promptSlidingWindow(
 	rl *readline.Instance,
 ) (testutil.CompactionConfig, error) {
 	fmt.Println()
-	fmt.Printf(
-		"%s%sConfigure Sliding Window:%s\n",
-		colorBold, colorYellow, colorReset)
-	fmt.Printf("%s%s%s\n",
-		colorYellow,
-		strings.Repeat("-", 25),
-		colorReset)
+	fmt.Printf("%s%sConfigure Sliding Window:%s\n", colorBold, colorYellow, colorReset)
+	fmt.Printf("%s%s%s\n", colorYellow, strings.Repeat("-", 25), colorReset)
 
-	windowSize, err := promptInt(rl,
-		"Window size (recent iterations to keep)",
-		5, 1, 100)
+	windowSize, err := promptInt(rl, "Window size (recent iterations to keep)", 5, 1, 100)
 	if err != nil {
 		return testutil.CompactionConfig{}, err
 	}
 
-	triggerIter, err := promptInt(rl,
-		"Trigger every N iterations",
-		3, 1, 50)
+	triggerIter, err := promptInt(rl, "Trigger every N iterations", 3, 1, 50)
 	if err != nil {
 		return testutil.CompactionConfig{}, err
 	}
@@ -531,25 +476,15 @@ func promptSummarization(
 	rl *readline.Instance,
 ) (testutil.CompactionConfig, error) {
 	fmt.Println()
-	fmt.Printf(
-		"%s%sConfigure Summarization:%s\n",
-		colorBold, colorYellow, colorReset)
-	fmt.Printf("%s%s%s\n",
-		colorYellow,
-		strings.Repeat("-", 24),
-		colorReset)
+	fmt.Printf("%s%sConfigure Summarization:%s\n", colorBold, colorYellow, colorReset)
+	fmt.Printf("%s%s%s\n", colorYellow, strings.Repeat("-", 24), colorReset)
 
-	keepRecent, err := promptInt(rl,
-		"Keep recent (iterations to preserve "+
-			"unsummarized)",
-		1, 0, 50)
+	keepRecent, err := promptInt(rl, "Keep recent (iterations to preserve "+"unsummarized)", 1, 0, 50)
 	if err != nil {
 		return testutil.CompactionConfig{}, err
 	}
 
-	triggerIter, err := promptInt(rl,
-		"Trigger every N iterations",
-		5, 1, 50)
+	triggerIter, err := promptInt(rl, "Trigger every N iterations", 5, 1, 50)
 	if err != nil {
 		return testutil.CompactionConfig{}, err
 	}
@@ -577,9 +512,7 @@ func promptInt(
 ) (int, error) {
 	for {
 		oldPrompt := rl.Config.Prompt
-		prompt := fmt.Sprintf(
-			"%s  %s [%d]: %s",
-			colorCyan, label, defaultVal, colorReset)
+		prompt := fmt.Sprintf("%s  %s [%d]: %s", colorCyan, label, defaultVal, colorReset)
 		rl.SetPrompt(prompt)
 		input, err := rl.Readline()
 		rl.SetPrompt(oldPrompt)
@@ -594,10 +527,7 @@ func promptInt(
 
 		val, err := strconv.Atoi(input)
 		if err != nil || val < minVal || val > maxVal {
-			fmt.Printf(
-				"%sEnter a number between %d "+
-					"and %d.%s\n",
-				colorRed, minVal, maxVal, colorReset)
+			fmt.Printf("%sEnter a number between %d "+"and %d.%s\n", colorRed, minVal, maxVal, colorReset)
 			continue
 		}
 		return val, nil
@@ -612,16 +542,9 @@ func runInteractiveChat(
 	) (*testutil.InteractiveChat, error),
 ) error {
 	fmt.Println()
-	fmt.Printf("%s%s%s\n",
-		colorYellow,
-		strings.Repeat("=", 80),
-		colorReset)
-	fmt.Printf("%s%sINTERACTIVE CHAT%s\n",
-		colorBold, colorYellow, colorReset)
-	fmt.Printf("%s%s%s\n",
-		colorYellow,
-		strings.Repeat("=", 80),
-		colorReset)
+	fmt.Printf("%s%s%s\n", colorYellow, strings.Repeat("=", 80), colorReset)
+	fmt.Printf("%s%sINTERACTIVE CHAT%s\n", colorBold, colorYellow, colorReset)
+	fmt.Printf("%s%s%s\n", colorYellow, strings.Repeat("=", 80), colorReset)
 	fmt.Println()
 	fmt.Printf(
 		"%sYou are now chatting with the "+
@@ -631,9 +554,7 @@ func runInteractiveChat(
 		"%sType your message and press Enter. "+
 			"Type 'exit' to end the chat.%s\n",
 		colorDim, colorReset)
-	fmt.Printf(
-		"%sUse arrow keys to edit your input.%s\n",
-		colorDim, colorReset)
+	fmt.Printf("%sUse arrow keys to edit your input.%s\n", colorDim, colorReset)
 
 	if config.Compaction.Type != testutil.CompactionNone &&
 		config.Compaction.Type != "" {
@@ -648,11 +569,9 @@ func runInteractiveChat(
 
 	fmt.Println()
 
-	rl, err := readline.New(
-		colorCyan + colorBold + "You: " + colorReset)
+	rl, err := readline.New(colorCyan + colorBold + "You: " + colorReset)
 	if err != nil {
-		return fmt.Errorf(
-			"failed to create readline: %w", err)
+		return fmt.Errorf("failed to create readline: %w", err)
 	}
 	defer rl.Close()
 
@@ -660,21 +579,19 @@ func runInteractiveChat(
 
 	chat, err := newChat(coloredWriter, config)
 	if err != nil {
-		return fmt.Errorf(
-			"failed to create chat session: %w", err)
+		return fmt.Errorf("failed to create chat session: %w", err)
 	}
+
+	defer chat.Close()
 
 	for {
 		input, err := rl.Readline()
 		if err != nil {
 			if err == readline.ErrInterrupt {
-				fmt.Printf(
-					"\n%sChat cancelled.%s\n",
-					colorYellow, colorReset)
+				fmt.Printf("\n%sChat cancelled.%s\n", colorYellow, colorReset)
 				return nil
 			}
-			return fmt.Errorf(
-				"failed to read input: %w", err)
+			return fmt.Errorf("failed to read input: %w", err)
 		}
 
 		input = strings.TrimSpace(input)
@@ -682,28 +599,20 @@ func runInteractiveChat(
 			continue
 		}
 		if input == "exit" || input == "quit" {
-			fmt.Printf(
-				"\n%sEnding chat session. "+
-					"Goodbye!%s\n",
-				colorGreen, colorReset)
+			fmt.Printf("\n%sEnding chat session. "+"Goodbye!%s\n", colorGreen, colorReset)
 			return nil
 		}
 
 		select {
 		case <-ctx.Done():
-			fmt.Printf(
-				"\n%sChat cancelled.%s\n",
-				colorYellow, colorReset)
+			fmt.Printf("\n%sChat cancelled.%s\n", colorYellow, colorReset)
 			return ctx.Err()
 		default:
 		}
 
 		err = chat.SendMessage(ctx, input)
 		if err != nil {
-			fmt.Fprintf(os.Stderr,
-				"\n%sError processing message: "+
-					"%v%s\n",
-				colorRed, err, colorReset)
+			fmt.Fprintf(os.Stderr, "\n%sError processing message: "+"%v%s\n", colorRed, err, colorReset)
 		}
 	}
 }
@@ -723,82 +632,51 @@ func (c *ColoredWriter) Write(
 
 	switch {
 	case strings.HasPrefix(text, "--- Your Input ---"):
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s%s",
-			colorBold, colorCyan, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s%s", colorBold, colorCyan, text, colorReset)
 
-	case strings.HasPrefix(
-		text, "--- Agent Response ---"):
+	case strings.HasPrefix(text, "--- Agent Response ---"):
 		c.inAgentResponse = true
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s%s",
-			colorBold, colorGreen, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s%s", colorBold, colorGreen, text, colorReset)
 
-	case strings.HasPrefix(
-		text, "--- Agent Processing ---"):
+	case strings.HasPrefix(text, "--- Agent Processing ---"):
 		c.inAgentResponse = false
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s",
-			colorYellow, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s", colorYellow, text, colorReset)
 
 	case strings.HasPrefix(text, "--- ") &&
 		strings.HasSuffix(trimmed, " ---"):
 		c.inAgentResponse = false
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s",
-			colorYellow, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s", colorYellow, text, colorReset)
 
 	case c.inAgentResponse && trimmed != "":
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s",
-			colorGreen, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s", colorGreen, text, colorReset)
 
 	case strings.HasPrefix(text, "[Tool:"):
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s",
-			colorBlue, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s", colorBlue, text, colorReset)
 
 	case strings.HasPrefix(text, "    Args:") ||
 		strings.HasPrefix(text, "    Output:"):
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s",
-			colorDim, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s", colorDim, text, colorReset)
 
 	case strings.HasPrefix(text, "    Duration:"):
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s",
-			colorDim, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s", colorDim, text, colorReset)
 
 	case strings.HasPrefix(text, "    Error:"):
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s",
-			colorRed, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s", colorRed, text, colorReset)
 
 	case strings.HasPrefix(text, "[Stats:"):
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s",
-			colorDim, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s", colorDim, text, colorReset)
 
 	case strings.HasPrefix(text, "--- Iteration"):
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s",
-			colorMagenta, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s", colorMagenta, text, colorReset)
 
 	case strings.HasPrefix(text, "  LLM: "):
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s",
-			colorCyan, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s", colorCyan, text, colorReset)
 
 	case strings.HasPrefix(text, "  [Compaction:"):
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s%s",
-			colorBold, colorMagenta, text, colorReset)
+		return fmt.Fprintf(os.Stdout, "%s%s%s%s", colorBold, colorMagenta, text, colorReset)
 
-	case strings.HasPrefix(
-		text, "  [Limit Exceeded:"):
-		return fmt.Fprintf(os.Stdout,
-			"%s%s%s%s",
-			colorBold, colorRed, text, colorReset)
+	case strings.HasPrefix(text, "  [Limit Exceeded:"):
+		return fmt.Fprintf(os.Stdout, "%s%s%s%s", colorBold, colorRed, text, colorReset)
 
 	default:
 		return os.Stdout.Write(p)

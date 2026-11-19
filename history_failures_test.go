@@ -7,8 +7,6 @@ import (
 	"testing"
 
 	"github.com/rickchristie/gent"
-	"github.com/rickchristie/gent/events"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/format"
 	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
@@ -38,7 +36,6 @@ func TestHistoryRecovery_UncertainTool(t *testing.T) {
 			assert.Empty(t, priorCalls)
 			model := &recoveryModel{answer: true}
 			var calls []gent.ToolIdentity
-			var bindings gent.RestoreBindings
 			var recovered *gent.ToolRecoveryRequest[recoveryInput]
 			var handler gent.ToolRecoveryFunc[recoveryInput]
 			if test.input.decision != "" {
@@ -55,21 +52,12 @@ func TestHistoryRecovery_UncertainTool(t *testing.T) {
 					return response, nil
 				}
 			}
-			agent := newRecoveryAgent(model, &calls, handler)
-			bindings = recoveryBindings(t, agent)
-			ctx, _, err := resumeRecovery(agent, bundle, bindings)
+			agent, config := newRecoveryAgent(model, &calls, handler)
+			_, result, err := resumeRecovery(t, agent, bundle, config)
 			assert.ErrorIs(t, err, test.expected.err)
 			assert.Len(t, calls, test.expected.toolCalls)
 			assert.Len(t, model.requests, test.expected.modelCalls)
-			view, exportErr := ctx.Export()
-			assert.NoError(t, exportErr)
-			assert.NoError(t, gent.ValidateBundle(view, ctx.Codecs()))
-			if test.expected.err != nil {
-				assert.Equal(t, gent.PhaseToolReady, view.Checkpoint.Phase)
-				assert.Nil(t, view.Checkpoint.Outcome)
-			} else {
-				assert.Equal(t, gent.PhaseTerminal, view.Checkpoint.Phase)
-			}
+			assert.Equal(t, gent.ExecutionFinished, result.Status)
 			if recovered != nil {
 				assert.Equal(t, "policy", recovered.Name())
 			}
@@ -83,7 +71,10 @@ type rejectRecorder struct {
 	err   error
 }
 
-func (r rejectRecorder) Save(_ context.Context, batch *gent.SaveBatch) error {
+func (r rejectRecorder) Save(
+	_ context.Context, batch *gent.SaveBatch,
+	captureRunStateSnapshot func() (*gent.RunState, error),
+) error {
 	if batch.Checkpoint != nil && batch.Checkpoint.Phase == r.phase {
 		return r.err
 	}
@@ -108,8 +99,8 @@ func TestHistoryRecorderFailure_PreventsSideEffects(t *testing.T) {
 	}
 	cases := []testCase{
 		{"initial checkpoint", input{phase: gent.PhaseInitial}, expected{0, 0}},
-		{"model request", input{event: "model_call_started"}, expected{0, 0}},
-		{"decision checkpoint", input{phase: gent.PhaseDecisionReady}, expected{1, 0}},
+		{"model request grouped before tool", input{event: "model_call_started"}, expected{1, 0}},
+		{"iteration checkpoint", input{phase: gent.PhaseIterationReady}, expected{0, 0}},
 		{"tool readiness", input{phase: gent.PhaseToolReady}, expected{1, 0}},
 		{"first tool result", input{phase: gent.PhaseToolCompleted}, expected{1, 1}},
 	}
@@ -119,20 +110,12 @@ func TestHistoryRecorderFailure_PreventsSideEffects(t *testing.T) {
 			recorder := rejectRecorder{test.input.event, test.input.phase, saveErr}
 			model := &recoveryModel{}
 			var calls []gent.ToolIdentity
-			agent := newRecoveryAgent(model, &calls)
-			ctx := gent.NewExecutionContext(context.Background(), "root",
-				gent.NewBasicLoopData(
-					gent.NewTask(gent.TextContent{Text: "policy question"}),
-				), gent.WithRunId("fenced"), gent.WithRecorder(recorder))
-			_, _, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
+			agent, config := newRecoveryAgent(model, &calls)
+			config.Recorder = recorder
+			runner, execCtx := newTestExecution(t, context.Background(), agent, config)
+			_, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("policy question")))
+			assert.Nil(t, result)
 			assert.ErrorIs(t, err, saveErr)
-			var failure *gent.PersistenceError
-			if assert.ErrorAs(t, err, &failure) {
-				view, err := ctx.Export()
-				assert.NoError(t, err)
-				assert.Equal(t, failure.Batch.PreviousEventNumber, view.LastAppliedEventNumber)
-				assert.NoError(t, gent.ValidateBundle(view, ctx.Codecs()))
-			}
 			assert.Equal(t, test.expected, expected{len(model.requests), len(calls)})
 		})
 	}
@@ -143,12 +126,13 @@ type toolInputHook struct {
 	calls int
 }
 
-func (h *toolInputHook) OnBeforeToolCall(
-	_ *gent.ExecutionContext,
+func (h *toolInputHook) BeforeToolCall(
+	_ context.Context,
 	event *gent.BeforeToolCallEvent,
-) {
+) error {
 	h.calls++
 	event.Args = recoveryInput{Id: h.value}
+	return nil
 }
 
 func TestToolRecovery_ReusesEffectiveInput(t *testing.T) {
@@ -156,7 +140,6 @@ func TestToolRecovery_ReusesEffectiveInput(t *testing.T) {
 	defer cancel()
 	store := &recoveryStore{
 		codecs: gent.NewCodecRegistry(),
-		view:   gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "input"},
 		cancel: cancel,
 		phase:  gent.PhaseToolReady,
 	}
@@ -176,35 +159,48 @@ func TestToolRecovery_ReusesEffectiveInput(t *testing.T) {
 			}).MustBuild())
 		return chain
 	}
-	ctx := gent.NewExecutionContext(worker, "root", nil, gent.WithRunId("input"),
-		gent.WithRecorder(store), gent.WithCodecs(store.codecs))
-	hook := &toolInputHook{value: "effective"}
-	ctx.SetEventPublisher(events.NewRegistry().Subscribe(hook))
 	chain := newChain()
-	plan, err := chain.PrepareCalls(ctx, []*gent.ModelToolCallRequest{{Type: "function",
-		FunctionCall: &gent.FunctionCall{Name: "policy", Arguments: `{"id":"original"}`}}})
-	assert.NoError(t, err)
-	_, err = chain.ExecuteNext(ctx, plan, format.NewXML())
-	assert.ErrorIs(t, err, context.Canceled)
-	assert.Empty(t, got)
-	bundle, err := ctx.Export()
-	assert.NoError(t, err)
-	freshChain := newChain()
-	codecs := gent.NewCodecRegistry()
-	assert.NoError(t, freshChain.RegisterCodecs(codecs))
-	fresh, err := gent.RestoreExecutionContext(context.Background(), bundle, gent.RestoreBindings{
-		Codecs: codecs,
-	})
-	if !assert.NoError(t, err) {
-		return
+	loop := &contentLoopValue{
+		next: func(
+			execCtx *gent.ExecutionContext,
+		) (
+			*gent.AgentLoopResult,
+			error,
+		) {
+			plan, exists, err := execCtx.SavedToolPlan()
+			if err != nil {
+				return nil, err
+			}
+			if !exists {
+				plan, err = execCtx.Config().ToolChain.PrepareCalls(execCtx,
+					[]*gent.ModelToolCallRequest{{ID: "policy", Type: "function",
+						FunctionCall: &gent.FunctionCall{Name: "policy", Arguments: `{"id":"original"}`}}})
+				if err != nil {
+					return nil, err
+				}
+			}
+			if plan.NextCall < len(plan.Calls) {
+				_, err = execCtx.Config().ToolChain.ExecuteNext(execCtx, plan, format.NewXML())
+			}
+			if err != nil {
+				return nil, err
+			}
+			return acceptRootOutput(execCtx, "Done")
+		},
 	}
+	hook := &toolInputHook{value: "effective"}
+	runner, execCtx := newTestExecution(t, worker, loop, &gent.Config{Codecs: store.codecs,
+		Recorder: store, ToolChain: chain, Hooks: &gent.Hooks{BeforeToolCall: hook.BeforeToolCall}})
+	_, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read a policy.")))
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, result)
+	assert.Empty(t, got)
 	freshHook := &toolInputHook{value: "would change the saved input"}
-	fresh.SetEventPublisher(events.NewRegistry().Subscribe(freshHook))
-	savedPlan, ok, err := fresh.SavedToolPlan()
+	freshRunner, fresh := restoreTestExecution(t, loop, &gent.Config{ToolChain: newChain(),
+		Hooks: &gent.Hooks{BeforeToolCall: freshHook.BeforeToolCall}}, store.runStateSnapshot)
+	_, result, err = freshRunner.Continue(fresh)
 	assert.NoError(t, err)
-	assert.True(t, ok)
-	_, err = freshChain.ExecuteNext(fresh, savedPlan, format.NewXML())
-	assert.NoError(t, err)
+	assert.Equal(t, gent.ExecutionFinished, result.Status)
 	assert.Equal(t, []recoveryInput{{Id: "effective"}}, got)
 	assert.Equal(t, 1, hook.calls)
 	assert.Equal(t, 0, freshHook.calls)

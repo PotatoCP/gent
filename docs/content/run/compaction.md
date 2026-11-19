@@ -1,0 +1,66 @@
+Compaction changes the context selected for future model calls. It does not erase the original
+history from stored batches. System instructions stay outside compaction.
+
+## Summarize older context
+
+{{example:compaction-summary}}
+
+The generic summarizer makes a normal LLM call. Recent and pinned non-user entries can remain in
+context. Native provider compaction is not part of this feature.
+
+## Retain user input
+
+{{example:compaction-retention}}
+
+The allowance measures content bytes, not model tokens. Zero selects the default 32 KiB allowance.
+Saved origin determines eligibility. Generated corrections, tool guidance, and summaries do not
+become user input merely because they have a user role.
+
+A typical change is:
+
+| Before | After |
+| --- | --- |
+| System prefix | The same prefix |
+| Original user messages | Retained newer messages, with an omission notice when needed |
+| Older work | Summary of the covered work |
+| Recent or required work | Retained context needed by the next call |
+
+Boundary truncation uses more of the allowance than dropping a complete message. It can retain only
+part of an instruction. Older explicit input can leave active context; its meaning then depends on
+the summary. No original prompt has permanent protection.
+
+Retention runs only at compaction boundaries. Requests can grow by appending messages between those
+boundaries. This can help provider cache reuse, but it does not guarantee a hit.
+
+## Use a sliding window
+
+{{example:compaction-window}}
+
+A window drops older active entries without creating an LLM summary. It preserves required contracts
+and the original archive. Choose the strategy according to the context your loop needs.
+
+## Supply a trigger
+
+{{example:compaction-trigger}}
+
+A trigger with mutable progress must save that progress through the required state contract. Do not
+keep per-run progress in an unsaved shared strategy instance.
+
+## Replace retention
+
+This strategy omits explicit user messages and retains the omission notice:
+
+{{example:retention-custom}}
+
+Set it in `UserMessageRetentionConfig.Strategy`. Retain receives read-only input and proposes data.
+It must not write history, reset counters, call models, or perform external work. The standard
+compactor accepts the proposal and summary together. A custom `CompactionStrategy.Compact` similarly
+returns a `HistoryUpdate`; it must preserve source identities and required native groups.
+
+## Supply a strategy
+
+This implementation delegates selection to the standard window strategy:
+
+{{example:compaction-custom}}
+
+Use this signature for a custom selector. Return a proposal instead of changing history directly.

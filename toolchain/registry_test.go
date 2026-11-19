@@ -9,16 +9,12 @@ import (
 	"time"
 
 	"github.com/rickchristie/gent"
-	"github.com/rickchristie/gent/events"
 	"github.com/rickchristie/gent/format"
 	"github.com/rickchristie/gent/schema"
 	"github.com/stretchr/testify/assert"
 )
 
 func testFormat() gent.TextFormat { return format.NewXML() }
-func newExecCtx() *gent.ExecutionContext {
-	return gent.NewExecutionContext(context.Background(), "tools", gent.NewBasicLoopData(nil))
-}
 func nativeCall(name, args string) *gent.ModelToolCallRequest {
 	return &gent.ModelToolCallRequest{ID: "provider-id", Type: "function",
 		FunctionCall: &gent.FunctionCall{Name: name, Arguments: args}}
@@ -26,11 +22,11 @@ func nativeCall(name, args string) *gent.ModelToolCallRequest {
 func recordText(record *gent.ToolCallRecord) string {
 	return gent.ContentTextData(record.Response().Parts())
 }
-func executeNativeTestCall(t *testing.T, chain gent.ToolChain, ctx *gent.ExecutionContext,
+func executeNativeTestCall(t *testing.T, chain gent.ToolChain, execCtx *gent.ExecutionContext,
 	call *gent.ModelToolCallRequest,
 ) *gent.ToolCallRecord {
 	t.Helper()
-	records, err := executeToolPlan(ctx, chain, []*gent.ModelToolCallRequest{call}, testFormat())
+	records, err := executeToolPlan(execCtx, chain, []*gent.ModelToolCallRequest{call}, testFormat())
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
@@ -39,9 +35,9 @@ func executeNativeTestCall(t *testing.T, chain gent.ToolChain, ctx *gent.Executi
 	}
 	return records[0]
 }
-func nativeNames(t *testing.T, chain gent.ToolChain, ctx *gent.ExecutionContext) []string {
+func nativeNames(t *testing.T, chain gent.ToolChain, execCtx *gent.ExecutionContext) []string {
 	t.Helper()
-	definitions, err := chain.NativeTools(ctx)
+	definitions, err := chain.NativeTools(execCtx)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
@@ -95,10 +91,8 @@ func TestRegistryResponseContract(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := gent.NewExecutionContext(context.Background(), "tools", gent.NewBasicLoopData(nil),
-				gent.WithSteeringMessages(gent.SteeringMessages{ToolError: "TASK ERROR",
-					ToolBlocked: "BLOCKED"}))
-			defer ctx.Release()
+			config := &gent.Config{SteeringMessages: &gent.SteeringMessages{
+				ToolError: "TASK ERROR", ToolBlocked: "BLOCKED"}}
 			count := 0
 			tool := gent.DefineTool("act", func(context.Context, struct{}) (
 				*gent.ToolExecutionResponse, error,
@@ -107,29 +101,27 @@ func TestRegistryResponseContract(t *testing.T) {
 				return test.input.response, test.input.err
 			}).UnrecoverableErrorInstructions(test.input.perTool).MustBuild()
 			chain := New().RegisterTool(tool)
-			record := executeNativeTestCall(t, chain, ctx, nativeCall("act", "{}"))
+			record, execCtx := runNativeTestCall(t, chain, config, nativeCall("act", "{}"))
 			status, _ := record.Response().ExecutionStatus()
 			assert.Equal(t, test.expected, expected{record.Kind(), status, record.Response().Parts(),
 				record.Error() != nil})
 			assert.Equal(t, 1, count)
 			assert.Equal(t, "provider-id", record.Response().ToolCallID())
 			assert.NotEqual(t, "provider-id", record.ToolCallID())
-			assert.Equal(t, ctx.AttemptId(), record.AttemptID())
+			assert.Equal(t, execCtx.AttemptId(), record.AttemptID())
 			if test.input.response != nil {
-				value, err := ctx.Codecs().Decode(*record.ReturnedResult())
+				value, err := execCtx.Codecs().Decode(*record.ReturnedResult())
 				assert.NoError(t, err)
 				assert.Equal(t, test.input.response, value)
 			} else {
 				assert.Nil(t, record.ReturnedResult())
 			}
 			if test.input.err != nil {
-				value, err := ctx.Codecs().Decode(*record.Error())
+				value, err := execCtx.Codecs().Decode(*record.Error())
 				assert.NoError(t, err)
 				assert.EqualError(t, value.(error), test.input.err.Error())
 			}
-			saved, err := ctx.Export()
-			assert.NoError(t, err)
-			assert.NoError(t, gent.ValidateBundle(saved, ctx.Codecs()))
+			assert.NoError(t, gent.ValidateBundle(*toolArchive(t, execCtx), execCtx.Codecs()))
 		})
 	}
 }
@@ -184,30 +176,36 @@ func TestRegistryInputCorrection(t *testing.T) {
 				return capturedToolResponse(input, nil)
 			}).
 				Parameters(schema.Field("id").MinLength(1)).MustBuild()
-			ctx := newExecCtx()
-			defer ctx.Release()
+			var hooks *gent.Hooks
 			if test.input.hook != nil {
-				ctx.SetEventPublisher(events.NewRegistry().
-					Subscribe(&replaceInput{value: test.input.hook}))
+				hooks = replacementInputHooks(test.input.hook)
 			}
-			record := executeNativeTestCall(t, New().RegisterTool(tool), ctx,
-				nativeCall("lookup", test.input.arguments))
+			var hookError string
+			if test.input.hook != nil {
+				hookError = test.expected.details
+			}
+			record, execCtx := runNativeTestCallWithHookError(t, New().RegisterTool(tool),
+				&gent.Config{Hooks: hooks}, nativeCall("lookup", test.input.arguments), hookError)
 			assert.Equal(t, test.expected.calls, calls)
+			if hookError != "" {
+				return
+			}
 			want := gent.DefaultSteeringMessages().InvalidArguments + "\n" +
 				"Invalid arguments for tool \"lookup\".\n" + test.expected.details +
 				"\nExpected input schema:\n" + completeInputSchema
 			assert.Equal(t, want, recordText(record))
 			assert.Equal(t, gent.ToolInvalidArguments, record.Execution().Status)
-			assert.Equal(t, int64(1), ctx.Stats().GetCounter(gent.SCToolCallsInvalidArgumentsTotal))
-			assert.Equal(t, int64(0), ctx.Stats().GetCounter(gent.SCToolCallsErrorTotal))
+			assert.Equal(t, int64(1), execCtx.Stats().GetCounter(gent.SCToolCallsInvalidArgumentsTotal))
+			assert.Equal(t, int64(0), execCtx.Stats().GetCounter(gent.SCToolCallsErrorTotal))
 		})
 	}
 }
 
-type replaceInput struct{ value any }
-
-func (h *replaceInput) OnBeforeToolCall(_ *gent.ExecutionContext, event *gent.BeforeToolCallEvent) {
-	event.Args = h.value
+func replacementInputHooks(value any) *gent.Hooks {
+	return &gent.Hooks{BeforeToolCall: func(_ context.Context, event *gent.BeforeToolCallEvent) error {
+		event.Args = value
+		return nil
+	}}
 }
 
 func TestRegistryTemporalInputAndEffectiveSnapshot(t *testing.T) {
@@ -216,8 +214,6 @@ func TestRegistryTemporalInputAndEffectiveSnapshot(t *testing.T) {
 		Delay time.Duration `json:"delay"`
 	}
 	want := temporalInput{At: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), Delay: 90 * time.Minute}
-	ctx := newExecCtx()
-	defer ctx.Release()
 	var received temporalInput
 	tool := gent.DefineTool("wait", func(_ context.Context, input temporalInput) (
 		*gent.ToolExecutionResponse, error,
@@ -225,10 +221,10 @@ func TestRegistryTemporalInputAndEffectiveSnapshot(t *testing.T) {
 		received = input
 		return capturedToolResponse("ok", nil)
 	}).MustBuild()
-	record := executeNativeTestCall(t, New().RegisterTool(tool), ctx,
+	record, execCtx := runNativeTestCall(t, New().RegisterTool(tool), &gent.Config{},
 		nativeCall("wait", `{"at":"2026-01-02T03:04:05Z","delay":"1h30m"}`))
 	assert.Equal(t, want, received)
-	restored, err := ctx.Codecs().Decode(*record.Input())
+	restored, err := execCtx.Codecs().Decode(*record.Input())
 	assert.NoError(t, err)
 	assert.Equal(t, want, restored)
 }
@@ -255,24 +251,34 @@ func TestRegistryValidationAndCallCounters(t *testing.T) {
 		{"later error", input{failure: true}, expected{3, 1, 1}},
 		{"executed resets", input{status: gent.ToolExecuted}, expected{3, 1, 0}},
 	}
-	ctx := newExecCtx()
-	defer ctx.Release()
-	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			tool := gent.DefineTool("work", func(context.Context, struct{}) (
-				*gent.ToolExecutionResponse, error,
-			) {
-				if test.input.failure {
-					return nil, errors.New("private error")
-				}
-				return &gent.ToolExecutionResponse{Status: test.input.status}, nil
-			}).MustBuild()
-			executeNativeTestCall(t, New().RegisterTool(tool), ctx, nativeCall("work", "{}"))
-			assert.Equal(t, test.expected, expected{ctx.Stats().GetCounter(gent.SCToolCallsErrorTotal),
-				ctx.Stats().GetCounter(gent.SCToolCallsInvalidArgumentsTotal),
-				ctx.Stats().GetGauge(gent.SGToolCallsErrorConsecutive)})
-		})
-	}
+	selected := input{}
+	tool := gent.DefineTool(
+		"work",
+		func(
+			context.Context,
+			struct{},
+		) (
+			*gent.ToolExecutionResponse,
+			error,
+		) {
+			if selected.failure {
+				return nil, errors.New("private error")
+			}
+			return &gent.ToolExecutionResponse{Status: selected.status}, nil
+		},
+	).MustBuild()
+	chain := New().RegisterTool(tool)
+	runToolScenario(t, chain, &gent.Config{}, func(execCtx *gent.ExecutionContext) {
+		for _, test := range cases {
+			t.Run(test.name, func(t *testing.T) {
+				selected = test.input
+				executeNativeTestCall(t, chain, execCtx, nativeCall("work", "{}"))
+				assert.Equal(t, test.expected, expected{execCtx.Stats().GetCounter(gent.SCToolCallsErrorTotal),
+					execCtx.Stats().GetCounter(gent.SCToolCallsInvalidArgumentsTotal),
+					execCtx.Stats().GetGauge(gent.SGToolCallsErrorConsecutive)})
+			})
+		}
+	})
 }
 
 func TestRegistryDefinitionsAndRegistration(t *testing.T) {
@@ -283,9 +289,9 @@ func TestRegistryDefinitionsAndRegistration(t *testing.T) {
 	}).Description("Read an order").Policy("Read only").OutputSchemaFrom(validationInput{}).MustBuild()
 	chain := New()
 	chain.RegisterTool(tool)
-	ctx := newExecCtx()
-	defer ctx.Release()
-	definitions, err := chain.NativeTools(ctx)
+	execCtx := newExecCtx(t)
+	defer execCtx.Release()
+	definitions, err := chain.NativeTools(execCtx)
 	assert.NoError(t, err)
 	assert.Equal(t, []*gent.ToolDefinition{{Type: "function", Function: &gent.FunctionDefinition{
 		Name: "read", Description: "Read an order\n\nPolicy: Read only",
@@ -299,9 +305,10 @@ func TestRegistryDefinitionsAndRegistration(t *testing.T) {
 	) {
 		return capturedToolResponse("old", nil)
 	}).MustBuild())
-	assert.Equal(t, []string{"read"}, nativeNames(t, chain, ctx))
-	assert.Equal(t, "old", recordText(executeNativeTestCall(t, chain, ctx, nativeCall("old", "{}"))))
-	missing := executeNativeTestCall(t, chain, ctx, nativeCall("removed", "{}"))
+	assert.Equal(t, []string{"read"}, nativeNames(t, chain, execCtx))
+	old, _ := runNativeTestCall(t, chain, &gent.Config{}, nativeCall("old", "{}"))
+	assert.Equal(t, "old", recordText(old))
+	missing, _ := runNativeTestCall(t, chain, &gent.Config{}, nativeCall("removed", "{}"))
 	assert.Equal(t, gent.DefaultSteeringMessages().ToolUnavailable, recordText(missing))
 }
 
@@ -333,9 +340,7 @@ func TestRegistryMalformedJSON(t *testing.T) {
 				assert.Equal(t, json.Number("9007199254740993"), args["id"])
 				return capturedToolResponse(fmt.Sprint(args["id"]), nil)
 			}).ParameterSchema(nil).MustBuild()
-			ctx := newExecCtx()
-			defer ctx.Release()
-			record := executeNativeTestCall(t, New().RegisterTool(tool), ctx, nativeCall("number",
+			record, _ := runNativeTestCall(t, New().RegisterTool(tool), &gent.Config{}, nativeCall("number",
 				test.input.raw))
 			assert.Equal(t, test.expected, expected{record.Execution().Status, calls})
 			assert.Equal(t, test.input.raw, record.RawArguments())

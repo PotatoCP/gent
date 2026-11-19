@@ -39,18 +39,32 @@ func TestResponsesReasoningAndSavedEvidence(t *testing.T) {
 	const message = `{"type":"message","role":"assistant","phase":"final_answer","content":[
 {"type":"output_text","text":"Done."}]}`
 	choice := func(raw, summary string) *gent.ContentChoice {
-		return &gent.ContentChoice{CandidateContent: []gent.ContentPart{
-			gent.TextContent{Text: "Done."},
-		},
+		return &gent.ContentChoice{
+
 			Completion: gent.ModelCompletion{
 				Status:         gent.ModelStatusAnswer,
 				ProviderReason: "completed",
 			},
-			MetaContent:     responseTestMeta(summary),
 			CandidateSource: &gent.ContentSource{MessageIds: []string{"output:2"}},
-			Continuation: &gent.ProviderContinuation{Provider: "openai",
+			Continuation: &gent.ProviderContinuation{
+				Provider: "openai",
 				Items: []json.RawMessage{
-					json.RawMessage(raw), json.RawMessage(commentary), json.RawMessage(message)}}}
+
+					json.RawMessage(
+						raw,
+					),
+					json.RawMessage(
+						commentary,
+					),
+					json.RawMessage(
+						message,
+					),
+				},
+			},
+			Parts: responseTestMeta(
+				summary,
+			),
+		}
 	}
 	cases := []testCase{
 		{"JSON with summary", input{false, visible}, expected{
@@ -97,35 +111,41 @@ func TestResponsesReasoningAndSavedEvidence(t *testing.T) {
 					return sseResponse(payloads...), nil
 				})},
 			})
-			ctx := gent.NewExecutionContext(context.Background(), "fixture", nil)
 			started := time.Now()
-			stream, err := ctx.GenerateContentStream(model, gent.ModelCall{
-				Id: "fixture-call",
-			}, gent.NewModelCallRequest(nil))
-			if !assert.NoError(t, err) {
-				return
-			}
-			defer stream.Close()
 			var chunks []gent.StreamChunk
+			var result *gent.ModelCallResponse
 			actual := expected{}
-			for chunk := range stream.Chunks() {
-				assert.GreaterOrEqual(t, chunk.Timestamp, started)
-				// Portable time values omit the process-local monotonic clock.
-				chunk.Timestamp = chunk.Timestamp.Round(0)
-				chunks = append(chunks, chunk)
-				actual.chunks = append(actual.chunks, chunkText{
-					gent.MetaText(chunk.MetaContent, gent.MetaContentIntermediary),
-					gent.MetaText(chunk.MetaContent, gent.MetaContentReasoning),
-					gent.MetaText(chunk.MetaContent, gent.MetaContentCommentary)})
-			}
-			result, err := stream.Response()
+			loop := modelFixtureLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+				stream, err := execCtx.GenerateContentStream(model, gent.ModelCall{Id: "fixture-call"},
+					gent.NewModelCallRequest(nil))
+				if err != nil {
+					return nil, err
+				}
+				defer stream.Close()
+				for chunk := range stream.Chunks() {
+					chunks = append(chunks, chunk)
+					actual.chunks = append(actual.chunks, chunkText{
+						gent.ContentText(gent.AssistantParts(chunk.Content,
+							gent.AssistantContentFinalAnswerCandidate)),
+						gent.ContentText(gent.AssistantParts(chunk.Content, gent.AssistantContentReasoning)),
+						gent.ContentText(gent.AssistantParts(chunk.Content, gent.AssistantContentCommentary))})
+				}
+				result, err = stream.Response()
+				if err != nil {
+					return nil, err
+				}
+				return modelFixtureDone(execCtx)
+			})
+			runner, execCtx := newModelExecution(t, context.Background(), loop, nil)
+			_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read the record.")))
 			if !assert.NoError(t, err) || !assert.Len(t, result.Choices, 1) {
 				return
 			}
 			actual.choice, actual.err = result.Choices[0], err
 			prefix := strings.TrimSuffix(result.Choices[0].CandidateSource.MessageIds[0], "output:2")
-			for _, item := range test.expected.choice.MetaContent {
-				item.MessageId = prefix + item.MessageId
+			for _, item := range test.expected.choice.Parts {
+				content := item.(*gent.AssistantContent)
+				content.MessageId = prefix + content.MessageId
 			}
 			test.expected.choice.CandidateSource = &gent.ContentSource{ModelCallId: "fixture-call",
 				MessageIds: []string{prefix + "output:2"}}
@@ -133,7 +153,7 @@ func TestResponsesReasoningAndSavedEvidence(t *testing.T) {
 				test.expected.chunks = []chunkText{}
 				if test.input.reasoning == visible {
 					test.expected.chunks = append(test.expected.chunks,
-						chunkText{reasoning: "I checked "}, chunkText{reasoning: "the result."})
+						chunkText{reasoning: "I checked the result."})
 				}
 				test.expected.chunks = append(test.expected.chunks,
 					chunkText{commentary: "Checking the result."}, chunkText{content: "Done."})
@@ -141,11 +161,8 @@ func TestResponsesReasoningAndSavedEvidence(t *testing.T) {
 			assert.Equal(t, test.expected, actual)
 
 			// Verify the portable record, including raw provider fields and reasoning chunks.
-			view, err := ctx.Export()
-			if !assert.NoError(t, err) {
-				return
-			}
-			data, err := ctx.Codecs().Marshal(view)
+			view := execCtx.Config().Recorder.(*modelTestStore).view
+			data, err := execCtx.Codecs().Marshal(view)
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -157,19 +174,12 @@ func TestResponsesReasoningAndSavedEvidence(t *testing.T) {
 			var savedChunks []gent.StreamChunk
 			var savedResponses []*gent.ModelCallResponse
 			for _, event := range saved.Activity {
+				assert.GreaterOrEqual(t, event.Ts, started)
 				switch event.Type {
 				case "model_call_finished":
-					decoded, err := codecs.DecodeEvent(event)
-					if !assert.NoError(t, err) {
-						return
-					}
-					savedResponses = append(savedResponses, decoded.(*gent.AfterModelCallEvent).Response)
+					savedResponses = append(savedResponses, event.Payload.(*gent.AfterModelCallEvent).Response)
 				case "model_stream_chunk":
-					decoded, err := codecs.DecodeEvent(event)
-					if !assert.NoError(t, err) {
-						return
-					}
-					savedChunks = append(savedChunks, decoded.(gent.StreamChunk))
+					savedChunks = append(savedChunks, *event.Payload.(*gent.StreamChunk))
 				}
 			}
 			assert.Equal(t, []*gent.ModelCallResponse{result}, savedResponses)
@@ -178,32 +188,16 @@ func TestResponsesReasoningAndSavedEvidence(t *testing.T) {
 	}
 }
 
-func responseTestMeta(summary string) []*gent.MetaContent {
-	var meta []*gent.MetaContent
+func responseTestMeta(summary string) []gent.ContentPart {
+	var parts []gent.ContentPart
 	if summary != "" {
-		meta = append(meta,
-			&gent.MetaContent{
-				Type:      gent.MetaContentReasoning,
-				Content:   []gent.ContentPart{gent.TextContent{Text: "I checked "}},
-				MessageId: "output:0",
-			},
-			&gent.MetaContent{
-				Type:      gent.MetaContentReasoning,
-				Content:   []gent.ContentPart{gent.TextContent{Text: "the result."}},
-				MessageId: "output:0",
-			})
+		parts = append(parts, &gent.AssistantContent{Type: gent.AssistantContentReasoning,
+			MessageId: "output:0", Content: []gent.ContentPart{
+				gent.TextPart("I checked "), gent.TextPart("the result.")}})
 	}
-	return append(meta,
-		&gent.MetaContent{
-			Type: gent.MetaContentCommentary,
-			Content: []gent.ContentPart{
-				gent.TextContent{Text: "Checking the result."},
-			},
-			MessageId: "output:1",
-		},
-		&gent.MetaContent{
-			Type:      gent.MetaContentIntermediary,
-			Content:   []gent.ContentPart{gent.TextContent{Text: "Done."}},
-			MessageId: "output:2",
-		})
+	return append(parts,
+		&gent.AssistantContent{Type: gent.AssistantContentCommentary, MessageId: "output:1",
+			Content: []gent.ContentPart{gent.TextPart("Checking the result.")}},
+		&gent.AssistantContent{Type: gent.AssistantContentFinalAnswerCandidate, MessageId: "output:2",
+			Content: []gent.ContentPart{gent.TextPart("Done.")}})
 }

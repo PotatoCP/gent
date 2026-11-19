@@ -30,59 +30,79 @@ func TestAnthropicNativeThinkingChannels(t *testing.T) {
 		expected expected
 	}
 	cases := []testCase{
-		{"native thinking block", input{"Checked the record.", "Done."}, expected{
-			choices: []*gent.ContentChoice{{CandidateContent: []gent.ContentPart{
-				gent.TextContent{Text: "Done."},
-			},
-				MetaContent: []*gent.MetaContent{{
-					Type: gent.MetaContentReasoning,
-					Content: []gent.ContentPart{
-						gent.TextContent{Text: "Checked the record."},
-					},
-					MessageId: "reasoning",
-				},
-					{
-						Type:    gent.MetaContentIntermediary,
-						Content: []gent.ContentPart{gent.TextContent{Text: "Done."}},
-					}},
-				Completion: gent.ModelCompletion{Status: gent.ModelStatusAnswer, ProviderReason: "end_turn"}}},
-			chunks: []gent.StreamChunk{
-				{
-					MetaContent: []*gent.MetaContent{
-						{
-							Type: gent.MetaContentReasoning,
-							Content: []gent.ContentPart{
-								gent.TextContent{Text: "Checked the record."},
-							},
-							MessageId: "reasoning",
-						},
-					},
-				}, {
-					MetaContent: []*gent.MetaContent{
-						{
-							Type: gent.MetaContentIntermediary,
-							Content: []gent.ContentPart{
-								gent.TextContent{Text: "Done."},
-							},
-						},
-					},
-				}},
-		}},
-		{"ordinary text with tags", input{text: "Example: <thinking>quoted text</thinking>"},
+
+		{
+			"native thinking block",
+			input{"Checked the record.", "Done."},
 			expected{
-				choices: []*gent.ContentChoice{{CandidateContent: []gent.ContentPart{
-					gent.TextContent{Text: "Example: <thinking>quoted text</thinking>"},
-				},
-					MetaContent: []*gent.MetaContent{{Type: gent.MetaContentIntermediary,
-						Content: []gent.ContentPart{
-							gent.TextContent{Text: "Example: <thinking>quoted text</thinking>"},
-						}}},
-					Completion: gent.ModelCompletion{Status: gent.ModelStatusAnswer, ProviderReason: "end_turn"}}},
-				chunks: []gent.StreamChunk{
+
+				choices: []*gent.ContentChoice{
 					{
-						MetaContent: []*gent.MetaContent{
-							{
-								Type: gent.MetaContentIntermediary,
+
+						Completion: gent.ModelCompletion{
+							Status:         gent.ModelStatusAnswer,
+							ProviderReason: "end_turn",
+						},
+						CandidateSource: &gent.ContentSource{
+							MessageIds: []string{
+								"answer",
+							},
+						},
+						Parts: []gent.ContentPart{
+							&gent.AssistantContent{
+
+								Type: gent.AssistantContentReasoning,
+								Content: []gent.ContentPart{
+									gent.TextContent{Text: "Checked the record."},
+								},
+								MessageId: "reasoning",
+							},
+							&gent.AssistantContent{
+								Type:    gent.AssistantContentFinalAnswerCandidate,
+								Content: []gent.ContentPart{gent.TextContent{Text: "Done."}},
+							},
+						},
+					},
+				},
+				chunks: []gent.StreamChunk{
+					{Content: []gent.ContentPart{&gent.AssistantContent{
+						Type: gent.AssistantContentReasoning,
+						Content: []gent.ContentPart{
+							gent.TextContent{Text: "Checked the record."},
+						},
+						MessageId: "reasoning",
+					},
+					},
+					}, {Content: []gent.ContentPart{&gent.AssistantContent{
+						Type: gent.AssistantContentFinalAnswerCandidate,
+						Content: []gent.ContentPart{
+							gent.TextContent{Text: "Done."},
+						},
+					},
+					},
+					}},
+			},
+		},
+		{
+			"ordinary text with tags",
+			input{text: "Example: <thinking>quoted text</thinking>"},
+			expected{
+
+				choices: []*gent.ContentChoice{
+					{
+
+						Completion: gent.ModelCompletion{
+							Status:         gent.ModelStatusAnswer,
+							ProviderReason: "end_turn",
+						},
+						CandidateSource: &gent.ContentSource{
+							MessageIds: []string{
+								"answer",
+							},
+						},
+						Parts: []gent.ContentPart{
+							&gent.AssistantContent{
+								Type: gent.AssistantContentFinalAnswerCandidate,
 								Content: []gent.ContentPart{
 									gent.TextContent{Text: "Example: <thinking>quoted text</thinking>"},
 								},
@@ -90,7 +110,18 @@ func TestAnthropicNativeThinkingChannels(t *testing.T) {
 						},
 					},
 				},
-			}},
+				chunks: []gent.StreamChunk{
+					{Content: []gent.ContentPart{&gent.AssistantContent{
+						Type: gent.AssistantContentFinalAnswerCandidate,
+						Content: []gent.ContentPart{
+							gent.TextContent{Text: "Example: <thinking>quoted text</thinking>"},
+						},
+					},
+					},
+					},
+				},
+			},
+		},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -115,8 +146,7 @@ data: %s
 				emit("content_block_start", map[string]any{"index": index,
 					"content_block": map[string]any{"type": "thinking", "thinking": ""}})
 				emit("content_block_delta", map[string]any{"index": index,
-					"delta": map[string]any{
-						"type": "thinking_delta", "thinking": test.input.thinking}})
+					"delta": map[string]any{"type": "thinking_delta", "thinking": test.input.thinking}})
 				emit("content_block_delta", map[string]any{"index": index,
 					"delta": map[string]any{"type": "signature_delta", "signature": "opaque"}})
 				emit("content_block_stop", map[string]any{"index": index})
@@ -141,8 +171,7 @@ data: %s
 				Model: "fixture", HTTPClient: client})
 			request := gent.NewModelCallRequest([]*gent.ModelMessage{
 				gent.TextParts(gent.ChatMessageTypeHuman, "Read the record.")})
-			stream, err := provider.GenerateContentStream(
-				context.Background(), request)
+			stream, err := provider.GenerateContentStream(context.Background(), request)
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -167,8 +196,13 @@ data: %s
 				assert.NoError(t, err)
 				continuation.Items = append(continuation.Items, raw)
 				id := fmt.Sprintf("block:%d", index)
-				test.expected.choices[0].MetaContent[index].MessageId = id
-				test.expected.chunks[index].MetaContent[0].MessageId = id
+				test.expected.choices[0].Parts[index].(*gent.AssistantContent).MessageId = id
+				item := test.expected.chunks[index].Content[0].(*gent.AssistantContent)
+				item.MessageId = id
+				if item.Type == gent.AssistantContentFinalAnswerCandidate {
+					// The answer purpose is known only in the complete native response.
+					item.Type = gent.AssistantContentIntermediary
+				}
 			}
 			test.expected.choices[0].Continuation = continuation
 			test.expected.choices[0].CandidateSource = &gent.ContentSource{

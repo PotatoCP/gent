@@ -8,600 +8,213 @@ import (
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/internal/tt"
-	"github.com/rickchristie/gent/output"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// ----------------------------------------------------------------
-// Executor Compaction Integration Tests
-//
-// These tests verify the executor's compaction machinery:
-//   - Trigger/strategy wiring
-//   - Event publishing and stat updates
-//   - Error handling
-//   - Ordering relative to BeforeIteration
-// ----------------------------------------------------------------
-
-func TestCompaction_ExecutorIntegration(t *testing.T) {
+func TestCompactionScheduleAcceptanceAndFailures(t *testing.T) {
 	type input struct {
-		trigger     *tt.MockCompactionTrigger
-		strategy    *tt.MockCompactionStrategy
-		terminateAt int
+		schedule []bool
+		failAt   int
 	}
-
 	type expected struct {
-		terminationReason gent.TerminationReason
-		hasError          bool
-		compactions       int64
-		strategyCallCount int
-		triggerNotified   int
-		scratchpadLen     int
-		events            []gent.Event
+		calls, compactions, retained int
+		events                       []string
 	}
-
-	tests := []struct {
+	type testCase struct {
 		name     string
 		input    input
 		expected expected
-	}{
+	}
+	before, after := gent.EventNameIterationBefore, gent.EventNameIterationAfter
+	start, end := gent.EventNameExecutionBefore, gent.EventNameExecutionAfter
+	compact := gent.EventNameCompaction
+	cases := []testCase{
+
 		{
-			name: "no compaction configured runs normally",
-			input: input{
-				trigger:     nil,
-				strategy:    nil,
-				terminateAt: 2,
-			},
-			expected: expected{
-				terminationReason: gent.TerminationSuccess,
-				hasError:          false,
-				compactions:       0,
-				strategyCallCount: 0,
-				triggerNotified:   0,
-				scratchpadLen:     2,
-				events: []gent.Event{
-					tt.BeforeExec(0, 0),
-					tt.BeforeIter(0, 1),
-					tt.AfterIter(0, 1,
-						tt.Continue()),
-					tt.BeforeIter(0, 2),
-					tt.AfterIter(0, 2,
-						tt.Terminate("done")),
-					tt.AfterExec(0, 2,
-						gent.TerminationSuccess),
+			"no configuration",
+			input{},
+			expected{
+				2,
+				0,
+				3,
+				[]string{
+					start,
+					before,
+					after,
+					before,
+					after,
+					end,
 				},
 			},
 		},
-		{
-			name: "trigger never fires runs normally",
-			input: input{
-				trigger: tt.NewMockCompactionTrigger().
-					WithShouldCompact(false),
-				strategy: tt.NewMockCompactionStrategy(),
-				// trigger checked once: before iter 2
-				terminateAt: 2,
-			},
-			expected: expected{
-				terminationReason: gent.TerminationSuccess,
-				hasError:          false,
-				compactions:       0,
-				strategyCallCount: 0,
-				triggerNotified:   0,
-				scratchpadLen:     2,
-				events: []gent.Event{
-					tt.BeforeExec(0, 0),
-					tt.BeforeIter(0, 1),
-					tt.AfterIter(0, 1,
-						tt.Continue()),
-					tt.BeforeIter(0, 2),
-					tt.AfterIter(0, 2,
-						tt.Terminate("done")),
-					tt.AfterExec(0, 2,
-						gent.TerminationSuccess),
-				},
-			},
-		},
-		{
-			name: "trigger fires once and strategy " +
-				"succeeds",
-			input: input{
-				trigger: tt.NewMockCompactionTrigger().
-					WithShouldCompact(true, false),
-				strategy: tt.NewMockCompactionStrategy().
-					WithCompactFunc(
-						func(
-							_ *gent.ExecutionContext,
-							input gent.CompactionInput,
-						) (gent.HistoryUpdate, error) {
-							active := input.EntryIds()
-							if len(active) > 1 {
-								active = active[len(active)-1:]
-							}
-							return gent.HistoryUpdate{
-								ExpectedDraftRevision: input.Revision,
-								Active:                active,
-							}, nil
-						},
-					),
-				terminateAt: 3,
-			},
-			expected: expected{
-				terminationReason: gent.TerminationSuccess,
-				hasError:          false,
-				compactions:       1,
-				strategyCallCount: 1,
-				triggerNotified:   1,
-				scratchpadLen:     3,
-				events: []gent.Event{
-					tt.BeforeExec(0, 0),
-					tt.BeforeIter(0, 1),
-					tt.AfterIter(0, 1,
-						tt.Continue()),
-					// Compaction fires before iter 2
-					tt.Compaction(0, 1, 1, 1),
-					tt.BeforeIter(0, 2),
-					tt.AfterIter(0, 2,
-						tt.Continue()),
-					tt.BeforeIter(0, 3),
-					tt.AfterIter(0, 3,
-						tt.Terminate("done")),
-					tt.AfterExec(0, 3,
-						gent.TerminationSuccess),
-				},
-			},
-		},
-		{
-			name: "trigger fires multiple times",
-			input: input{
-				trigger: tt.NewMockCompactionTrigger().
-					WithShouldCompact(
-						true, true, false,
-					),
-				strategy: tt.NewMockCompactionStrategy().
-					WithCompactFunc(
-						func(
-							_ *gent.ExecutionContext,
-							input gent.CompactionInput,
-						) (gent.HistoryUpdate, error) {
-							active := input.EntryIds()
-							if len(active) > 1 {
-								active = active[len(active)-1:]
-							}
-							return gent.HistoryUpdate{
-								ExpectedDraftRevision: input.Revision,
-								Active:                active,
-							}, nil
-						},
-					),
-				terminateAt: 4,
-			},
-			expected: expected{
-				terminationReason: gent.TerminationSuccess,
-				hasError:          false,
-				compactions:       2,
-				strategyCallCount: 2,
-				triggerNotified:   2,
-				scratchpadLen:     3,
-				events: []gent.Event{
-					tt.BeforeExec(0, 0),
-					tt.BeforeIter(0, 1),
-					tt.AfterIter(0, 1,
-						tt.Continue()),
-					// Compaction before iter 2
-					tt.Compaction(0, 1, 1, 1),
-					tt.BeforeIter(0, 2),
-					tt.AfterIter(0, 2,
-						tt.Continue()),
-					// Compaction before iter 3
-					tt.Compaction(0, 2, 2, 1),
-					tt.BeforeIter(0, 3),
-					tt.AfterIter(0, 3,
-						tt.Continue()),
-					tt.BeforeIter(0, 4),
-					tt.AfterIter(0, 4,
-						tt.Terminate("done")),
-					tt.AfterExec(0, 4,
-						gent.TerminationSuccess),
-				},
-			},
-		},
-		{
-			name: "strategy error terminates with " +
-				"compaction_failed",
-			input: input{
-				trigger: tt.NewMockCompactionTrigger().
-					WithShouldCompact(true),
-				strategy: tt.NewMockCompactionStrategy().
-					WithError(errors.New(
-						"summarization model failed",
-					)),
-				terminateAt: 5,
-			},
-			expected: expected{
-				terminationReason: gent.TerminationCompactionFailed,
-				hasError:          true,
-				compactions:       0,
-				strategyCallCount: 1,
-				triggerNotified:   0,
-				scratchpadLen:     1,
-				events: []gent.Event{
-					tt.BeforeExec(0, 0),
-					tt.BeforeIter(0, 1),
-					tt.AfterIter(0, 1,
-						tt.Continue()),
-					// No CompactionEvent (strategy failed)
-					tt.AfterExec(0, 1,
-						gent.TerminationCompactionFailed),
-				},
-			},
-		},
-		{
-			name: "strategy error on second trigger",
-			input: input{
-				trigger: tt.NewMockCompactionTrigger().
-					WithShouldCompact(true, true),
-				strategy: func() *tt.MockCompactionStrategy {
-					callCount := 0
-					return tt.NewMockCompactionStrategy().
-						WithCompactFunc(
-							func(
-								_ *gent.ExecutionContext,
-								input gent.CompactionInput,
-							) (gent.HistoryUpdate, error) {
-								callCount++
-								if callCount == 1 {
-									return gent.HistoryUpdate{
-										ExpectedDraftRevision: input.Revision,
-										Active:                input.EntryIds(),
-									}, nil
-								}
-								return gent.HistoryUpdate{}, errors.New("second call fails")
+		{"trigger false", input{[]bool{false, false}, 0}, expected{2, 0, 3,
+			[]string{start, before, after, before, after, end}}},
+		{"before first iteration", input{[]bool{true, false}, 0}, expected{2, 1, 3,
+			[]string{start, compact, before, after, before, after, end}}},
+		{"before second iteration", input{[]bool{false, true}, 0}, expected{2, 1, 2,
+			[]string{start, before, after, compact, before, after, end}}},
+		{"both iterations", input{[]bool{true, true}, 0}, expected{2, 2, 2,
+			[]string{start, compact, before, after, compact, before, after, end}}},
+		{"first compaction failure", input{[]bool{true}, 1}, expected{0, 0, 1, []string{start}}},
+		{"second compaction failure", input{[]bool{true, true}, 2}, expected{1, 1, 2,
+			[]string{start, compact, before, after}}},
+	}
+	failure := errors.New("summary operation failed")
+	for _, test := range cases {
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				calls := 0
+				loop := &functionLoop{
+					next: func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+						calls++
+						if err := execCtx.AppendRecord(
+							&gent.HistoryEntry{
+								Messages: []*gent.MessageContent{
+									{
+
+										Role: gent.ChatMessageTypeAI,
+										Parts: []gent.ContentPart{
+											gent.TextPart(
+												"Progress.",
+											),
+										},
+									},
+								},
 							},
-						)
-				}(),
-				terminateAt: 5,
+							true,
+						); err != nil {
+							return nil, err
+						}
+						if execCtx.Iteration() == 2 {
+							return acceptTestOutput(execCtx, "Done")
+						}
+						return &gent.AgentLoopResult{Action: gent.LAContinue}, nil
+					},
+				}
+				store := &executionRecorder{codecs: gent.NewCodecRegistry()}
+				config := &gent.Config{Codecs: store.codecs, Recorder: store}
+				var trigger *tt.MockCompactionTrigger
+				var strategy *tt.MockCompactionStrategy
+				if test.input.schedule != nil {
+					trigger = tt.NewMockCompactionTrigger().WithShouldCompact(test.input.schedule...)
+					strategy = tt.NewMockCompactionStrategy().WithCompactFunc(func(
+						_ *gent.ExecutionContext, input *gent.CompactionInput,
+					) (*gent.HistoryUpdate, error) {
+						if strategy.CallCount() == test.input.failAt {
+							return nil, failure
+						}
+						active := input.EntryIds()
+						if len(active) > 1 {
+							active = active[len(active)-1:]
+						}
+						return &gent.HistoryUpdate{ExpectedDraftRevision: input.Revision, Active: active}, nil
+					})
+					config.CompactionTrigger, config.CompactionStrategy = trigger, strategy
+				}
+				runner := executor.NewRunner[string](loop, config)
+				execCtx, err := runner.NewExecutionContext(context.Background(), "compaction")
+				require.NoError(t, err)
+				defer execCtx.Release()
+				value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Work.")))
+				if test.input.failAt > 0 {
+					assert.ErrorIs(t, err, failure)
+					assert.Equal(t, "", value)
+					assert.Nil(t, result)
+				} else {
+					require.NoError(t, err)
+					assert.Equal(t, "Done", value)
+					assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished, TurnId: execCtx.TurnId(),
+						TerminationReason: gent.TerminationSuccess,
+						Output:            []gent.ContentPart{gent.TextPart("Done")}}, result)
+				}
+				var events []string
+				for _, event := range store.view.Activity {
+					switch value := event.Payload.(type) {
+					case *gent.BeforeExecutionEvent:
+						events = append(events, value.EventName)
+					case *gent.AfterExecutionEvent:
+						events = append(events, value.EventName)
+					case *gent.BeforeIterationEvent:
+						events = append(events, value.EventName)
+					case *gent.AfterIterationEvent:
+						events = append(events, value.EventName)
+					case *gent.CompactionEvent:
+						events = append(events, value.EventName)
+					}
+				}
+				retained, err := execCtx.Scratchpad()
+				require.NoError(t, err)
+				assert.Equal(t, test.expected, expected{calls,
+					int(execCtx.Stats().GetCounter(gent.SCCompactions)), len(retained), events})
+				if trigger != nil {
+					assert.Equal(t, test.expected.compactions, trigger.NotifiedCount())
+				}
+				// A failed summary has no terminal save. Restore the accepted head with corrected
+				// configuration and continue the same task without losing earlier compaction work.
+				if test.input.failAt > 0 {
+					codecs := gent.NewCodecRegistry()
+					fixed := executor.NewRunner[string](loop, &gent.Config{Codecs: codecs})
+					restored, err := fixed.Restore(context.Background(), store.latest(t, codecs))
+					require.NoError(t, err)
+					require.Equal(t, gent.RestoreReady, restored.Status)
+					defer restored.Context.Release()
+					value, result, err = fixed.Continue(restored.Context)
+					require.NoError(t, err)
+					assert.Equal(t, "Done", value)
+					assert.Equal(t, gent.TerminationSuccess, result.TerminationReason)
+				}
 			},
-			expected: expected{
-				terminationReason: gent.TerminationCompactionFailed,
-				hasError:          true,
-				compactions:       1,
-				strategyCallCount: 2,
-				triggerNotified:   1,
-				scratchpadLen:     2,
-				events: []gent.Event{
-					tt.BeforeExec(0, 0),
-					tt.BeforeIter(0, 1),
-					tt.AfterIter(0, 1,
-						tt.Continue()),
-					// First compaction succeeds
-					tt.Compaction(0, 1, 1, 1),
-					tt.BeforeIter(0, 2),
-					tt.AfterIter(0, 2,
-						tt.Continue()),
-					// Second compaction fails
-					tt.AfterExec(0, 2,
-						gent.TerminationCompactionFailed),
-				},
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			data := gent.NewBasicLoopData(
-				gent.NewTask(gent.TextContent{Text: "test"}),
-			)
-
-			loop := &scratchpadTrackingLoop{
-				terminateAt: tc.input.terminateAt,
-			}
-
-			exec := executor.NewRunner(
-				loop,
-				executor.DefaultConfig(),
-			)
-
-			execCtx := gent.NewExecutionContext(
-				context.Background(), "test", data,
-			)
-			execCtx.SetLimits(nil)
-
-			if tc.input.trigger != nil &&
-				tc.input.strategy != nil {
-				execCtx.SetCompaction(
-					tc.input.trigger,
-					tc.input.strategy,
-				)
-			}
-
-			exec.Execute(execCtx)
-
-			result := execCtx.Result()
-			assert.Equal(t,
-				tc.expected.terminationReason,
-				result.TerminationReason,
-			)
-
-			if tc.expected.hasError {
-				assert.NotNil(t, result.Error)
-			} else {
-				assert.Nil(t, result.Error)
-			}
-
-			assert.Equal(t,
-				tc.expected.compactions,
-				execCtx.Stats().GetCounter(
-					gent.SCCompactions,
-				),
-			)
-
-			if tc.input.strategy != nil {
-				assert.Equal(t,
-					tc.expected.strategyCallCount,
-					tc.input.strategy.CallCount(),
-				)
-			}
-
-			if tc.input.trigger != nil {
-				assert.Equal(t,
-					tc.expected.triggerNotified,
-					tc.input.trigger.NotifiedCount(),
-				)
-			}
-
-			assert.Equal(t,
-				tc.expected.scratchpadLen,
-				len(testScratchpad(t, execCtx)),
-			)
-
-			lifecycleEvents := collectLifecycleAndCompaction(
-				execCtx,
-			)
-			tt.AssertEventsEqual(
-				t, tc.expected.events, lifecycleEvents,
-			)
-		})
+		)
 	}
 }
 
-// scratchpadTrackingLoop implements Loop that adds an
-// iteration to the scratchpad on each call. This simulates
-// real agent behavior where each iteration grows the
-// scratchpad.
-type scratchpadTrackingLoop struct {
-	calls       int
-	terminateAt int
+type measuredTokens struct{ input, output, total float64 }
+type gaugeCapturingTrigger struct{ measurements []measuredTokens }
+
+func (trigger *gaugeCapturingTrigger) ShouldCompact(execCtx *gent.ExecutionContext) (bool, error) {
+	stats := execCtx.Stats()
+	trigger.measurements = append(trigger.measurements, measuredTokens{
+		stats.GetGauge(gent.SGInputTokensLastIteration), stats.GetGauge(gent.SGOutputTokensLastIteration),
+		stats.GetGauge(gent.SGTotalTokensLastIteration)})
+	return false, nil
 }
+func (*gaugeCapturingTrigger) NotifyCompacted(*gent.ExecutionContext) error { return nil }
 
-func (l *scratchpadTrackingLoop) Next(
-	execCtx *gent.ExecutionContext,
-) (*gent.AgentLoopResult, error) {
-	l.calls++
-
-	// Add an iteration to scratchpad (like real agents do)
-	iter := &gent.HistoryEntry{
-		Messages: []*gent.MessageContent{},
-	}
-	if err := execCtx.AppendRecord(iter, true); err != nil {
-		return nil, err
-	}
-
-	if l.terminateAt > 0 && l.calls >= l.terminateAt {
-		return tt.Terminate("done"), nil
-	}
-	return tt.Continue(), nil
-}
-
-// collectLifecycleAndCompaction collects lifecycle events
-// plus CompactionEvents.
-func collectLifecycleAndCompaction(
-	execCtx *gent.ExecutionContext,
-) []gent.Event {
-	var result []gent.Event
-	for _, event := range execCtx.Events() {
-		if tt.IsLifecycleEvent(event) {
-			result = append(result, event)
-		}
-	}
-	return result
-}
-
-// ----------------------------------------------------------------
-// Test: per-iteration gauges available during trigger check
-//
-// This verifies the critical placement invariant: compaction
-// runs BEFORE BeforeIterationEvent, so per-iteration gauges
-// from the previous iteration are still available for the
-// trigger to inspect.
-// ----------------------------------------------------------------
-
-func TestCompaction_PerIterationGaugesAvailable(
-	t *testing.T,
-) {
-	type input struct {
-		inputTokensPerIter  int
-		outputTokensPerIter int
-	}
-
-	type expected struct {
-		// The per-iteration gauge values captured by the
-		// trigger during the ShouldCompact call before
-		// iteration 2.
-		inputTokens  float64
-		outputTokens float64
-		totalTokens  float64
-	}
-
-	tests := []struct {
+func TestCompactionReadsPreviousIterationGauges(t *testing.T) {
+	type input struct{ inputTokens, outputTokens int }
+	type expected struct{ measurements []measuredTokens }
+	type testCase struct {
 		name     string
 		input    input
 		expected expected
-	}{
-		{
-			name: "gauges reflect previous iteration " +
-				"token usage",
-			input: input{
-				inputTokensPerIter:  150,
-				outputTokensPerIter: 50,
-			},
-			expected: expected{
-				inputTokens:  150,
-				outputTokens: 50,
-				totalTokens:  200,
-			},
-		},
-		{
-			name: "gauges reflect different token " +
-				"counts",
-			input: input{
-				inputTokensPerIter:  500,
-				outputTokensPerIter: 100,
-			},
-			expected: expected{
-				inputTokens:  500,
-				outputTokens: 100,
-				totalTokens:  600,
-			},
-		},
 	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			data := gent.NewBasicLoopData(
-				gent.NewTask(gent.TextContent{Text: "test"}),
-			)
-
-			loop := &modelCallingLoop{
-				terminateAt:  2,
-				inputTokens:  tc.input.inputTokensPerIter,
-				outputTokens: tc.input.outputTokensPerIter,
-			}
-
-			// Custom trigger that captures gauge
-			// values during ShouldCompact
+	cases := []testCase{
+		{"small", input{10, 5}, expected{[]measuredTokens{{}, {10, 5, 15}}}},
+		{"large", input{500, 100}, expected{[]measuredTokens{{}, {500, 100, 600}}}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
 			trigger := &gaugeCapturingTrigger{}
-
-			strategy := tt.NewMockCompactionStrategy()
-
-			exec := executor.NewRunner(
-				loop,
-				executor.DefaultConfig(),
-			)
-
-			execCtx := gent.NewExecutionContext(
-				context.Background(), "test", data,
-			)
-			execCtx.SetLimits(nil)
-			execCtx.SetCompaction(trigger, strategy)
-
-			exec.Execute(execCtx)
-
-			assert.Equal(t,
-				gent.TerminationSuccess,
-				execCtx.Result().TerminationReason,
-			)
-
-			// Verify trigger was called and captured
-			// per-iteration gauges from iteration 1.
-			assert.Equal(t, 1, trigger.callCount,
-				"ShouldCompact should be called once "+
-					"(before iteration 2)",
-			)
-			assert.Equal(t,
-				tc.expected.inputTokens,
-				trigger.capturedInputTokens,
-				"SGInputTokensLastIteration should "+
-					"reflect iteration 1 tokens",
-			)
-			assert.Equal(t,
-				tc.expected.outputTokens,
-				trigger.capturedOutputTokens,
-				"SGOutputTokensLastIteration should "+
-					"reflect iteration 1 tokens",
-			)
-			assert.Equal(t,
-				tc.expected.totalTokens,
-				trigger.capturedTotalTokens,
-				"SGTotalTokensLastIteration should "+
-					"reflect iteration 1 tokens",
-			)
+			loop := &functionLoop{next: func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+				execCtx.PublishAfterModelCall("fixture", &gent.ModelCallRequest{}, &gent.ModelCallResponse{
+					Info: &gent.GenerationInfo{InputTokens: test.input.inputTokens,
+						OutputTokens: test.input.outputTokens}}, 0, nil)
+				if execCtx.Iteration() == 2 {
+					return acceptTestOutput(execCtx, "Done")
+				}
+				return &gent.AgentLoopResult{Action: gent.LAContinue}, nil
+			}}
+			runner := executor.NewRunner[string](loop, &gent.Config{CompactionTrigger: trigger,
+				CompactionStrategy: tt.NewMockCompactionStrategy()})
+			execCtx, err := runner.NewExecutionContext(context.Background(), "gauge timing")
+			require.NoError(t, err)
+			defer execCtx.Release()
+			_, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Work.")))
+			require.NoError(t, err)
+			assert.Equal(t, gent.ExecutionFinished, result.Status)
+			assert.Equal(t, test.expected, expected{trigger.measurements})
 		})
 	}
 }
-
-// modelCallingLoop is an Loop that publishes
-// AfterModelCallEvent on each iteration to set per-iteration
-// token gauges.
-type modelCallingLoop struct {
-	calls        int
-	terminateAt  int
-	inputTokens  int
-	outputTokens int
-}
-
-func (l *modelCallingLoop) Next(
-	execCtx *gent.ExecutionContext,
-) (*gent.AgentLoopResult, error) {
-	l.calls++
-
-	// Publish model call event to set per-iteration gauges
-	resp := &gent.ModelCallResponse{
-		Choices: []*gent.ContentChoice{
-			{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: "response"}},
-			},
-		},
-		Info: &gent.GenerationInfo{
-			InputTokens:  l.inputTokens,
-			OutputTokens: l.outputTokens,
-		},
-	}
-	execCtx.PublishAfterModelCall(
-		"test-model", &gent.ModelCallRequest{}, resp, 0, nil,
-	)
-
-	// Add iteration to scratchpad
-	iter := &gent.HistoryEntry{
-		Messages: []*gent.MessageContent{},
-	}
-	if err := execCtx.AppendRecord(iter, true); err != nil {
-		return nil, err
-	}
-
-	if l.terminateAt > 0 && l.calls >= l.terminateAt {
-		return tt.Terminate("done"), nil
-	}
-	return tt.Continue(), nil
-}
-
-// gaugeCapturingTrigger captures per-iteration gauge values
-// when ShouldCompact is called.
-type gaugeCapturingTrigger struct {
-	callCount            int
-	capturedInputTokens  float64
-	capturedOutputTokens float64
-	capturedTotalTokens  float64
-}
-
-func (t *gaugeCapturingTrigger) ShouldCompact(
-	execCtx *gent.ExecutionContext,
-) (bool, error) {
-	t.callCount++
-	stats := execCtx.Stats()
-	t.capturedInputTokens = stats.GetGauge(
-		gent.SGInputTokensLastIteration,
-	)
-	t.capturedOutputTokens = stats.GetGauge(
-		gent.SGOutputTokensLastIteration,
-	)
-	t.capturedTotalTokens = stats.GetGauge(
-		gent.SGTotalTokensLastIteration,
-	)
-	return false, nil // Don't actually compact
-}
-
-func (t *gaugeCapturingTrigger) NotifyCompacted(_ *gent.ExecutionContext) error { return nil }
-
-func (*scratchpadTrackingLoop) Output() gent.Output[string] { return output.NewTextOutput() }
-
-func (*modelCallingLoop) Output() gent.Output[string] { return output.NewTextOutput() }

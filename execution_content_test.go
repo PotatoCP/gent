@@ -1,12 +1,9 @@
 package gent_test
 
-import genttest "github.com/rickchristie/gent/internal/tt"
-
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/rickchristie/gent/output"
 	"regexp"
 	"sync"
 	"testing"
@@ -14,7 +11,9 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
+	"github.com/rickchristie/gent/internal/tt"
+	"github.com/rickchristie/gent/output"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/rickchristie/gent/trace"
 	"github.com/stretchr/testify/assert"
 )
@@ -31,10 +30,8 @@ type contentModel struct {
 	complete func()
 }
 
-func (model *contentModel) GenerateContentStream(_ context.Context,
-	request *gent.ModelCallRequest) (
-	gent.Stream, error,
-) {
+func (model *contentModel) GenerateContentStream(_ context.Context, request *gent.ModelCallRequest,
+) (gent.Stream, error) {
 	index := len(model.requests)
 	model.requests = append(model.requests, request)
 	if index >= len(model.replies) {
@@ -42,11 +39,16 @@ func (model *contentModel) GenerateContentStream(_ context.Context,
 	}
 	reply := model.replies[index]
 	stream := gent.NewStreamWithDuration()
+	id, kind := "answer", gent.AssistantContentIntermediary
+	for _, part := range reply.choice.Parts {
+		if item, ok := part.(*gent.AssistantContent); ok {
+			id, kind = item.MessageId, item.Type
+			break
+		}
+	}
 	for _, delta := range reply.deltas {
-		stream.SendMeta(&gent.MetaContent{
-			Type:    gent.MetaContentIntermediary,
-			Content: []gent.ContentPart{gent.TextContent{Text: delta}},
-		})
+		stream.Send(gent.StreamChunk{Content: []gent.ContentPart{&gent.AssistantContent{
+			Type: kind, MessageId: id, Content: []gent.ContentPart{gent.TextPart(delta)}}}})
 	}
 	if model.complete != nil {
 		model.complete()
@@ -56,17 +58,61 @@ func (model *contentModel) GenerateContentStream(_ context.Context,
 	return stream, nil
 }
 
+func (model *contentModel) PrepareRequest(execCtx *gent.ExecutionContext,
+	request *gent.ModelCallRequest, chain gent.ToolChain,
+) (*gent.ModelCallRequest, error) {
+	return gent.PrepareModelRequest(execCtx, request, chain)
+}
+
+type contentLoop func(*gent.ExecutionContext) (*gent.AgentLoopResult, error)
+
+func (loop contentLoop) Next(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+	return loop(execCtx)
+}
+func (contentLoop) Output() gent.Output[string] { return output.NewTextOutput() }
+
+type contentObserver struct {
+	mu     sync.Mutex
+	events []*gent.RecordedEvent
+	before func(context.Context, *gent.RecordedEvent) error
+}
+
+func (observer *contentObserver) OnEvent(ctx context.Context, event *gent.RecordedEvent) error {
+	if observer.before != nil {
+		if err := observer.before(ctx, event); err != nil {
+			return err
+		}
+	}
+	observer.mu.Lock()
+	defer observer.mu.Unlock()
+	observer.events = append(observer.events, event)
+	return nil
+}
+func (*contentObserver) OnStop(context.Context, *gent.SubscriberStop) {}
+func (observer *contentObserver) recorded() []*gent.RecordedEvent {
+	observer.mu.Lock()
+	defer observer.mu.Unlock()
+	return append([]*gent.RecordedEvent(nil), observer.events...)
+}
+func acceptedContent(events []*gent.RecordedEvent) []*gent.StreamChunk {
+	var accepted []*gent.StreamChunk
+	for _, event := range events {
+		if event.Type == "accepted_answer" {
+			accepted = append(accepted, event.Payload.(*gent.StreamChunk))
+		}
+	}
+	return accepted
+}
+
 func TestExecutionContent_FailuresKeepOnlyPreviews(t *testing.T) {
+	providerErr := errors.New("provider failed")
 	type input struct {
-		stopReason string
-		provider   bool
-		cancel     bool
-		reject     bool
-		tokenLimit bool
+		status                               gent.ModelStatus
+		provider, cancel, reject, tokenLimit bool
 	}
 	type expected struct {
-		reason gent.TerminationReason
-		err    string
+		reason         gent.TerminationReason
+		operationError bool
 	}
 	type testCase struct {
 		name     string
@@ -74,211 +120,113 @@ func TestExecutionContent_FailuresKeepOnlyPreviews(t *testing.T) {
 		expected expected
 	}
 	cases := []testCase{
-		{"provider failure", input{provider: true}, expected{gent.TerminationError,
-			"Loop.Next (iteration 1): model call failed: provider failed"}},
-		{"cancel", input{cancel: true}, expected{gent.TerminationContextCanceled, "context canceled"}},
-		{"truncated", input{stopReason: "length"}, expected{gent.TerminationLimitExceeded,
-			"limit exceeded: $self:gent:iterations >= 1"}},
-		{"rejected", input{reject: true}, expected{gent.TerminationLimitExceeded,
-			"limit exceeded: $self:gent:iterations >= 1"}},
-		{"token limit", input{tokenLimit: true}, expected{gent.TerminationLimitExceeded,
-			"limit exceeded: gent:output_tokens > 3"}},
-		{"unknown completion", input{stopReason: "new_stop"}, expected{gent.TerminationError,
-			`Loop.Next (iteration 1): model stopped without a usable response: "new_stop"`}},
+		{"provider failure", input{provider: true}, expected{operationError: true}},
+		{"owner cancellation", input{cancel: true}, expected{operationError: true}},
+		{"truncated", input{status: gent.ModelStatusIncomplete},
+			expected{reason: gent.TerminationLimitExceeded}},
+		{"rejected", input{reject: true}, expected{reason: gent.TerminationLimitExceeded}},
+		{"token limit", input{tokenLimit: true}, expected{reason: gent.TerminationLimitExceeded}},
+		{"unknown completion", input{status: gent.ModelStatusFailed}, expected{operationError: true}},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			ctx := gent.NewExecutionContext(context.Background(), "root",
-				gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Get the status."})))
-			choice := &gent.ContentChoice{CandidateContent: []gent.ContentPart{
-				gent.TextContent{Text: `{"status":"pending"}`},
-			},
-				Completion: gent.ModelCompletion{
-					Status:         gent.ModelStatusAnswer,
-					ProviderReason: test.input.stopReason,
-				}}
-			switch test.input.stopReason {
-			case "length":
-				choice.Completion.Status = gent.ModelStatusIncomplete
-			case "new_stop":
-				choice.Completion.Status = gent.ModelStatusFailed
-			}
-			reply := contentReply{
-				choice: choice,
-				deltas: []string{gent.ContentText(choice.CandidateContent)},
-			}
-			if test.input.provider {
-				reply.err = errors.New("provider failed")
-			}
-			model := &contentModel{replies: []contentReply{reply}}
-			if test.input.cancel {
-				model.complete = func() { ctx.CancelRun(context.Canceled) }
-			}
-			out, err := output.NewJsonOutput[contentAnswer]()
-			if !assert.NoError(t, err) {
-				return
-			}
-			if test.input.reject {
-				out.SetCustomValidator("status", validateContentAnswer)
-			}
-			agent := react.NewWithOutput(model, out)
-			if test.input.reject || test.input.stopReason == "length" {
-				ctx.SetLimits([]gent.Limit{{Type: gent.LimitExactKey,
-					Key: gent.SCIterations.Self(), MaxValue: 1}})
-			}
-			if test.input.tokenLimit {
-				ctx.SetLimits([]gent.Limit{{Type: gent.LimitExactKey,
-					Key: gent.SCOutputTokens, MaxValue: 3}})
-			}
-			chunks, unsubscribe := ctx.SubscribeAll()
-			defer unsubscribe()
-			_, result, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
-			if !assert.Error(t, err) || !assert.NotNil(t, result) {
-				return
-			}
-			assert.Equal(t, test.expected, expected{result.TerminationReason, err.Error()})
-			var live []gent.StreamChunk
-			for chunk := range chunks {
-				assert.Equal(t, []gent.ContentPart(nil), chunk.Content)
-				assert.Equal(t, "", chunk.MessageId)
-				live = append(live, chunk)
-			}
-			bundle, err := ctx.Export()
-			assert.NoError(t, err)
-			saved := contentChunks(t, bundle.Activity, ctx.Codecs())
-			if test.input.cancel {
-				// Cancellation closes live delivery. Its saved evidence can include chunks
-				// received after cancellation, but every delivered chunk must match exactly.
-				if !assert.LessOrEqual(t, len(live), len(saved)) {
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				owner, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				choice := recoveryAnswerChoice(`{"status":"pending"}`)
+				if test.input.status != "" {
+					choice.Completion.Status = test.input.status
+				}
+				choice.Completion.ProviderReason = "fixture stop"
+				reply := contentReply{
+					choice: choice,
+					deltas: []string{
+						gent.ContentText(
+							choice.CandidateContent(),
+						),
+					},
+				}
+				if test.input.provider {
+					reply.err = providerErr
+				}
+				model := &contentModel{replies: []contentReply{reply}}
+				if test.input.cancel {
+					model.complete = cancel
+				}
+				out, err := output.NewJsonOutput[contentAnswer]()
+				if !assert.NoError(t, err) {
 					return
 				}
-				saved = append([]gent.StreamChunk(nil), saved[:len(live)]...)
-			}
-			assert.Equal(t, live, saved)
-			assert.Equal(t, gent.PhaseTerminal, bundle.Checkpoint.Phase)
-		})
-	}
-}
-
-type contentLoop func(*gent.ExecutionContext) (*gent.AgentLoopResult, error)
-
-func (loop contentLoop) Next(ctx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
-	return loop(ctx)
-}
-
-func TestExecutionContent_ChildRunsHaveSeparateAnswers(t *testing.T) {
-	ctx := gent.NewExecutionContext(context.Background(), "root", gent.NewBasicLoopData(nil))
-	chunks, unsubscribe := ctx.SubscribeAll()
-	defer unsubscribe()
-	children := []*gent.ExecutionContext{}
-	loop := contentLoop(func(ctx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
-		var pending sync.WaitGroup
-		failures := make(chan error, 2)
-		for range 2 {
-			child := ctx.SpawnChild("child", gent.NewBasicLoopData(gent.NewTask(gent.TextContent{
-				Text: "Answer.",
-			})))
-			children = append(children, child)
-			pending.Add(1)
-			go func() {
-				defer pending.Done()
-				model := &contentModel{replies: []contentReply{{
-					choice: &gent.ContentChoice{
-						Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-						CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Child answer."}},
+				if test.input.reject {
+					out.SetCustomValidator("status", validateContentAnswer)
+				}
+				observer := &contentObserver{}
+				store := &recoveryStore{codecs: gent.NewCodecRegistry()}
+				config := &gent.Config{
+					Codecs:   store.codecs,
+					Recorder: store,
+					Subscribers: []*gent.SubscriberRegistration{
+						{
+							Subscriber: observer,
+							Delivery:   gent.SubscriberLive,
+						},
 					},
-					deltas: []string{"Child answer."}}}}
-				_, _, err := executor.NewRunner(react.NewAgent(model), executor.DefaultConfig()).Execute(child)
-				failures <- errors.Join(err, ctx.CompleteChild(child))
-			}()
-		}
-		pending.Wait()
-		close(failures)
-		for err := range failures {
-			if err != nil {
-				return nil, err
-			}
-		}
-		return &gent.AgentLoopResult{TerminationReason: gent.TerminationSuccess, Action: gent.LATerminate,
-			Result: []gent.ContentPart{
-				gent.TextContent{Text: "Parent answer."},
+				}
+				if test.input.reject || test.input.status == gent.ModelStatusIncomplete {
+					config.Limits = []gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 1}}
+				}
+				if test.input.tokenLimit {
+					config.Limits = []gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCOutputTokens, MaxValue: 3}}
+				}
+				runner, execCtx := newTestExecution(t, owner, react.NewWithOutput(model, out), config)
+				value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Get the status.")))
+				assert.Equal(t, contentAnswer{}, value)
+				if test.expected.operationError {
+					assert.Error(t, err)
+					assert.Nil(t, result)
+					if test.input.provider {
+						assert.ErrorIs(t, err, providerErr)
+					}
+					if test.input.cancel {
+						assert.ErrorIs(t, err, context.Canceled)
+					}
+					assert.Nil(t, store.view.Checkpoint.Outcome)
+				} else if assert.NoError(t, err) && assert.NotNil(t, result) {
+					assert.Equal(t, gent.ExecutionPaused, result.Status)
+					assert.Equal(t, test.expected.reason, result.TerminationReason)
+					assert.Empty(t, result.Output)
+					assert.Equal(t, gent.PhasePaused, store.view.Checkpoint.Phase)
+				}
+				assert.Empty(t, acceptedContent(observer.recorded()))
+				assert.Empty(t, acceptedContent(store.view.Activity))
 			},
-			Value: genttest.Value(gent.ContentText([]gent.ContentPart{
-				gent.TextContent{Text: "Parent answer."},
-			}))}, nil
-	})
-	_, _, err := executor.NewRunner(loop, executor.DefaultConfig()).Execute(ctx)
-	assert.NoError(t, err)
-	finals := map[string]gent.StreamChunk{}
-	previews := map[string]string{}
-	for chunk := range chunks {
-		for _, meta := range chunk.MetaContent {
-			previews[chunk.ContextId] = meta.MessageId
-		}
-		if chunk.MessageId != "" {
-			_, exists := finals[chunk.ContextId]
-			assert.False(t, exists)
-			finals[chunk.ContextId] = chunk
-		}
+		)
 	}
-	assert.Len(t, finals, 3)
-	assert.Equal(t, []gent.ContentPart{
-		gent.TextContent{Text: "Parent answer."},
-	}, finals[ctx.ContextId()].Content)
-	assert.Nil(t, finals[ctx.ContextId()].SourceMessageIds)
-	assert.NotEqual(t, previews[children[0].ContextId()], previews[children[1].ContextId()])
-	for _, child := range children {
-		final := finals[child.ContextId()]
-		assert.Equal(t, ctx.ContextId(), final.ParentContextId)
-		assert.Equal(t, []gent.ContentPart{gent.TextContent{Text: "Child answer."}}, final.Content)
-		assert.Equal(t, child.ContextId()+":answer", final.MessageId)
-		assert.Equal(t, []string{previews[child.ContextId()]}, final.SourceMessageIds)
-	}
-	view, err := ctx.Export()
-	assert.NoError(t, err)
-	assert.NoError(t, gent.ValidateBundle(view, ctx.Codecs()))
 }
 
 func TestContentIdentity_NewRequestsDoNotReusePreviewIDs(t *testing.T) {
-	ctx := gent.NewExecutionContext(context.Background(), "root", nil)
-	defer ctx.Release()
-	child := ctx.SpawnChild("child", nil)
-	defer child.Release()
+	first, second := tt.NewContext(t, &gent.Config{}), tt.NewContext(t, &gent.Config{})
 	model := &contentModel{replies: []contentReply{
-		{choice: &gent.ContentChoice{
-			Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-			CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Partial."}},
-		},
-			deltas: []string{"Partial."}, err: context.Canceled},
-		{
-			choice: &gent.ContentChoice{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Retry."}},
-			},
-			deltas: []string{"Retry."},
-		},
-		{
-			choice: &gent.ContentChoice{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Child."}},
-			},
-			deltas: []string{"Child."},
-		},
+		{choice: recoveryAnswerChoice("Partial."), deltas: []string{"Partial."}, err: context.Canceled},
+		{choice: recoveryAnswerChoice("Retry."), deltas: []string{"Retry."}},
+		{choice: recoveryAnswerChoice("Other run."), deltas: []string{"Other run."}},
 	}}
 	seen := map[string]bool{}
-	for index, owner := range []*gent.ExecutionContext{ctx, ctx, child} {
-		stream, err := owner.GenerateContentStream(model,
-			gent.ModelCall{Id: "answer"}, gent.NewModelCallRequest(nil))
+	for index, owner := range []*gent.ExecutionContext{first, first, second} {
+		stream, err := owner.GenerateContentStream(model, gent.ModelCall{Id: "answer"},
+			gent.NewModelCallRequest(nil))
 		if !assert.NoError(t, err) {
 			return
 		}
 		var ids []string
 		for chunk := range stream.Chunks() {
-			for _, item := range chunk.MetaContent {
-				ids = append(ids, item.MessageId)
+			for _, part := range chunk.Content {
+				ids = append(ids, part.(*gent.AssistantContent).MessageId)
 			}
 		}
 		response, err := stream.Response()
+		stream.Close()
 		if index == 0 {
 			assert.ErrorIs(t, err, context.Canceled)
 		} else {
@@ -287,9 +235,8 @@ func TestContentIdentity_NewRequestsDoNotReusePreviewIDs(t *testing.T) {
 		if !assert.Len(t, ids, 1) {
 			return
 		}
-		assert.Regexp(t, "^"+regexp.QuoteMeta(owner.ContextId())+
-			":message:[a-f0-9]{32}:message:0$", ids[0])
-		assert.False(t, seen[ids[0]], "a new provider request must have a new preview ID")
+		assert.Regexp(t, "^"+regexp.QuoteMeta(owner.ContextId())+":message:[a-f0-9]{32}:answer$", ids[0])
+		assert.False(t, seen[ids[0]], "each physical call has a distinct item identity")
 		seen[ids[0]] = true
 		assert.Equal(t, &gent.ContentSource{ModelCallId: "answer", MessageIds: ids},
 			response.Choices[0].CandidateSource)
@@ -299,164 +246,182 @@ func TestContentIdentity_NewRequestsDoNotReusePreviewIDs(t *testing.T) {
 func TestExecutionContent_ProviderContinuationIsNotFinal(t *testing.T) {
 	continuation := &gent.ProviderContinuation{Provider: "fixture", Items: []json.RawMessage{
 		json.RawMessage(`{"type":"server_tool_use","id":"work"}`)}}
+	working := &gent.ContentChoice{Completion: gent.ModelCompletion{
+		Status: gent.ModelStatusContinue, ProviderReason: "pause_turn"}, Continuation: continuation,
+		Parts: []gent.ContentPart{&gent.AssistantContent{Type: gent.AssistantContentCommentary,
+			MessageId: "work", Content: []gent.ContentPart{gent.TextPart("Still working.")}}}}
 	model := &contentModel{replies: []contentReply{
-		{choice: &gent.ContentChoice{CandidateContent: []gent.ContentPart{
-			gent.TextContent{Text: "Still working."},
-		},
-			Completion: gent.ModelCompletion{
-				Status:         gent.ModelStatusContinue,
-				ProviderReason: "pause_turn",
-			},
-			Continuation: continuation},
-			deltas: []string{
-				"Still working.",
-			}},
-		{
-			choice: &gent.ContentChoice{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Done."}},
-			},
-			deltas: []string{"Done."},
-		},
+		{choice: working, deltas: []string{"Still working."}},
+		{choice: recoveryAnswerChoice("Done."), deltas: []string{"Done."}},
 	}}
-	ctx := gent.NewExecutionContext(context.Background(), "root",
-		gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Finish the work."})))
-	chunks, unsubscribe := ctx.SubscribeAll()
-	defer unsubscribe()
-	_, result, err := executor.NewRunner(react.NewAgent(model), executor.DefaultConfig()).Execute(ctx)
-	assert.NoError(t, err)
-	assert.Equal(t, &gent.ExecutionResult{TerminationReason: gent.TerminationSuccess,
-		Output: []gent.ContentPart{gent.TextContent{Text: "Done."}}}, result)
+	observer := &contentObserver{}
+	runner, execCtx := newTestExecution(t, context.Background(), react.NewAgent(model),
+		&gent.Config{Subscribers: []*gent.SubscriberRegistration{{Subscriber: observer}}})
+	_, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Finish the work.")))
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(
+		t,
+		&gent.ExecutionResult{
+			Status:            gent.ExecutionFinished,
+			TurnId:            execCtx.TurnId(),
+			TerminationReason: gent.TerminationSuccess,
+			Output: []gent.ContentPart{
+				gent.TextPart(
+					"Done.",
+				),
+			},
+		},
+		result,
+	)
 	if !assert.Len(t, model.requests, 2) {
 		return
 	}
 	assert.Equal(t, continuation, model.requests[1].Messages[1].Continuation)
-	var contents []string
-	for chunk := range chunks {
-		if chunk.MessageId != "" {
-			contents = append(contents, gent.ContentText(chunk.Content))
-		}
+	accepted := acceptedContent(observer.recorded())
+	if assert.Len(t, accepted, 1) {
+		assert.Equal(t, "Done.", gent.ContentText(accepted[0].Content))
 	}
-	assert.Equal(t, []string{"Done."}, contents)
 }
 
-type heldContentObserver struct {
-	started chan struct{}
-	release chan struct{}
-}
-
-func (observer *heldContentObserver) ObserveCommitted(
-	events []*gent.RecordedEvent, _ *gent.CodecRegistry,
-) error {
-	for _, event := range events {
-		if event.EventName == "hold" {
-			close(observer.started)
-			<-observer.release
+func TestExecutionContent_SubscriberDelayDoesNotLoseAnswer(t *testing.T) {
+	entered, release, saved := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	observer := &contentObserver{before: func(ctx context.Context, event *gent.RecordedEvent) error {
+		if event.EventName != "hold" {
+			return nil
 		}
-	}
-	return nil
-}
-
-func TestExecutionContent_ObserverDelayDoesNotLoseFinalChunk(t *testing.T) {
-	observer := &heldContentObserver{started: make(chan struct{}), release: make(chan struct{})}
-	ctx := gent.NewExecutionContext(context.Background(), "root", nil, gent.WithObserver(observer))
-	chunks, unsubscribe := ctx.SubscribeAll()
-	defer unsubscribe()
-	ctx.PublishCommonEvent("hold", "Hold one observer during concurrent completion.", nil)
-	flushed := make(chan error, 1)
-	go func() { flushed <- ctx.FlushProgress() }()
-	<-observer.started
-	loop := contentLoop(func(*gent.ExecutionContext) (*gent.AgentLoopResult, error) {
-		return &gent.AgentLoopResult{TerminationReason: gent.TerminationSuccess, Action: gent.LATerminate,
-			Result: []gent.ContentPart{
-				gent.TextContent{Text: "Done."},
-			},
-			Value: genttest.Value(gent.ContentText([]gent.ContentPart{
-				gent.TextContent{Text: "Done."},
-			}))}, nil
+		close(entered)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}}
+	loop := contentLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		execCtx.PublishCommonEvent("hold", "Hold delivery while the answer is saved.", nil)
+		return acceptRootOutput(execCtx, "Done.")
 	})
-	_, _, err := executor.NewRunner(loop, executor.DefaultConfig()).Execute(ctx)
-	close(observer.release)
-	assert.NoError(t, err)
-	assert.NoError(t, <-flushed)
-	var contents []string
-	for chunk := range chunks {
-		contents = append(contents, gent.ContentText(chunk.Content))
+	recorder := checkpointRecorder(func(_ context.Context, batch *gent.SaveBatch) error {
+		if batch.Checkpoint.Phase == gent.PhaseTerminal {
+			close(saved)
+		}
+		return nil
+	})
+	runner, execCtx := newTestExecution(t, context.Background(), loop, &gent.Config{Recorder: recorder,
+		Subscribers: []*gent.SubscriberRegistration{{Subscriber: observer}}})
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := runner.NewTurn(
+			execCtx,
+			gent.NewTask(
+				gent.TextPart(
+					"Answer.",
+				),
+			),
+		)
+		done <- err
+	}()
+	checkpointSignal(t, entered)
+	checkpointSignal(t, saved)
+	assert.Empty(t, acceptedContent(observer.recorded()))
+	unblock()
+	assert.NoError(t, checkpointReceive(t, done))
+	accepted := acceptedContent(observer.recorded())
+	if assert.Len(t, accepted, 1) {
+		assert.Equal(t, "Done.", gent.ContentText(accepted[0].Content))
 	}
-	assert.Equal(t, []string{"Done."}, contents)
 }
 
 type contentAnswer struct {
 	Status string `json:"status"`
 }
 
-func validateContentAnswer(_ *gent.ExecutionContext, answer contentAnswer) (
-	*gent.OutputValidationResult, error,
-) {
+func validateContentAnswer(_ *gent.ExecutionContext, answer contentAnswer,
+) (*gent.OutputValidationResult, error) {
 	if answer.Status == "done" {
 		return &gent.OutputValidationResult{Accepted: true}, nil
 	}
-	return &gent.OutputValidationResult{Steering: []gent.ContentPart{
-		gent.TextContent{Text: "Check the status."}}}, nil
+	return &gent.OutputValidationResult{
+		Steering: []gent.ContentPart{
+			gent.TextPart(
+				"Check the status.",
+			),
+		},
+	}, nil
 }
 
-// The terminal save can pause, fail before acceptance, or lose its acknowledgment. This exercises
-// the same public storage boundary that a database adapter uses, without changing run internals.
+// Fail before storage or lose its acknowledgment after storage. Restoring accepted bytes must
+// distinguish these cases without retrying an uncertain old worker or repeating accepted effects.
 type contentStore struct {
-	mu       sync.Mutex
-	view     gent.RunView
-	terminal *gent.SaveBatch
-	reached  chan struct{}
-	release  chan struct{}
-	err      error
-	accept   bool
-	failed   bool
+	mu               sync.Mutex
+	view             gent.RunView
+	codecs           *gent.CodecRegistry
+	runStateSnapshot []byte
+	terminal         *gent.SaveBatch
+	reached          chan struct{}
+	release          chan struct{}
+	err              error
+	accept, failed   bool
 }
 
-func (store *contentStore) Save(_ context.Context, batch *gent.SaveBatch) error {
+func (store *contentStore) Save(ctx context.Context, batch *gent.SaveBatch,
+	capture func() (*gent.RunState, error),
+) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	if batch.Checkpoint != nil && batch.Checkpoint.Phase == gent.PhaseTerminal && !store.failed {
+	if batch.Checkpoint.Phase == gent.PhaseTerminal && !store.failed {
 		store.terminal = batch
 		if store.reached != nil {
 			close(store.reached)
-			<-store.release
+			select {
+			case <-store.release:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 		if store.err != nil {
 			store.failed = true
 			if !store.accept {
-				saveErr := store.err
-				store.err = nil
-				return saveErr
+				return store.err
 			}
 		}
 	}
-	view, err := gent.ApplyBatch(store.view, batch)
+	if store.view.RunId == "" {
+		store.view = *gent.NewRunView(batch.RunId)
+	}
+	if err := applyTestBatch(&store.view, batch, store.codecs); err != nil {
+		return err
+	}
+	state, err := capture()
 	if err != nil {
 		return err
 	}
-	store.view = view
-	if store.failed && store.err != nil {
-		err, store.err = store.err, nil
+	store.runStateSnapshot, err = store.codecs.MarshalRunState(state)
+	if err != nil {
 		return err
+	}
+	if store.failed && store.err != nil {
+		failure := store.err
+		store.err = nil
+		return failure
 	}
 	return nil
 }
-
 func contentChunks(
-	t *testing.T, events []*gent.RecordedEvent, codecs *gent.CodecRegistry,
+	t *testing.T,
+	events []*gent.RecordedEvent,
+	_ *gent.CodecRegistry,
 ) []gent.StreamChunk {
 	t.Helper()
 	var chunks []gent.StreamChunk
 	for _, event := range events {
-		if event.Type != "model_stream_chunk" && event.Type != "execution_content" {
-			continue
+		if event.Type == "model_stream_chunk" || event.Type == "accepted_answer" {
+			chunks = append(chunks, *event.Payload.(*gent.StreamChunk))
 		}
-		value, err := codecs.DecodeEvent(event)
-		if !assert.NoError(t, err) {
-			return nil
-		}
-		chunks = append(chunks, value.(gent.StreamChunk))
 	}
 	return chunks
 }
@@ -464,8 +429,9 @@ func contentChunks(
 func TestExecutionContent_AcceptSaveAndRestore(t *testing.T) {
 	type input struct{ fail, accept bool }
 	type expected struct {
-		finals int
-		err    error
+		finals       int
+		err          error
+		resumedCalls int
 	}
 	type testCase struct {
 		name     string
@@ -474,186 +440,198 @@ func TestExecutionContent_AcceptSaveAndRestore(t *testing.T) {
 	}
 	saveErr := errors.New("terminal save failed")
 	cases := []testCase{
-		{"accepted", input{}, expected{1, nil}},
-		{"failed save", input{fail: true}, expected{0, saveErr}},
-		{"lost acknowledgment", input{true, true}, expected{0, saveErr}},
+		{"accepted", input{}, expected{1, nil, 0}},
+		{"failed save", input{fail: true}, expected{0, saveErr, 1}},
+		{"lost acknowledgment", input{true, true}, expected{0, saveErr, 0}},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			store := &contentStore{view: gent.RunView{
-				SchemaVersion: gent.RunSchemaVersion, RunId: "content"},
-				reached: make(chan struct{}), release: make(chan struct{}), accept: test.input.accept}
-			if test.input.fail {
-				store.err = saveErr
-			}
-			var release sync.Once
-			t.Cleanup(func() { release.Do(func() { close(store.release) }) })
-			seq, err := trace.NewSequencer("content", trace.Config{
-				IncludeChunkText: true, IncludeRunOutput: true})
-			if !assert.NoError(t, err) {
-				return
-			}
-			defer seq.Close()
-			model := &contentModel{replies: []contentReply{
-				{choice: &gent.ContentChoice{Completion: gent.ModelCompletion{
-					Status: gent.ModelStatusToolCalls,
-				},
-					CandidateContent: []gent.ContentPart{
-						gent.TextContent{Text: "Looking up."},
-					},
-					ToolCalls: []*gent.ModelToolCallRequest{{ID: "lookup", Type: "function",
-						FunctionCall: &gent.FunctionCall{Name: "lookup", Arguments: "{}"}}}},
-					deltas: []string{"Looking up."}},
-				{choice: &gent.ContentChoice{
-					Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-					CandidateContent: []gent.ContentPart{gent.TextContent{Text: `{"status":"pending"}`}},
-				},
-					deltas: []string{`{"status":"pending"}`}},
-				{choice: &gent.ContentChoice{
-					Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-					CandidateContent: []gent.ContentPart{gent.TextContent{Text: ` { "status" : "done" } `}},
-				},
-					deltas: []string{` { "status" : `, `"done" } `}},
-			}}
-			out, err := output.NewJsonOutput[contentAnswer]()
-			if !assert.NoError(t, err) {
-				return
-			}
-			out.SetCustomValidator("status", validateContentAnswer)
-			toolCalls := 0
-			buildAgent := func(model gent.Model) *react.Agent[contentAnswer] {
-				return react.NewWithOutput(model, out).WithRecoveryVersion("content-v1").
-					RegisterTool(gent.DefineTool("lookup", func(context.Context, map[string]any) (
-						*gent.ToolExecutionResponse, error,
-					) {
-						toolCalls++
-						return capturedToolResponse("done", nil)
-					}).Description("Read the status").ParameterSchema(nil).MustBuild())
-			}
-			agent := buildAgent(model)
-			ctx := gent.NewExecutionContext(context.Background(), "root",
-				gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Read the status."})),
-				gent.WithRunId("content"), gent.WithRecorder(store), gent.WithObserver(seq))
-			chunks, unsubscribe := ctx.SubscribeAll()
-			defer unsubscribe()
-			type outcome struct {
-				result *gent.ExecutionResult
-				err    error
-			}
-			done := make(chan outcome, 1)
-			started := time.Now()
-			go func() {
-				_, result, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
-				done <- outcome{result, err}
-			}()
-			var live []gent.StreamChunk
-			for range 4 {
-				select {
-				case chunk := <-chunks:
-					live = append(live, chunk)
-				case <-time.After(5 * time.Second):
-					t.Fatal("missing provisional chunk")
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				store := &contentStore{codecs: gent.NewCodecRegistry(), reached: make(chan struct{}),
+					release: make(chan struct{}), accept: test.input.accept}
+				if test.input.fail {
+					store.err = saveErr
 				}
-			}
-			select {
-			case <-store.reached:
-			case <-time.After(5 * time.Second):
-				t.Fatal("terminal save was not reached")
-			}
-			var texts []string
-			for _, chunk := range live {
-				assert.Equal(t, []gent.ContentPart(nil), chunk.Content)
-				texts = append(texts, gent.MetaText(chunk.MetaContent, gent.MetaContentIntermediary))
-				assert.GreaterOrEqual(t, chunk.Timestamp.UnixNano(), started.UnixNano())
-			}
-			assert.Equal(t, []string{"Looking up.", `{"status":"pending"}`,
-				` { "status" : `, `"done" } `}, texts)
-			assert.Equal(t, []gent.ContentPart(nil), seq.Snapshot().Contexts[0].Content)
-			select {
-			case chunk := <-chunks:
-				t.Errorf("chunk arrived before terminal acceptance: %#v", chunk)
-			default:
-			}
-			release.Do(func() { close(store.release) })
-			finished := <-done
-			assert.ErrorIs(t, finished.err, test.expected.err)
-			finals := 0
-			for chunk := range chunks {
-				live = append(live, chunk)
-				if chunk.MessageId != "" {
-					finals++
-				}
-			}
-			assert.Equal(t, test.expected.finals, finals)
-			assert.Equal(t, 3, len(model.requests))
-			assert.Equal(t, 1, toolCalls)
-			assert.Equal(t, int64(18), ctx.Stats().GetCounter(gent.SCTotalTokens))
-			assert.Equal(t, int64(1), ctx.Stats().GetCounter(gent.SCOutputRejectedTotal))
-			terminal := contentChunks(t, store.terminal.Events, ctx.Codecs())
-			if !assert.Len(t, terminal, 1) {
-				return
-			}
-			final := terminal[0]
-			assert.Equal(t, gent.StreamChunk{Content: []gent.ContentPart{
-				gent.TextContent{Text: `{"status":"done"}`},
-			},
-				MessageId:        ctx.ContextId() + ":answer",
-				SourceMessageIds: []string{live[3].MetaContent[0].MessageId},
-				RunId:            ctx.RunId(), EventNumber: final.EventNumber, Timestamp: final.Timestamp,
-				Iteration: 3, Source: "root/3", ContextId: ctx.ContextId(),
-				ModelCallId: ctx.ContextId() + ":model:3", StreamId: "iter-3",
-				StreamTopicId: "llm-response"}, final)
-			assert.GreaterOrEqual(t, final.Timestamp.UnixNano(), started.UnixNano())
-			assert.Equal(t, gent.PhaseTerminal, store.terminal.Checkpoint.Phase)
-			bundle, err := ctx.Export()
-			assert.NoError(t, err)
-			assert.Equal(t, live, contentChunks(t, bundle.Activity, ctx.Codecs()))
-			if test.input.fail {
-				bundle, err = ctx.RetrySave(context.Background())
+				unblock := sync.OnceFunc(func() { close(store.release) })
+				defer unblock()
+				seq, err := trace.NewSequencer("", trace.Config{Codecs: store.codecs,
+					IncludeChunkText: true, IncludeRunOutput: true})
 				if !assert.NoError(t, err) {
 					return
 				}
-			}
-			var historyText []string
-			for _, entry := range bundle.History.Entries {
-				for _, message := range entry.Messages {
-					if message.Role != gent.ChatMessageTypeAI {
-						continue
+				defer seq.Close()
+				observer := &contentObserver{}
+				lookup := &gent.ContentChoice{
+					Completion: gent.ModelCompletion{
+						Status: gent.ModelStatusToolCalls,
+					},
+					Parts: []gent.ContentPart{
+						&gent.AssistantContent{
+							MessageId: "lookup",
+							Type:      gent.AssistantContentCommentary,
+							Content: []gent.ContentPart{
+								gent.TextPart(
+									"Looking up.",
+								),
+							},
+						},
+						&gent.ModelToolCallRequest{ID: "lookup", Type: "function",
+							FunctionCall: &gent.FunctionCall{Name: "lookup", Arguments: "{}"}},
+					},
+				}
+				model := &contentModel{
+					replies: []contentReply{
+
+						{choice: lookup, deltas: []string{"Looking up."}},
+						{
+							choice: recoveryAnswerChoice(
+								`{"status":"pending"}`,
+							),
+							deltas: []string{
+								`{"status":"pending"}`,
+							},
+						},
+						{choice: recoveryAnswerChoice(` { "status" : "done" } `),
+							deltas: []string{` { "status" : `, `"done" } `}},
+					},
+				}
+				out, err := output.NewJsonOutput[contentAnswer]()
+				if !assert.NoError(t, err) {
+					return
+				}
+				validations := 0
+				out.SetCustomValidator("status", func(execCtx *gent.ExecutionContext, value contentAnswer) (
+					*gent.OutputValidationResult, error,
+				) {
+					validations++
+					return validateContentAnswer(execCtx, value)
+				})
+				toolCalls := 0
+				chain := toolchain.New().RegisterTool(
+					gent.DefineTool(
+						"lookup",
+						func(
+							context.Context,
+							map[string]any,
+						) (
+							*gent.ToolExecutionResponse,
+							error,
+						) {
+							toolCalls++
+							return capturedToolResponse("done", nil)
+						},
+					).ParameterSchema(nil).MustBuild(),
+				)
+				runner, execCtx := newTestExecution(t, context.Background(), react.NewWithOutput(model, out),
+					&gent.Config{Codecs: store.codecs, Recorder: store, ToolChain: chain,
+						Subscribers: []*gent.SubscriberRegistration{
+							{Subscriber: observer, Delivery: gent.SubscriberLive}, {Subscriber: seq}}})
+				type outcome struct {
+					value  contentAnswer
+					result *gent.ExecutionResult
+					err    error
+				}
+				done := make(chan outcome, 1)
+				started := time.Now()
+				go func() {
+					value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read the status.")))
+					done <- outcome{value, result, err}
+				}()
+				checkpointSignal(t, store.reached)
+				assert.Empty(t, acceptedContent(observer.recorded()))
+				assert.Empty(t, seq.Snapshot().Contexts[0].Content)
+				unblock()
+				finished := checkpointReceive(t, done)
+				assert.ErrorIs(t, finished.err, test.expected.err)
+				accepted := acceptedContent(observer.recorded())
+				assert.Len(t, accepted, test.expected.finals)
+				assert.Equal(t, 3, len(model.requests))
+				assert.Equal(t, 1, toolCalls)
+				assert.Equal(t, 2, validations)
+				assert.Equal(t, int64(18), execCtx.Stats().GetCounter(gent.SCTotalTokens))
+				assert.Equal(t, int64(1), execCtx.Stats().GetCounter(gent.SCOutputRejectedTotal))
+				terminal := acceptedContent(store.terminal.Events)
+				if !assert.Len(t, terminal, 1) {
+					return
+				}
+				final := terminal[0]
+				assert.Equal(
+					t,
+					[]gent.ContentPart{
+						&gent.AssistantContent{
+							Type:      gent.AssistantContentFinalAnswer,
+							MessageId: execCtx.TurnId() + ":answer",
+							Content: []gent.ContentPart{
+								gent.TextPart(
+									`{"status":"done"}`,
+								),
+							},
+						},
+					},
+					final.Content,
+				)
+				for _, event := range store.terminal.Events {
+					if event.Type == "accepted_answer" {
+						assert.GreaterOrEqual(t, event.Ts.UnixNano(), started.UnixNano())
 					}
-					for _, part := range message.Parts {
-						if text, ok := part.(gent.TextContent); ok {
-							historyText = append(historyText, text.Text)
+				}
+				assert.Len(t, final.SourceMessageIds, 1)
+				freshModel := &contentModel{}
+				if test.expected.resumedCalls > 0 {
+					freshModel.replies = []contentReply{{choice: recoveryAnswerChoice(` { "status" : "done" } `)}}
+				}
+				// A lost acknowledgment still has a completed saved turn. A rejected save does not.
+				store.err = nil
+				freshRunner, fresh := restoreTestExecution(t, react.NewWithOutput(freshModel, out),
+					&gent.Config{Codecs: store.codecs, Recorder: store, ToolChain: chain}, store.runStateSnapshot)
+				value, result, err := freshRunner.GetLastTurnResult(fresh)
+				if test.expected.resumedCalls > 0 {
+					value, result, err = freshRunner.Continue(fresh)
+				}
+				if !assert.NoError(t, err) {
+					return
+				}
+				assert.Equal(t, contentAnswer{Status: "done"}, value)
+				assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished, TurnId: fresh.TurnId(),
+					TerminationReason: gent.TerminationSuccess,
+					Output:            []gent.ContentPart{gent.TextPart(`{"status":"done"}`)}}, result)
+				assert.Len(t, freshModel.requests, test.expected.resumedCalls)
+				assert.Equal(t, 1, toolCalls)
+				assert.Equal(t, 2+test.expected.resumedCalls, validations)
+				var historyText []string
+				for _, entry := range store.view.History.Entries {
+					for _, message := range entry.Messages {
+						if message.Role == gent.ChatMessageTypeAI {
+							historyText = append(historyText, gent.ContentText(message.Parts))
 						}
 					}
 				}
-			}
-			assert.Equal(t, []string{"Looking up.", `{"status":"pending"}`,
-				` { "status" : "done" } `}, historyText)
-			// Reconnect uses the accepted event cursor. Replaying the same evidence is idempotent.
-			assert.NoError(t, seq.ObserveCommitted(bundle.Activity, ctx.Codecs()))
-			assert.NoError(t, seq.ObserveCommitted(bundle.Activity, ctx.Codecs()))
-			assert.Equal(t, final.Content, seq.Snapshot().Contexts[0].Content)
-			assert.Equal(t, final.SourceMessageIds, seq.Snapshot().Contexts[0].SourceMessageIds)
-			encoded, err := ctx.Codecs().Marshal(bundle)
-			assert.NoError(t, err)
-			var saved gent.RunView
-			assert.NoError(t, ctx.Codecs().Unmarshal(encoded, &saved))
-			assert.NoError(t, gent.ValidateBundle(saved, ctx.Codecs()))
-			fresh := &contentModel{}
-			_, result, err := executor.NewRunner(buildAgent(fresh), executor.DefaultConfig()).Resume(
-				context.Background(), saved, gent.RestoreBindings{Codecs: ctx.Codecs()})
-			assert.NoError(t, err)
-			assert.Equal(t, &gent.ExecutionResult{TerminationReason: gent.TerminationSuccess,
-				Output: []gent.ContentPart{gent.TextContent{Text: `{"status":"done"}`}}}, result)
-			assert.Empty(t, fresh.requests)
-			assert.Equal(t, append(live[:4:4], final), contentChunks(t, saved.Activity, ctx.Codecs()))
-		})
+				assert.Equal(
+					t,
+					[]string{
+						"Looking up.",
+						`{"status":"pending"}`,
+						` { "status" : "done" } `,
+					},
+					historyText,
+				)
+				replay, err := trace.RestoreSequencer(store.view, trace.Config{Codecs: store.codecs,
+					IncludeChunkText: true, IncludeRunOutput: true})
+				if !assert.NoError(t, err) {
+					return
+				}
+				defer replay.Close()
+				assert.Equal(t, result.Output, gent.AssistantParts(
+					replay.Snapshot().Contexts[0].Content, gent.AssistantContentFinalAnswer))
+				assert.Equal(t, fresh.TurnId()+":answer", replay.Snapshot().Contexts[0].MessageId)
+				// Replaying the same accepted evidence twice does not publish a second answer.
+				before := replay.Snapshot()
+				for _, event := range store.view.Activity {
+					assert.NoError(t, replay.OnEvent(context.Background(), event))
+				}
+				assert.Equal(t, before, replay.Snapshot())
+			},
+		)
 	}
-}
-
-func (contentLoop) Output() gent.Output[string] { return output.NewTextOutput() }
-func (m *contentModel) PrepareRequest(ctx *gent.ExecutionContext,
-	request *gent.ModelCallRequest, chain gent.ToolChain,
-) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
 }

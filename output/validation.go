@@ -23,9 +23,9 @@ func (v customValidator[T]) check() error {
 }
 
 func (v customValidator[T]) validate(
-	ctx *gent.ExecutionContext, value T,
+	execCtx *gent.ExecutionContext, value T,
 ) (processed *gent.OutputResult[T], processErr error) {
-	if err := ctx.Context().Err(); err != nil {
+	if err := execCtx.Context().Err(); err != nil {
 		return nil, err
 	}
 	if err := v.check(); err != nil {
@@ -39,15 +39,15 @@ func (v customValidator[T]) validate(
 		if processed != nil {
 			steering = processed.Steering
 		}
-		ctx.PublishOutputValidation(gent.OutputValidationCustom, v.name,
+		execCtx.PublishOutputValidation(gent.OutputValidationCustom, v.name,
 			processErr == nil && processed == nil, steering, processErr)
 	}()
 	// The callback receives its own snapshot. It cannot change an accepted pointer, map, slice,
 	// or image buffer. A callback that attempts a transform violates the validation contract.
-	if err := ctx.Codecs().RegisterValueType(reflect.TypeFor[T]()); err != nil {
+	if err := execCtx.Codecs().RegisterValueType(reflect.TypeFor[T]()); err != nil {
 		return nil, err
 	}
-	ownedValue, err := ctx.Codecs().Clone(value)
+	ownedValue, err := execCtx.Codecs().Clone(value)
 	if err != nil {
 		return nil, err
 	}
@@ -55,14 +55,14 @@ func (v customValidator[T]) validate(
 	if ownedValue != nil {
 		callbackValue = ownedValue.(T)
 	}
-	result, err := v.call(ctx, callbackValue)
+	result, err := v.call(execCtx, callbackValue)
 	if err != nil {
 		return nil, err
 	}
 	if !reflect.DeepEqual(callbackValue, value) {
 		return nil, errors.New("output: custom validator must not change the value")
 	}
-	if err := ctx.Context().Err(); err != nil {
+	if err := execCtx.Context().Err(); err != nil {
 		return nil, err
 	}
 	if result == nil {
@@ -77,7 +77,7 @@ func (v customValidator[T]) validate(
 	if !gent.UsefulSteering(result.Steering) {
 		return nil, errors.New("output: rejected validation requires useful steering")
 	}
-	owned, err := ctx.Codecs().Clone(result.Steering)
+	owned, err := execCtx.Codecs().Clone(result.Steering)
 	if err != nil {
 		return nil, err
 	}
@@ -109,13 +109,13 @@ func textContent(parts []gent.ContentPart) (string, []gent.ContentPart, bool) {
 
 // Only a completed local check emits acceptance. Invalid configuration and failed operations
 // stay distinct from candidate rejections, so they cannot consume correction limits.
-func publishLocalResult[T any](ctx *gent.ExecutionContext, name string,
+func publishLocalResult[T any](execCtx *gent.ExecutionContext, name string,
 	result *gent.OutputResult[T], err error,
 ) {
 	var steering []gent.ContentPart
 	if result != nil {
 		steering = result.Steering
 	}
-	ctx.PublishOutputValidation(gent.OutputValidationLocal, name,
+	execCtx.PublishOutputValidation(gent.OutputValidationLocal, name,
 		err == nil && result != nil && result.Accepted, steering, err)
 }

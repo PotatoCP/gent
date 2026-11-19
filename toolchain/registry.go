@@ -60,12 +60,12 @@ func (c *Registry) RegisterDeprecatedTool(tool any) *Registry {
 // GetToolSchema returns the compiled input schema, or nil when the tool has no schema or binding.
 func (c *Registry) GetToolSchema(name string) *schema.Schema { return c.schemaMap[name] }
 
-func (c *Registry) executeParsed(ctx *gent.ExecutionContext, calls []*parsedCall,
+func (c *Registry) executeParsed(execCtx *gent.ExecutionContext, calls []*parsedCall,
 	format gent.TextFormat,
 ) ([]*gent.ToolCallRecord, error) {
 	results := make([]*gent.ToolCallRecord, 0, len(calls))
 	for _, call := range calls {
-		result, err := c.executeCall(ctx, call)
+		result, err := c.executeCall(execCtx, call)
 		if err != nil {
 			return results, err
 		}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type checkpointInput struct {
@@ -43,8 +44,6 @@ func TestRecoveryObservesUnfinishedBatchWithoutRetry(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			base, cancel := context.WithCancel(context.Background())
-			ctx := gent.NewExecutionContext(base, "recovery", gent.NewBasicLoopData(nil))
-			defer ctx.Release()
 			defer cancel()
 			calls := 0
 			chain := New().RegisterTool(gent.DefineTool("book", func(_ context.Context,
@@ -64,17 +63,14 @@ func TestRecoveryObservesUnfinishedBatchWithoutRetry(t *testing.T) {
 				request.ID = fmt.Sprintf("provider-%d", i)
 				requests = append(requests, request)
 			}
-			plan, err := chain.PrepareCalls(ctx, requests)
-			assert.NoError(t, err)
-			for range 3 {
-				_, err := chain.ExecuteNext(ctx, plan, testFormat())
-				assert.NoError(t, err)
-			}
-			_, err = chain.ExecuteNext(ctx, plan, testFormat())
+			var plan *gent.ToolPlan
+			loop := planTestLoop(chain, requests, &plan)
+			runner, ctx, store := newToolTestRun(t, base, loop, &gent.Config{ToolChain: chain})
+			_, result, err := runner.NewTurn(ctx, gent.NewTask(gent.TextPart("Book five items.")))
 			assert.ErrorIs(t, err, context.Canceled)
+			assert.Nil(t, result)
 			assert.Equal(t, 4, calls)
-			saved, err := ctx.Export()
-			assert.NoError(t, err)
+			saved := store.runStateSnapshot
 			freshChain := New()
 			recoveries := 0
 			if !test.input.missing {
@@ -106,23 +102,18 @@ func TestRecoveryObservesUnfinishedBatchWithoutRetry(t *testing.T) {
 			}
 			codecs := gent.NewCodecRegistry()
 			assert.NoError(t, freshChain.RegisterCodecs(codecs))
-			fresh, err := gent.RestoreExecutionContext(context.Background(), saved,
-				gent.RestoreBindings{Codecs: codecs})
-			if !assert.NoError(t, err) {
-				return
-			}
-			defer fresh.Release()
-			resumed, found, err := fresh.SavedToolPlan()
-			assert.NoError(t, err)
-			assert.True(t, found)
-			original := append([]*gent.ToolCallRecord(nil), resumed.Results...)
-			for resumed.NextCall < len(resumed.Calls) {
-				_, err := freshChain.ExecuteNext(fresh, resumed, testFormat())
-				assert.NoError(t, err)
-				if err != nil {
-					return
-				}
-			}
+			var resumed *gent.ToolPlan
+			freshLoop := planTestLoop(freshChain, nil, &resumed)
+			freshStore := &toolTestRecorder{codecs: codecs, capture: true}
+			freshRunner, fresh := restoreToolTest(t, freshLoop, &gent.Config{Codecs: codecs,
+				ToolChain: freshChain, Recorder: freshStore}, saved)
+			accepted, found, err := fresh.SavedToolPlan()
+			require.NoError(t, err)
+			require.True(t, found)
+			original := append([]*gent.ToolCallRecord(nil), accepted.Results...)
+			_, result, err = freshRunner.Continue(fresh)
+			require.NoError(t, err)
+			require.Equal(t, gent.ExecutionFinished, result.Status)
 			assert.Equal(t, 4, calls, "recovery never calls the original tool")
 			fourth := resumed.Results[3]
 			status, _ := fourth.Response().RecoveryStatus()
@@ -135,16 +126,22 @@ func TestRecoveryObservesUnfinishedBatchWithoutRetry(t *testing.T) {
 				expectedErrors = 1
 			}
 			assert.Equal(t, expectedErrors, fresh.Stats().GetCounter(gent.SCToolRecoveryErrorTotal))
-			exported, err := fresh.Export()
-			assert.NoError(t, err)
-			assert.NoError(t, gent.ValidateBundle(exported, codecs))
+			archive := gent.NewRunView(ctx.RunId())
+			for _, batches := range [][][]byte{store.batches, freshStore.batches} {
+				for _, data := range batches {
+					var batch gent.SaveBatch
+					require.NoError(t, codecs.Unmarshal(data, &batch))
+					applied, err := archive.Apply(&batch, codecs)
+					require.NoError(t, err)
+					require.Equal(t, gent.ApplyApplied, applied.Status)
+				}
+			}
+			assert.NoError(t, gent.ValidateBundle(*archive, codecs))
 		})
 	}
 }
 
 func TestCompletedToolRecordsNeedNoOldBindings(t *testing.T) {
-	ctx := newExecCtx()
-	defer ctx.Release()
 	chain := New().RegisterTool(gent.DefineTool("old", func(_ context.Context, input checkpointInput) (
 		*gent.ToolExecutionResponse, error,
 	) {
@@ -152,18 +149,37 @@ func TestCompletedToolRecordsNeedNoOldBindings(t *testing.T) {
 		return &gent.ToolExecutionResponse{Status: gent.ToolExecuted, Parts: parts,
 			Instructions: "Retain the original evidence."}, err
 	}).MustBuild())
-	result := executeNativeTestCall(t, chain, ctx, nativeCall("old", `{"id":"saved"}`))
-	saved, err := ctx.Export()
-	assert.NoError(t, err)
+	var plan *gent.ToolPlan
+	loop := planTestLoop(
+		chain,
+		[]*gent.ModelToolCallRequest{
+			nativeCall(
+				"old",
+				`{"id":"saved"}`,
+			),
+		},
+		&plan,
+	)
+	runner, execCtx, store := newToolTestRun(
+		t,
+		context.Background(),
+		loop,
+		&gent.Config{
+			ToolChain: chain,
+		},
+	)
+	_, completed, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read the old record.")))
+	require.NoError(t, err)
 	// A fresh registry has no registration for checkpointInput or the removed tool.
-	fresh, err := gent.RestoreExecutionContext(context.Background(), saved,
-		gent.RestoreBindings{Codecs: gent.NewCodecRegistry()})
-	if !assert.NoError(t, err) {
-		return
-	}
-	defer fresh.Release()
-	plan, found, err := fresh.SavedToolPlan()
+	codecs := gent.NewCodecRegistry()
+	freshRunner, fresh := restoreToolTest(t, &toolTestLoop{}, &gent.Config{Codecs: codecs},
+		store.runStateSnapshot)
+	saved, found, err := fresh.SavedToolPlan()
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Equal(t, plan.Results, saved.Results)
+	value, result, err := freshRunner.GetLastTurnResult(fresh)
 	assert.NoError(t, err)
-	assert.True(t, found)
-	assert.Equal(t, []*gent.ToolCallRecord{result}, plan.Results)
+	assert.Equal(t, "Done", value)
+	assert.Equal(t, completed, result)
 }

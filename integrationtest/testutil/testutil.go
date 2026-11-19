@@ -10,33 +10,39 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
 	"github.com/rickchristie/gent/common"
 	"github.com/rickchristie/gent/compaction"
-	"github.com/rickchristie/gent/events"
 	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/format"
 	"github.com/rickchristie/gent/models"
 	"github.com/rickchristie/gent/search"
 	"github.com/rickchristie/gent/toolchain"
+	genttrace "github.com/rickchristie/gent/trace"
 )
 
 // ToolChainType specifies which toolchain to use.
 type ToolChainType string
 
 const (
+	// ToolChainRegistry selects the native tool registry for the integration run.
 	ToolChainRegistry ToolChainType = "registry"
-	ToolChainSearch   ToolChainType = "search"
+	// ToolChainSearch selects tool discovery through the search chain.
+	ToolChainSearch ToolChainType = "search"
 )
 
 // CompactionType specifies the scratchpad context management strategy.
 type CompactionType string
 
 const (
-	CompactionNone          CompactionType = "none"
+	// CompactionNone disables compaction in the integration fixture.
+	CompactionNone CompactionType = "none"
+	// CompactionSlidingWindow keeps the configured recent history window.
 	CompactionSlidingWindow CompactionType = "sliding_window"
+	// CompactionSummarization summarizes earlier active history with the configured model.
 	CompactionSummarization CompactionType = "summarization"
 )
 
@@ -303,10 +309,10 @@ func WrapToolChain(
 	return tc
 }
 
-// ConfigureCompaction sets up compaction on the execution context
+// ConfigureCompaction sets up compaction on the shared configuration
 // based on the config. The model and textFormat are needed for summarization strategy.
 func ConfigureCompaction(
-	execCtx *gent.ExecutionContext, config CompactionConfig,
+	target *gent.Config, config CompactionConfig,
 	model gent.Model, textFormat gent.TextFormat,
 ) {
 	if config.Type == CompactionNone || config.Type == "" {
@@ -321,13 +327,12 @@ func ConfigureCompaction(
 	case CompactionSlidingWindow:
 		strategy = compaction.NewSlidingWindow(config.WindowSize)
 	case CompactionSummarization:
-		strategy = compaction.NewSummarization(model, textFormat).
-			WithKeepRecent(config.KeepRecent)
+		strategy = compaction.NewSummarization(model, textFormat).WithKeepRecent(config.KeepRecent)
 	default:
 		return
 	}
 
-	execCtx.SetCompaction(trigger, strategy)
+	target.CompactionTrigger, target.CompactionStrategy = trigger, strategy
 }
 
 // PrintHeader prints a header line.
@@ -365,54 +370,35 @@ func CriticalRules(
 	return rules
 }
 
-// PolicySuggestionHook implements BeforeIterationSubscriber to inject
-// policy suggestions into the scratchpad on the first iteration. It
-// chunks the conversation text, searches for relevant policies, and
-// adds an auto_suggestion iteration with the top-5 policy IDs.
+// PolicySuggestionHook adds policy guidance to the first three main model requests of a turn.
+// The request hook keeps generated guidance separate from saved user input. It does not change
+// accepted history. Create or reset this helper before a turn; SendMessage is serial.
 type PolicySuggestionHook struct {
-	suggester func(ctx context.Context, text string) string
-	text      string
-	done      bool
+	suggester  func(ctx context.Context, text string) string
+	text       string
+	suggestion string
+	calls      int
 }
 
-func (h *PolicySuggestionHook) OnBeforeIteration(
-	execCtx *gent.ExecutionContext,
-	event *gent.BeforeIterationEvent,
-) {
-	if h.done {
-		return
+func (h *PolicySuggestionHook) BeforeModelCall(
+	ctx context.Context, event *gent.BeforeModelCallEvent,
+) error {
+	if event.StreamTopicId != llmResponseTopic || h.calls >= 3 {
+		return nil
 	}
-	h.done = true
-
-	suggestion := h.suggester(execCtx.Context(), h.text)
-	if suggestion == "" {
-		return
+	if h.calls == 0 {
+		h.suggestion = h.suggester(ctx, h.text)
 	}
-
-	// Render the examples as named XML sections.
-	xmlFormat := format.NewXML()
-	content := xmlFormat.FormatSections(
-		[]gent.FormattedSection{
-			{Name: "policy_suggestion", Content: suggestion},
-		},
-	)
-
-	iter := &gent.HistoryEntry{
-		Origin:               gent.RecordSystemInjected,
-		ExpireAfterIteration: 3,
-		Messages: []*gent.MessageContent{
-			{
-				Role: gent.ChatMessageTypeHuman,
-				Parts: []gent.ContentPart{
-					gent.TextContent{Text: content},
-				},
-			},
-		},
+	h.calls++
+	if h.suggestion == "" {
+		return nil
 	}
-
-	if err := execCtx.AppendRecord(iter, true); err != nil {
-		execCtx.PublishError(fmt.Errorf("policy suggestion history: %w", err))
-	}
+	content := format.NewXML().FormatSections([]gent.FormattedSection{
+		{Name: "policy_suggestion", Content: h.suggestion},
+	})
+	event.Request.Messages = append(event.Request.Messages,
+		gent.TextParts(gent.ChatMessageTypeHuman, content))
+	return nil
 }
 
 // ContainsIgnoreCase checks if s contains substr, case-insensitive.
@@ -476,6 +462,11 @@ func RunScenario(
 	testCfg TestConfig,
 	scenario ScenarioConfig,
 ) error {
+	writeMu := &sync.Mutex{}
+	w = &serialWriter{mu: writeMu, target: w}
+	if testCfg.LogWriter != nil {
+		testCfg.LogWriter = &serialWriter{mu: writeMu, target: testCfg.LogWriter}
+	}
 	model, err := CreateModel(testCfg.ModelName)
 	if err != nil {
 		return err
@@ -490,54 +481,40 @@ func RunScenario(
 	}
 	tc = WrapToolChain(tc, testCfg)
 
-	loop := react.NewAgent(model).
-		WithToolChain(tc).
-		WithRecoveryVersion("integration/v1")
-
-	data := gent.NewBasicLoopData(
-		&gent.Task{Messages: []*gent.ModelMessage{
-			gent.TextParts(gent.ChatMessageTypeSystem, scenario.SystemPrompt+"\n\n"+scenario.CriticalRules),
-			gent.TextParts(gent.ChatMessageTypeHuman, scenario.CustomerRequest),
-		}},
-	)
-
-	seq, err := NewIntegrationTrace(scenario.Name)
+	seq, err := NewIntegrationTrace("")
 	if err != nil {
 		return err
 	}
-	execCtx := gent.NewExecutionContext(
-		ctx, scenario.Name, data, gent.WithRunId(seq.Snapshot().RunId), gent.WithObserver(seq),
-	)
-	execCtx.SetLimits([]gent.Limit{
-		{
-			Type:     gent.LimitExactKey,
-			Key:      gent.SCIterations,
-			MaxValue: scenario.MaxIterations,
-		},
-	})
-
-	ConfigureCompaction(
-		execCtx, testCfg.Compaction, model,
-		format.NewXML(),
-	)
-
-	registry := events.NewRegistry()
+	config := &gent.Config{
+		ToolChain:   tc,
+		Subscribers: []*gent.SubscriberRegistration{{Subscriber: seq, Delivery: gent.SubscriberLive}},
+		Limits: []gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations,
+			MaxValue: scenario.MaxIterations}},
+	}
+	ConfigureCompaction(config, testCfg.Compaction, model, format.NewXML())
+	if scenario.PolicySuggester != nil {
+		hook := &PolicySuggestionHook{
+			suggester: scenario.PolicySuggester, text: scenario.CustomerRequest,
+		}
+		config.Hooks = &gent.Hooks{BeforeModelCall: hook.BeforeModelCall}
+	}
+	runner := executor.NewRunner(react.NewAgent(model), config)
+	execCtx, err := runner.NewExecutionContext(ctx, scenario.Name)
+	if err != nil {
+		return err
+	}
+	defer execCtx.Release()
 	streamWait := StartTraceStreamOutput(seq, w)
 	var logWait func()
 	if testCfg.LogWriter != nil {
 		logWait = StartTraceEventLogger(seq, testCfg.LogWriter)
 	}
-
-	if scenario.PolicySuggester != nil {
-		registry.Subscribe(&PolicySuggestionHook{
-			suggester: scenario.PolicySuggester,
-			text:      scenario.CustomerRequest,
-		})
+	task := &gent.Task{
+		Instructions: []*gent.ModelMessage{gent.TextParts(gent.ChatMessageTypeSystem,
+			scenario.SystemPrompt+"\n\n"+scenario.CriticalRules)},
+		Messages: []*gent.ModelMessage{gent.TextParts(gent.ChatMessageTypeHuman,
+			scenario.CustomerRequest)},
 	}
-
-	exec := executor.NewRunner(
-		loop, executor.Config{},
-	).WithEvents(registry)
 
 	PrintHeader(w, scenario.HeaderTitle)
 	fmt.Fprintln(w)
@@ -545,17 +522,13 @@ func RunScenario(
 	if testCfg.Compaction.Type != CompactionNone &&
 		testCfg.Compaction.Type != "" {
 		PrintSection(w, "Compaction Config")
-		fmt.Fprintf(w, "Strategy: %s\n",
-			testCfg.Compaction.Type)
-		fmt.Fprintf(w, "Trigger: every %d iterations\n",
-			testCfg.Compaction.TriggerIterations)
+		fmt.Fprintf(w, "Strategy: %s\n", testCfg.Compaction.Type)
+		fmt.Fprintf(w, "Trigger: every %d iterations\n", testCfg.Compaction.TriggerIterations)
 		switch testCfg.Compaction.Type {
 		case CompactionSlidingWindow:
-			fmt.Fprintf(w, "Window size: %d\n",
-				testCfg.Compaction.WindowSize)
+			fmt.Fprintf(w, "Window size: %d\n", testCfg.Compaction.WindowSize)
 		case CompactionSummarization:
-			fmt.Fprintf(w, "Keep recent: %d\n",
-				testCfg.Compaction.KeepRecent)
+			fmt.Fprintf(w, "Keep recent: %d\n", testCfg.Compaction.KeepRecent)
 		}
 		fmt.Fprintln(w)
 	}
@@ -567,7 +540,7 @@ func RunScenario(
 	PrintSection(w, "Agent Execution")
 	fmt.Fprintln(w)
 
-	_, _, executionErr := exec.Execute(execCtx)
+	_, result, executionErr := runner.NewTurn(execCtx, task)
 	seq.Close()
 	streamWait()
 	if logWait != nil {
@@ -577,14 +550,13 @@ func RunScenario(
 	if executionErr != nil {
 		return executionErr
 	}
-	result := execCtx.Result()
 
 	fmt.Fprintln(w)
 	PrintHeader(w, "EXECUTION COMPLETE")
 	fmt.Fprintln(w)
 
-	if result.Error != nil {
-		fmt.Fprintf(w, "Error: %v\n", result.Error)
+	if result.TerminationReason != gent.TerminationSuccess {
+		fmt.Fprintf(w, "Execution: %s\n", result.TerminationReason)
 	} else {
 		PrintSection(w, "Final Response to Customer")
 		for _, part := range result.Output {
@@ -597,16 +569,11 @@ func RunScenario(
 	fmt.Fprintln(w)
 	PrintSection(w, "Execution Stats")
 	stats := execCtx.Stats()
-	fmt.Fprintf(w, "Total iterations: %d\n",
-		execCtx.Iteration())
-	fmt.Fprintf(w, "Total input tokens: %d\n",
-		stats.GetTotalInputTokens())
-	fmt.Fprintf(w, "Total output tokens: %d\n",
-		stats.GetTotalOutputTokens())
-	fmt.Fprintf(w, "Total tool calls: %d\n",
-		stats.GetToolCallCount())
-	fmt.Fprintf(w, "Total compactions: %d\n",
-		stats.GetCounter(gent.SCCompactions))
+	fmt.Fprintf(w, "Total iterations: %d\n", execCtx.Iteration())
+	fmt.Fprintf(w, "Total input tokens: %d\n", stats.GetTotalInputTokens())
+	fmt.Fprintf(w, "Total output tokens: %d\n", stats.GetTotalOutputTokens())
+	fmt.Fprintf(w, "Total tool calls: %d\n", stats.GetToolCallCount())
+	fmt.Fprintf(w, "Total compactions: %d\n", stats.GetCounter(gent.SCCompactions))
 	fmt.Fprintf(w, "Duration: %v\n", execCtx.Duration())
 
 	if testCfg.ShowIterationHistory {
@@ -645,7 +612,7 @@ func RunScenario(
 	fmt.Fprintln(w)
 	PrintHeader(w, "TEST COMPLETE")
 
-	return result.Error
+	return nil
 }
 
 // -------------------------------------------------------------------------
@@ -668,11 +635,18 @@ type ChatConfig struct {
 
 // InteractiveChat holds state for an interactive chat session.
 type InteractiveChat struct {
-	History []ConversationMessage
-	Model   gent.Model
-	Config  TestConfig
-	Writer  io.Writer
-	ChatCfg ChatConfig
+	History    []ConversationMessage
+	Model      gent.Model
+	Config     TestConfig
+	Writer     io.Writer
+	ChatCfg    ChatConfig
+	runner     *executor.Runner[string]
+	execCtx    *gent.ExecutionContext
+	trace      *genttrace.Sequencer
+	policy     *PolicySuggestionHook
+	streamWait func()
+	logWait    func()
+	closed     bool
 }
 
 // NewInteractiveChat creates a new interactive chat session.
@@ -695,25 +669,6 @@ func NewInteractiveChat(
 	}, nil
 }
 
-// startingTask keeps conversation roles separate from the application's system instructions.
-// Prior chat turns are fixed for this example's one-response execution, not rendered as role tags.
-func (s *InteractiveChat) startingTask() (*gent.Task, error) {
-	messages := []*gent.ModelMessage{gent.TextParts(gent.ChatMessageTypeSystem,
-		s.ChatCfg.SystemPrompt+"\n\n"+s.ChatCfg.CriticalRules)}
-	for _, message := range s.History {
-		role := gent.ChatMessageTypeHuman
-		switch message.Role {
-		case "user":
-		case "agent":
-			role = gent.ChatMessageTypeAI
-		default:
-			return nil, fmt.Errorf("unsupported chat role %q", message.Role)
-		}
-		messages = append(messages, gent.TextParts(role, message.Content))
-	}
-	return &gent.Task{Messages: messages}, nil
-}
-
 // recentHistoryText formats the last N messages as text for policy suggestion.
 func (s *InteractiveChat) recentHistoryText(maxMessages int) string {
 	history := s.History
@@ -731,69 +686,28 @@ func (s *InteractiveChat) recentHistoryText(maxMessages int) string {
 func (s *InteractiveChat) SendMessage(
 	ctx context.Context, userMessage string,
 ) error {
+	if s.closed {
+		return fmt.Errorf("chat is closed")
+	}
 	s.History = append(s.History, ConversationMessage{
 		Role:    "user",
 		Content: userMessage,
 	})
 
-	tc := CreateToolChain(s.Config)
-	s.ChatCfg.RegisterTools(tc)
-	if err := InitializeToolChain(
-		tc, s.Config,
-	); err != nil {
-		return fmt.Errorf(
-			"failed to initialize toolchain: %w", err,
-		)
+	if s.execCtx == nil {
+		if err := s.start(ctx); err != nil {
+			return err
+		}
 	}
-	tc = WrapToolChain(tc, s.Config)
-
-	loop := react.NewAgent(s.Model).
-		WithToolChain(tc).
-		WithRecoveryVersion("integration/v1")
-
-	task, err := s.startingTask()
-	if err != nil {
-		return err
+	if s.policy != nil {
+		s.policy.text = s.recentHistoryText(10)
+		s.policy.calls = 0
 	}
-	data := gent.NewBasicLoopData(task)
-
-	seq, err := NewIntegrationTrace(fmt.Sprintf("%s-chat-%d", s.ChatCfg.Name, len(s.History)))
-	if err != nil {
-		return err
+	task := gent.NewTask(gent.TextContent{Text: userMessage})
+	if s.execCtx.TurnId() == "" {
+		task.Instructions = []*gent.ModelMessage{gent.TextParts(gent.ChatMessageTypeSystem,
+			s.ChatCfg.SystemPrompt+"\n\n"+s.ChatCfg.CriticalRules)}
 	}
-	execCtx := gent.NewExecutionContext(
-		ctx, s.ChatCfg.Name+"-chat", data, gent.WithRunId(seq.Snapshot().RunId), gent.WithObserver(seq),
-	)
-	execCtx.SetLimits([]gent.Limit{
-		{
-			Type:     gent.LimitExactKey,
-			Key:      gent.SCIterations,
-			MaxValue: s.ChatCfg.MaxIterations,
-		},
-	})
-
-	ConfigureCompaction(
-		execCtx, s.Config.Compaction, s.Model,
-		format.NewXML(),
-	)
-
-	registry := events.NewRegistry()
-	streamWait := StartTraceStreamOutput(seq, s.Writer)
-	var logWait func()
-	if s.Config.LogWriter != nil {
-		logWait = StartTraceEventLogger(seq, s.Config.LogWriter)
-	}
-
-	if s.ChatCfg.PolicySuggester != nil {
-		registry.Subscribe(&PolicySuggestionHook{
-			suggester: s.ChatCfg.PolicySuggester,
-			text:      s.recentHistoryText(10),
-		})
-	}
-
-	exec := executor.NewRunner(
-		loop, executor.Config{},
-	).WithEvents(registry)
 
 	fmt.Fprintln(s.Writer)
 	PrintSection(s.Writer, "Your Input")
@@ -803,17 +717,11 @@ func (s *InteractiveChat) SendMessage(
 	PrintSection(s.Writer, "Agent Processing")
 	fmt.Fprintln(s.Writer)
 
-	_, _, executionErr := exec.Execute(execCtx)
-	seq.Close()
-	streamWait()
-	if logWait != nil {
-		logWait()
-		WriteTraceSnapshot(s.Config.LogWriter, seq.Snapshot())
-	}
+	_, result, executionErr := s.runner.NewTurn(s.execCtx, task)
 	if executionErr != nil {
 		return executionErr
 	}
-	result := execCtx.Result()
+	execCtx := s.execCtx
 
 	fmt.Fprintln(s.Writer)
 	stats := execCtx.Stats()
@@ -825,9 +733,9 @@ func (s *InteractiveChat) SendMessage(
 		stats.GetTotalOutputTokens(),
 		execCtx.Duration())
 
-	if result.Error != nil {
-		fmt.Fprintf(s.Writer, "\nError: %v\n", result.Error)
-		return result.Error
+	if result.TerminationReason != gent.TerminationSuccess {
+		fmt.Fprintf(s.Writer, "\nExecution: %s\n", result.TerminationReason)
+		return nil
 	}
 
 	var responseText string
@@ -849,4 +757,78 @@ func (s *InteractiveChat) SendMessage(
 	}
 
 	return nil
+}
+
+// start binds one conversation to the first SendMessage context. Keep that context alive for
+// the chat lifetime. All later prompts use the same run, tool state, and accepted history.
+func (s *InteractiveChat) start(ctx context.Context) error {
+	// Display and trace workers can write while the caller prints turn progress. Use one mutex
+	// for both destinations because an application can pass the same writer for both.
+	writeMu := &sync.Mutex{}
+	s.Writer = &serialWriter{mu: writeMu, target: s.Writer}
+	if s.Config.LogWriter != nil {
+		s.Config.LogWriter = &serialWriter{mu: writeMu, target: s.Config.LogWriter}
+	}
+	tc := CreateToolChain(s.Config)
+	s.ChatCfg.RegisterTools(tc)
+	if err := InitializeToolChain(tc, s.Config); err != nil {
+		return fmt.Errorf("initialize toolchain: %w", err)
+	}
+	seq, err := NewIntegrationTrace("")
+	if err != nil {
+		return err
+	}
+	config := &gent.Config{
+		ToolChain:   WrapToolChain(tc, s.Config),
+		Subscribers: []*gent.SubscriberRegistration{{Subscriber: seq, Delivery: gent.SubscriberLive}},
+		Limits: []gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations,
+			MaxValue: s.ChatCfg.MaxIterations}},
+	}
+	ConfigureCompaction(config, s.Config.Compaction, s.Model, format.NewXML())
+	if s.ChatCfg.PolicySuggester != nil {
+		s.policy = &PolicySuggestionHook{suggester: s.ChatCfg.PolicySuggester}
+		config.Hooks = &gent.Hooks{BeforeModelCall: s.policy.BeforeModelCall}
+	}
+	runner := executor.NewRunner(react.NewAgent(s.Model), config)
+	execCtx, err := runner.NewExecutionContext(ctx, s.ChatCfg.Name+"-chat")
+	if err != nil {
+		seq.Close()
+		return err
+	}
+	s.runner, s.execCtx, s.trace = runner, execCtx, seq
+	s.streamWait = StartTraceStreamOutput(seq, s.Writer)
+	if s.Config.LogWriter != nil {
+		s.logWait = StartTraceEventLogger(seq, s.Config.LogWriter)
+	}
+	return nil
+}
+
+// Close joins the chat's execution and trace workers. Call it when the conversation ends.
+func (s *InteractiveChat) Close() {
+	if s.closed {
+		return
+	}
+	s.closed = true
+	if s.execCtx == nil {
+		return
+	}
+	s.execCtx.Release()
+	s.trace.Close()
+	s.streamWait()
+	if s.logWait != nil {
+		s.logWait()
+		WriteTraceSnapshot(s.Config.LogWriter, s.trace.Snapshot())
+	}
+}
+
+// serialWriter protects application writers that do not support concurrent calls.
+type serialWriter struct {
+	mu     *sync.Mutex
+	target io.Writer
+}
+
+func (writer *serialWriter) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.target.Write(data)
 }

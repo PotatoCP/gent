@@ -1,7 +1,5 @@
 package react
 
-import genttest "github.com/rickchristie/gent/internal/tt"
-
 import (
 	"context"
 	"fmt"
@@ -11,15 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-type samplingHook struct{ change func(*gent.CallOptions) }
-
-func (h *samplingHook) MaxRecursion() int { return 10 }
-func (h *samplingHook) Dispatch(_ *gent.ExecutionContext, event gent.Event) {
-	if before, ok := event.(*gent.BeforeModelCallEvent); ok {
-		h.change(&before.Request.Options)
-	}
-}
-
 // The reply exposes the values received by the adapter without shared test state.
 type samplingEchoModel struct{}
 
@@ -27,21 +16,14 @@ func (*samplingEchoModel) GenerateContentStream(_ context.Context, request *gent
 	gent.Stream, error,
 ) {
 	content := fmt.Sprintf("%.1f %.1f", *request.Options.Temperature, *request.Options.TopP)
-	response := &gent.ModelCallResponse{
-		Choices: []*gent.ContentChoice{
-			{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: content}},
-			},
-		},
-	}
-	return gent.NewCompletedStream(response, nil), nil
+	return gent.NewCompletedStream(nativeTestResponse(answerChoice(content)), nil), nil
 }
 
 func TestAgentSamplingHooksOwnOptions(t *testing.T) {
 	type input struct{ change func(*gent.CallOptions) }
 	type callResult struct {
-		result *gent.AgentLoopResult
+		value  string
+		result *gent.ExecutionResult
 		err    error
 	}
 	type expected struct{ calls []callResult }
@@ -51,14 +33,10 @@ func TestAgentSamplingHooksOwnOptions(t *testing.T) {
 		expected expected
 	}
 	answer := func(content string) callResult {
-		return callResult{result: &gent.AgentLoopResult{TerminationReason: gent.TerminationSuccess,
-			Action: gent.LATerminate,
-			Result: []gent.ContentPart{
-				gent.TextContent{Text: content},
-			},
-			Value: genttest.Value(gent.ContentText([]gent.ContentPart{
-				gent.TextContent{Text: content},
-			}))}}
+		return callResult{value: content, result: &gent.ExecutionResult{
+			Status: gent.ExecutionFinished, TerminationReason: gent.TerminationSuccess,
+			Output: []gent.ContentPart{gent.TextPart(content)},
+		}}
 	}
 	cases := []testCase{
 		{"temperature", input{func(o *gent.CallOptions) { *o.Temperature = 0.1 }},
@@ -74,15 +52,19 @@ func TestAgentSamplingHooksOwnOptions(t *testing.T) {
 				WithCallOptions(gent.WithTemperature(0.8), gent.WithTopP(0.9))
 			var actual expected
 			for call := range 2 {
-				ctx := newTestExecCtx(gent.NewBasicLoopData(gent.NewTask(gent.TextContent{
-					Text: "Give the answer.",
-				})))
+				config := &gent.Config{}
 				if call == 0 {
-					ctx.SetEventPublisher(&samplingHook{change: test.input.change})
+					config.Hooks = &gent.Hooks{BeforeModelCall: func(_ context.Context,
+						event *gent.BeforeModelCallEvent,
+					) error {
+						test.input.change(&event.Request.Options)
+						return nil
+					}}
 				}
-				result, err := loop.Next(ctx)
-				actual.calls = append(actual.calls, callResult{result, err})
-				test.expected.calls[call].result.ContentSource = nativeTestSource(ctx, 1)
+				runner, execCtx := newTestExecution(t, loop, config)
+				value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Answer.")))
+				actual.calls = append(actual.calls, callResult{value, result, err})
+				test.expected.calls[call].result.TurnId = execCtx.TurnId()
 			}
 			assert.Equal(t, test.expected, actual)
 		})
@@ -91,7 +73,8 @@ func TestAgentSamplingHooksOwnOptions(t *testing.T) {
 
 func TestAgentSamplingHooksConcurrent(t *testing.T) {
 	type expected struct {
-		result *gent.AgentLoopResult
+		value  string
+		result *gent.ExecutionResult
 		err    error
 	}
 	loop := NewAgent(&samplingEchoModel{}).
@@ -103,22 +86,23 @@ func TestAgentSamplingHooksConcurrent(t *testing.T) {
 	results := make([]chan expected, 2)
 	contexts := make([]*gent.ExecutionContext, 2)
 	for worker := range results {
-		contexts[worker] = newTestExecCtx(gent.NewBasicLoopData(gent.NewTask(gent.TextContent{
-			Text: "Give the answer.",
-		})))
+		config := &gent.Config{Hooks: &gent.Hooks{BeforeModelCall: func(_ context.Context,
+			event *gent.BeforeModelCallEvent,
+		) error {
+			ready <- struct{}{}
+			<-start
+			*event.Request.Options.Temperature = float64(worker) / 10
+			*event.Request.Options.TopP = float64(worker+1) / 10
+			changed <- struct{}{}
+			<-finish
+			return nil
+		}}}
+		runner, execCtx := newTestExecution(t, loop, config)
+		contexts[worker] = execCtx
 		results[worker] = make(chan expected, 1)
 		go func() {
-			ctx := contexts[worker]
-			ctx.SetEventPublisher(&samplingHook{change: func(o *gent.CallOptions) {
-				ready <- struct{}{}
-				<-start
-				*o.Temperature = float64(worker) / 10
-				*o.TopP = float64(worker+1) / 10
-				changed <- struct{}{}
-				<-finish
-			}})
-			result, err := loop.Next(ctx)
-			results[worker] <- expected{result, err}
+			value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Answer.")))
+			results[worker] <- expected{value, result, err}
 		}()
 	}
 	for range results {
@@ -132,19 +116,17 @@ func TestAgentSamplingHooksConcurrent(t *testing.T) {
 	// Both hooks have changed their own values before either adapter reads them.
 	for worker, content := range []string{"0.0 0.1", "0.1 0.2"} {
 		actual := <-results[worker]
-		want := expected{result: &gent.AgentLoopResult{TerminationReason: gent.TerminationSuccess,
-			Action:        gent.LATerminate,
-			Result:        []gent.ContentPart{gent.TextContent{Text: content}},
-			ContentSource: nativeTestSource(contexts[worker], 1),
-			Value: genttest.Value(gent.ContentText([]gent.ContentPart{
-				gent.TextContent{Text: content},
-			})),
+		want := expected{value: content, result: &gent.ExecutionResult{
+			Status: gent.ExecutionFinished, TurnId: contexts[worker].TurnId(),
+			TerminationReason: gent.TerminationSuccess,
+			Output:            []gent.ContentPart{gent.TextPart(content)},
 		}}
 		assert.Equal(t, want, actual)
 	}
 }
-func (m *samplingEchoModel) PrepareRequest(ctx *gent.ExecutionContext,
+
+func (m *samplingEchoModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

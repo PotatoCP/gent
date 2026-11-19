@@ -11,17 +11,16 @@ import (
 
 // SearchHintType controls how the tool registry summary
 // is presented in the native search definition.
-type SearchHintType int
+type SearchHintType string
 
 const (
 	// SearchHintDomainCategories shows domain/category
 	// summaries with tool counts. Best for large tool sets.
 	// This is the default (zero value).
-	SearchHintDomainCategories SearchHintType = iota
-
+	SearchHintDomainCategories SearchHintType = ""
 	// SearchHintSimpleList shows a flat list of all tool
 	// names. Best for small tool sets (<20 tools).
-	SearchHintSimpleList
+	SearchHintSimpleList SearchHintType = "simple_list"
 )
 
 // SearchChain implements [gent.ToolChain] for dynamic tool
@@ -60,8 +59,7 @@ const (
 //
 // # Usage with Agent
 //
-//	agent := react.NewAgent(model).
-//	    WithToolChain(tc)
+//	runner := executor.NewRunner(react.NewAgent(model), &gent.Config{ToolChain: tc})
 type SearchChain struct {
 	mu sync.RWMutex
 

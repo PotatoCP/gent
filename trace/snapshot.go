@@ -11,24 +11,30 @@ func (s *Sequencer) applyContextStarted(event *Event) {
 	ctx := s.contextById[event.ContextId]
 	if ctx == nil {
 		ctx = &Context{
-			Id:                 event.ContextId,
-			ParentId:           event.ParentContextId,
-			Source:             event.Source,
-			Depth:              event.Depth,
-			StartedTs:          event.Ts,
-			StartedEventNumber: event.EventNumber,
-			Status:             StepStatusRunning,
+			TurnId:                     event.TurnId,
+			Id:                         event.ContextId,
+			Source:                     event.Source,
+			StartedTs:                  event.Ts,
+			StartedEventSequenceNumber: event.EventSequenceNumber,
+			Status:                     StepStatusRunning,
 		}
 		s.contextById[event.ContextId] = ctx
 		s.snapshot.Contexts = append(s.snapshot.Contexts, ctx)
 		s.snapshot.Stats.ContextCount++
 	}
 	payload, _ := event.Payload.(map[string]any)
+	if ctx.TurnId != event.TurnId {
+		ctx.Content, ctx.SourceMessageIds, ctx.MessageId = nil, nil, ""
+		ctx.ContentTruncated = false
+	}
 	if name, ok := payload["name"].(string); ok {
 		ctx.Name = name
 	}
+	ctx.TurnId = event.TurnId
+	ctx.Status, ctx.CompletedTs, ctx.Error = StepStatusRunning, nil, nil
+	ctx.CompletedEventSequenceNumber, ctx.DurationMs = 0, 0
 	ctx.LastUpdatedTs = event.Ts
-	ctx.LastEventNumber = event.EventNumber
+	ctx.LastEventSequenceNumber = event.EventSequenceNumber
 	if s.snapshot.Status == RunStatusPending {
 		s.snapshot.Status = RunStatusRunning
 	}
@@ -43,8 +49,8 @@ func (s *Sequencer) applyContextFinished(event *Event) {
 	payload, _ := event.Payload.(map[string]any)
 	ctx.Status = contextStatusFromPayload(payload, event.Error)
 	ctx.LastUpdatedTs = event.Ts
-	ctx.LastEventNumber = event.EventNumber
-	ctx.CompletedEventNumber = event.EventNumber
+	ctx.LastEventSequenceNumber = event.EventSequenceNumber
+	ctx.CompletedEventSequenceNumber = event.EventSequenceNumber
 	ctx.CompletedTs = &event.Ts
 	if durationMs, ok := payload["durationMs"].(int64); ok {
 		ctx.DurationMs = durationMs
@@ -53,14 +59,15 @@ func (s *Sequencer) applyContextFinished(event *Event) {
 		ctx.Error = cloneError(event.Error)
 		return
 	}
-	// Child completion is a synthetic lifecycle event and may not carry the child executor error.
-	// Keep the executor's earlier terminal error unless this finish event is an actual success.
+	// A successful completion clears any earlier display error.
 	if ctx.Status == StepStatusSucceeded {
 		ctx.Error = nil
 	}
 }
 
 func (s *Sequencer) applyExecutionStarted(event *Event) {
+	s.snapshot.TurnId = event.TurnId
+	s.snapshot.CompletedTs = nil
 	s.snapshot.Status = RunStatusRunning
 	s.snapshot.StartedTs = event.Ts
 }
@@ -86,20 +93,32 @@ func (s *Sequencer) applyExecutionFinished(event *Event) {
 	}
 }
 
+// A pause is saved execution control, not a completed answer. Keep the previous completed
+// result and mark only the current attempt's open operations as interrupted.
+func (s *Sequencer) applyExecutionPaused(event *Event) {
+	s.snapshot.Status, s.snapshot.CompletedTs = RunStatusPaused, nil
+	if ctx := s.contextById[event.ContextId]; ctx != nil {
+		ctx.Status, ctx.CompletedTs = StepStatusPaused, nil
+		ctx.LastUpdatedTs, ctx.LastEventSequenceNumber = event.Ts, event.EventSequenceNumber
+	}
+	interrupted := *event
+	interrupted.Type = EventTypeAttemptInterrupted
+	s.applyAttempt(&interrupted)
+}
+
 func (s *Sequencer) applyIterationStarted(event *Event) {
 	key := iterationKey(event.ContextId, event.Iteration, event.AttemptId)
 	iteration := &Iteration{
-		AttemptId:          event.AttemptId,
-		Iteration:          event.Iteration,
-		Depth:              event.Depth,
-		Source:             event.Source,
-		ContextId:          event.ContextId,
-		ParentContextId:    event.ParentContextId,
-		Status:             StepStatusRunning,
-		StartedTs:          event.Ts,
-		LastUpdatedTs:      event.Ts,
-		StartedEventNumber: event.EventNumber,
-		LastEventNumber:    event.EventNumber,
+		TurnId:                     event.TurnId,
+		AttemptId:                  event.AttemptId,
+		Iteration:                  event.Iteration,
+		Source:                     event.Source,
+		ContextId:                  event.ContextId,
+		Status:                     StepStatusRunning,
+		StartedTs:                  event.Ts,
+		LastUpdatedTs:              event.Ts,
+		StartedEventSequenceNumber: event.EventSequenceNumber,
+		LastEventSequenceNumber:    event.EventSequenceNumber,
 	}
 	s.iterationByKey[key] = iteration
 	s.snapshot.Iterations = append(s.snapshot.Iterations, iteration)
@@ -115,8 +134,8 @@ func (s *Sequencer) applyIterationFinished(event *Event) {
 	iteration.LastUpdatedTs = event.Ts
 	iteration.CompletedTs = &event.Ts
 	iteration.DurationMs = durationMsFromPayload(event.Payload)
-	iteration.LastEventNumber = event.EventNumber
-	iteration.CompletedEventNumber = event.EventNumber
+	iteration.LastEventSequenceNumber = event.EventSequenceNumber
+	iteration.CompletedEventSequenceNumber = event.EventSequenceNumber
 	iteration.Error = cloneError(event.Error)
 }
 
@@ -126,22 +145,21 @@ func (s *Sequencer) applyModelCallStarted(event *Event) {
 	}
 	payload, _ := event.Payload.(map[string]any)
 	call := &ModelCall{
-		AttemptId:          event.AttemptId,
-		Id:                 event.ModelCallId,
-		Model:              stringFromPayload(payload, "model"),
-		Provider:           stringFromPayload(payload, "provider"),
-		StreamId:           event.StreamId,
-		StreamTopicId:      event.StreamTopicId,
-		Source:             event.Source,
-		Iteration:          event.Iteration,
-		Depth:              event.Depth,
-		ContextId:          event.ContextId,
-		ParentContextId:    event.ParentContextId,
-		Status:             StepStatusRunning,
-		StartedTs:          event.Ts,
-		LastUpdatedTs:      event.Ts,
-		StartedEventNumber: event.EventNumber,
-		LastEventNumber:    event.EventNumber,
+		TurnId:                     event.TurnId,
+		AttemptId:                  event.AttemptId,
+		Id:                         event.ModelCallId,
+		Model:                      stringFromPayload(payload, "model"),
+		Provider:                   stringFromPayload(payload, "provider"),
+		StreamId:                   event.StreamId,
+		StreamTopicId:              event.StreamTopicId,
+		Source:                     event.Source,
+		Iteration:                  event.Iteration,
+		ContextId:                  event.ContextId,
+		Status:                     StepStatusRunning,
+		StartedTs:                  event.Ts,
+		LastUpdatedTs:              event.Ts,
+		StartedEventSequenceNumber: event.EventSequenceNumber,
+		LastEventSequenceNumber:    event.EventSequenceNumber,
 	}
 	if request, ok := payload["request"]; ok {
 		call.Request = request
@@ -169,8 +187,8 @@ func (s *Sequencer) applyModelCallFinished(event *Event) {
 	call.LastUpdatedTs = event.Ts
 	call.CompletedTs = &event.Ts
 	call.DurationMs = durationMsFromPayload(event.Payload)
-	call.LastEventNumber = event.EventNumber
-	call.CompletedEventNumber = event.EventNumber
+	call.LastEventSequenceNumber = event.EventSequenceNumber
+	call.CompletedEventSequenceNumber = event.EventSequenceNumber
 	call.Usage = usage
 	if response, ok := payload["response"]; ok {
 		call.Response = response
@@ -193,13 +211,13 @@ func (s *Sequencer) applyModelChunk(event *Event) {
 		call.Stream = &ModelStream{}
 	}
 	call.Stream.ChunkCount++
-	call.Stream.LastChunkEventNumber = event.EventNumber
+	call.Stream.LastChunkEventSequenceNumber = event.EventSequenceNumber
 	call.LastUpdatedTs = event.Ts
-	call.LastEventNumber = event.EventNumber
+	call.LastEventSequenceNumber = event.EventSequenceNumber
 	payload, _ := event.Payload.(map[string]any)
-	if items, ok := payload["metaContent"].([]*gent.MetaContent); ok {
+	if items, ok := payload["content"].([]gent.ContentPart); ok {
 		for _, item := range items {
-			s.appendStreamMeta(call.Stream, item)
+			s.appendStreamPart(call.Stream, item)
 		}
 	}
 	if event.Error != nil {
@@ -214,19 +232,18 @@ func (s *Sequencer) applyToolCallStarted(event *Event) {
 	}
 	payload, _ := event.Payload.(map[string]any)
 	call := &ToolCall{
-		AttemptId:          event.AttemptId,
-		Id:                 event.ToolCallId,
-		Name:               stringFromPayload(payload, "name"),
-		Source:             event.Source,
-		Iteration:          event.Iteration,
-		Depth:              event.Depth,
-		ContextId:          event.ContextId,
-		ParentContextId:    event.ParentContextId,
-		Status:             StepStatusRunning,
-		StartedTs:          event.Ts,
-		LastUpdatedTs:      event.Ts,
-		StartedEventNumber: event.EventNumber,
-		LastEventNumber:    event.EventNumber,
+		TurnId:                     event.TurnId,
+		AttemptId:                  event.AttemptId,
+		Id:                         event.ToolCallId,
+		Name:                       stringFromPayload(payload, "name"),
+		Source:                     event.Source,
+		Iteration:                  event.Iteration,
+		ContextId:                  event.ContextId,
+		Status:                     StepStatusRunning,
+		StartedTs:                  event.Ts,
+		LastUpdatedTs:              event.Ts,
+		StartedEventSequenceNumber: event.EventSequenceNumber,
+		LastEventSequenceNumber:    event.EventSequenceNumber,
 	}
 	if args, ok := payload["args"]; ok {
 		call.Args = args
@@ -251,8 +268,8 @@ func (s *Sequencer) applyToolCallFinished(event *Event) {
 	call.LastUpdatedTs = event.Ts
 	call.CompletedTs = &event.Ts
 	call.DurationMs = durationMsFromPayload(event.Payload)
-	call.LastEventNumber = event.EventNumber
-	call.CompletedEventNumber = event.EventNumber
+	call.LastEventSequenceNumber = event.EventSequenceNumber
+	call.CompletedEventSequenceNumber = event.EventSequenceNumber
 	if output, ok := payload["output"]; ok {
 		call.Output = output
 	}
@@ -342,10 +359,10 @@ func stepStatusFromTerminationReason(reason gent.TerminationReason, err *Error) 
 		return StepStatusSucceeded
 	case gent.TerminationRefused:
 		return StepStatusRefused
-	case gent.TerminationContextCanceled:
+	case gent.TerminationCanceled:
 		return StepStatusCanceled
-	case gent.TerminationError, gent.TerminationCompactionFailed, gent.TerminationLimitExceeded:
-		return StepStatusFailed
+	case gent.TerminationStopped, gent.TerminationLimitExceeded:
+		return StepStatusPaused
 	default:
 		return statusFromError(err)
 	}
@@ -401,12 +418,10 @@ func runStatus(reason gent.TerminationReason, err *Error) RunStatus {
 		return RunStatusSucceeded
 	case gent.TerminationRefused:
 		return RunStatusRefused
-	case gent.TerminationContextCanceled:
+	case gent.TerminationCanceled:
 		return RunStatusCanceled
-	case gent.TerminationLimitExceeded:
-		return RunStatusLimitExceeded
-	case gent.TerminationError, gent.TerminationCompactionFailed:
-		return RunStatusFailed
+	case gent.TerminationStopped, gent.TerminationLimitExceeded:
+		return RunStatusPaused
 	default:
 		if err != nil {
 			return RunStatusFailed
@@ -415,41 +430,49 @@ func runStatus(reason gent.TerminationReason, err *Error) RunStatus {
 	}
 }
 
-func (s *Sequencer) appendStreamMeta(stream *ModelStream, item *gent.MetaContent) {
-	remaining := s.cfg.maxMetaContentBytes
+// The trace view is bounded independently of the archive. Omit oversize media whole and keep
+// the item identity when text is clipped. This preview is never an execution-state replacement.
+func (s *Sequencer) appendStreamPart(stream *ModelStream, part gent.ContentPart) {
+	remaining := s.cfg.maxStreamContentBytes
 	if remaining >= 0 {
-		for _, saved := range stream.MetaContent {
-			remaining -= contentSize(saved.Content)
+		remaining -= contentSize(stream.Content)
+	}
+	parts, truncated := limitContent([]gent.ContentPart{part}, remaining)
+	stream.ContentTruncated = stream.ContentTruncated || truncated
+	for _, part := range parts {
+		item, ok := part.(*gent.AssistantContent)
+		if !ok {
+			stream.Content = append(stream.Content, part)
+			continue
 		}
-	}
-	parts, truncated := limitContent(item.Content, remaining)
-	stream.MetaContentTruncated = stream.MetaContentTruncated || truncated
-	if len(parts) == 0 {
-		return
-	}
-	if n := len(stream.MetaContent); n > 0 {
-		last := stream.MetaContent[n-1]
-		if last.Type == item.Type && last.MessageId == item.MessageId {
-			last.Content = append(last.Content, parts...)
-			return
+		var existing *gent.AssistantContent
+		for _, old := range stream.Content {
+			if old, ok := old.(*gent.AssistantContent); ok && old.MessageId == item.MessageId {
+				existing = old
+				break
+			}
 		}
+		if existing == nil {
+			stream.Content = append(stream.Content, item)
+			continue
+		}
+		existing.Type = item.Type
+		existing.Content = append(existing.Content, item.Content...)
 	}
-	stream.MetaContent = append(stream.MetaContent, &gent.MetaContent{
-		Type: item.Type, Content: parts, MessageId: item.MessageId})
 }
 
-func (s *Sequencer) applyExecutionContent(event *Event) {
+func (s *Sequencer) applyAcceptedAnswer(event *Event) {
 	ctx := s.contextById[event.ContextId]
 	if ctx == nil {
 		s.applyContextStarted(event)
 		ctx = s.contextById[event.ContextId]
 	}
 	payload, _ := event.Payload.(map[string]any)
-	ctx.LastEventNumber = event.EventNumber
-	ctx.MessageId = stringFromPayload(payload, "messageId")
+	ctx.LastEventSequenceNumber = event.EventSequenceNumber
 	if ids, ok := payload["sourceMessageIds"].([]string); ok {
 		ctx.SourceMessageIds = append([]string(nil), ids...)
 	}
 	parts, _ := payload["content"].([]gent.ContentPart)
+	ctx.MessageId, _ = payload["messageId"].(string)
 	ctx.Content, ctx.ContentTruncated = limitContent(parts, s.cfg.maxContentBytes)
 }

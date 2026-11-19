@@ -99,9 +99,9 @@ func (m *Chat) readResponse(ctx context.Context, response *http.Response,
 					if err := json.Unmarshal(raw, &text); err != nil {
 						return false, err
 					}
-					kind := gent.MetaContentIntermediary
+					kind := gent.AssistantContentIntermediary
 					if name == "reasoning" || name == "reasoning_content" {
-						kind = gent.MetaContentReasoning
+						kind = gent.AssistantContentReasoning
 					}
 					if err := sendProviderText(ctx, stream, options, kind, name, text); err != nil {
 						return false, err
@@ -229,8 +229,7 @@ func (state *chatAccumulator) finish() (json.RawMessage, error) {
 		for _, index := range indices {
 			call := state.calls[index]
 			calls = append(calls, &gent.ModelToolCallRequest{ID: call.ID, Type: call.Type,
-				FunctionCall: &gent.FunctionCall{Name: call.Name.String(),
-					Arguments: call.Arguments.String()}})
+				FunctionCall: &gent.FunctionCall{Name: call.Name.String(), Arguments: call.Arguments.String()}})
 		}
 		message["tool_calls"] = calls
 	}
@@ -287,6 +286,21 @@ func (m *Chat) convertResponse(ctx context.Context, raw json.RawMessage, reason 
 		choice.Completion.Refusal = &gent.ModelRefusal{Code: "refusal",
 			Content: []gent.ContentPart{gent.TextContent{Text: *message.Refusal}}}
 	}
+	for _, reasoning := range []struct{ id, text string }{
+		{"reasoning_content", message.Reasoning}, {"reasoning", message.Thought},
+	} {
+		if reasoning.text != "" {
+			choice.Parts = append(choice.Parts, &gent.AssistantContent{
+				Type: gent.AssistantContentReasoning, MessageId: reasoning.id,
+				Content: []gent.ContentPart{gent.TextContent{Text: reasoning.text}}})
+		}
+	}
+	if message.Content != "" {
+		choice.CandidateSource = &gent.ContentSource{MessageIds: []string{"content"}}
+		choice.Parts = append(choice.Parts, &gent.AssistantContent{
+			Type: gent.AssistantContentIntermediary, MessageId: "content",
+			Content: []gent.ContentPart{gent.TextContent{Text: message.Content}}})
+	}
 	for _, call := range message.Calls {
 		if call == nil || call.ID == "" || call.Type != "function" || call.FunctionCall == nil ||
 			call.FunctionCall.Name == "" {
@@ -295,23 +309,7 @@ func (m *Chat) convertResponse(ctx context.Context, raw json.RawMessage, reason 
 			}
 			return nil, errors.New("Chat function call requires id, type, and name")
 		}
-		choice.ToolCalls = append(choice.ToolCalls, call)
-	}
-	if message.Content != "" {
-		choice.CandidateContent = []gent.ContentPart{gent.TextContent{Text: message.Content}}
-		choice.CandidateSource = &gent.ContentSource{MessageIds: []string{"content"}}
-		choice.MetaContent = append(choice.MetaContent, &gent.MetaContent{
-			Type: gent.MetaContentIntermediary, MessageId: "content",
-			Content: gent.CloneContentParts(choice.CandidateContent)})
-	}
-	for _, reasoning := range []struct{ id, text string }{
-		{"reasoning_content", message.Reasoning}, {"reasoning", message.Thought},
-	} {
-		if reasoning.text != "" {
-			choice.MetaContent = append(choice.MetaContent, &gent.MetaContent{
-				Type: gent.MetaContentReasoning, MessageId: reasoning.id,
-				Content: []gent.ContentPart{gent.TextContent{Text: reasoning.text}}})
-		}
+		choice.Parts = append(choice.Parts, call)
 	}
 	for index, image := range message.Images {
 		if image.Type != "image_url" {
@@ -321,15 +319,15 @@ func (m *Chat) convertResponse(ctx context.Context, raw json.RawMessage, reason 
 		if err != nil {
 			return nil, err
 		}
-		choice.CandidateContent = append(choice.CandidateContent, part)
 		if choice.CandidateSource == nil {
 			choice.CandidateSource = &gent.ContentSource{}
 		}
 		id := fmt.Sprintf("image:%d", index)
 		choice.CandidateSource.MessageIds = append(choice.CandidateSource.MessageIds, id)
-		choice.MetaContent = append(choice.MetaContent, &gent.MetaContent{
-			Type: gent.MetaContentIntermediary, MessageId: id, Content: []gent.ContentPart{part}})
+		choice.Parts = append(choice.Parts, &gent.AssistantContent{
+			Type: gent.AssistantContentIntermediary, MessageId: id, Content: []gent.ContentPart{part}})
 	}
+	classifyAnswerItems(choice)
 	if err := choice.ValidateCompletion(); err != nil {
 		return nil, err
 	}

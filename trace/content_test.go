@@ -6,6 +6,7 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFinalContentTraceRetention(t *testing.T) {
@@ -39,81 +40,81 @@ func TestFinalContentTraceRetention(t *testing.T) {
 		}}, expected{}},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			cfg := Config{IncludeRunOutput: test.input.include, MaxContentBytes: test.input.limit,
-				Redactor: RedactorFuncs{RunOutput: test.input.redact}}
-			seq := newTestSequencer(t, "answer", cfg)
-			ctx := gent.NewExecutionContext(context.Background(), "root", nil,
-				gent.WithRunId("answer"), gent.WithObserver(seq))
-			defer ctx.Release()
-			ctx.PublishBeforeExecution()
-			assert.NoError(t, ctx.CommitCheckpoint(gent.PhaseInitial))
-			ctx.SetFinalContentSource(&gent.ContentSource{MessageIds: []string{"preview"}})
-			ctx.SetTermination(gent.TerminationSuccess,
-				[]gent.ContentPart{gent.TextContent{Text: "Accepted."}}, nil)
-			ctx.PublishAfterExecution(gent.TerminationSuccess, nil)
-			err := ctx.CommitCheckpoint(gent.PhaseTerminal)
-			snapshot := seq.Snapshot()
-			assert.Equal(t, test.expected, expected{gent.ContentText(snapshot.Contexts[0].Content),
-				snapshot.Contexts[0].ContentTruncated, err})
-			assert.Equal(t, ctx.ContextId()+":answer", snapshot.Contexts[0].MessageId)
-			assert.Equal(t, []string{"preview"}, snapshot.Contexts[0].SourceMessageIds)
-			assert.Equal(t, snapshot.LastEventNumber, snapshot.Contexts[0].LastEventNumber)
-			snapshot.Contexts[0].SourceMessageIds[0] = "changed"
-			assert.Equal(t, []string{"preview"}, seq.Snapshot().Contexts[0].SourceMessageIds)
-			view, err := ctx.Export()
-			assert.NoError(t, err)
-			replay := newTestSequencer(t, "answer", cfg)
-			assert.NoError(t, replay.ObserveCommitted(view.Activity, ctx.Codecs()))
-			assert.Equal(t, seq.Snapshot(), replay.Snapshot())
-		})
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				cfg := Config{IncludeRunOutput: test.input.include, MaxContentBytes: test.input.limit,
+					Redactor: RedactorFuncs{RunOutput: test.input.redact}}
+				seq := newTestSequencer(t, "", cfg)
+				loop := &traceTestLoop{
+					next: func(
+						execCtx *gent.ExecutionContext,
+					) (
+						*gent.AgentLoopResult,
+						error,
+					) {
+						return gent.AcceptOutput(execCtx, &gent.OutputResult[string]{Accepted: true,
+							Value: "Accepted.", Content: []gent.ContentPart{gent.TextPart("Accepted.")}},
+							&gent.ContentSource{MessageIds: []string{"preview"}})
+					},
+				}
+				runner, ctx, store := newTraceRun(t, context.Background(), loop,
+					&gent.Config{Subscribers: []*gent.SubscriberRegistration{{Subscriber: seq}}})
+				_, _, err := runner.NewTurn(ctx, gent.NewTask(gent.TextPart("Answer.")))
+				require.NoError(t, err)
+				snapshot := seq.Snapshot()
+				assert.Equal(t, test.expected, expected{gent.ContentText(snapshot.Contexts[0].Content),
+					snapshot.Contexts[0].ContentTruncated, err})
+				assert.Equal(t, ctx.TurnId()+":answer", snapshot.Contexts[0].MessageId)
+				assert.Equal(t, []string{"preview"}, snapshot.Contexts[0].SourceMessageIds)
+				assert.Equal(t, snapshot.LastEventSequenceNumber, snapshot.Contexts[0].LastEventSequenceNumber)
+				snapshot.Contexts[0].SourceMessageIds[0] = "changed"
+				assert.Equal(t, []string{"preview"}, seq.Snapshot().Contexts[0].SourceMessageIds)
+				replay, err := RestoreSequencer(*store.view, cfg)
+				require.NoError(t, err)
+				defer replay.Close()
+				assert.Equal(t, seq.Snapshot(), replay.Snapshot())
+			},
+		)
 	}
 }
 
 func TestTraceMetadataOrderAndSharedLimit(t *testing.T) {
-	seq := newTestSequencer(t, "meta", Config{IncludeChunkText: true, MaxMetaContentBytes: 5})
-	ctx := gent.NewExecutionContext(context.Background(), "root", nil,
-		gent.WithRunId("meta"), gent.WithObserver(seq))
-	defer ctx.Release()
-	before := ctx.PublishBeforeModelCall("fixture", gent.NewModelCallRequest(nil))
-	for _, meta := range []*gent.MetaContent{
-		{
-			Type:      gent.MetaContentReasoning,
-			Content:   []gent.ContentPart{gent.TextContent{Text: "abc"}},
-			MessageId: "reason",
-		},
-		{
-			Type:      gent.MetaContentCommentary,
-			Content:   []gent.ContentPart{gent.TextContent{Text: "def"}},
-			MessageId: "comment",
-		},
-		{
-			Type:      "progress",
-			Content:   []gent.ContentPart{gent.TextContent{Text: "ghi"}},
-			MessageId: "progress",
-		},
+	seq := newTestSequencer(t, "meta", Config{IncludeChunkText: true, MaxStreamContentBytes: 5})
+	recordTestValue(t, seq, "model_call_started", &gent.BeforeModelCallEvent{
+		Model: "fixture", ModelCallId: "model-1", Request: gent.NewModelCallRequest(nil)})
+	for _, meta := range []gent.ContentPart{&gent.AssistantContent{
+		Type:      gent.AssistantContentReasoning,
+		Content:   []gent.ContentPart{gent.TextContent{Text: "abc"}},
+		MessageId: "reason",
+	}, &gent.AssistantContent{
+		Type:      gent.AssistantContentCommentary,
+		Content:   []gent.ContentPart{gent.TextContent{Text: "def"}},
+		MessageId: "comment",
+	}, &gent.AssistantContent{
+		Type:      "progress",
+		Content:   []gent.ContentPart{gent.TextContent{Text: "ghi"}},
+		MessageId: "progress",
+	},
 	} {
-		assert.NoError(t, ctx.EmitChunk(gent.StreamChunk{ModelCallId: before.ModelCallId,
-			MetaContent: []*gent.MetaContent{meta}}))
+		recordTestValue(t, seq, "model_stream_chunk", gent.StreamChunk{Content: []gent.ContentPart{meta}},
+			gent.RecordedEvent{ModelCallId: "model-1"})
 	}
-	assert.NoError(t, ctx.FlushProgress())
-	want := []*gent.MetaContent{
-		{
-			Type:      gent.MetaContentReasoning,
-			Content:   []gent.ContentPart{gent.TextContent{Text: "abc"}},
-			MessageId: "reason",
-		},
-		{
-			Type:      gent.MetaContentCommentary,
-			Content:   []gent.ContentPart{gent.TextContent{Text: "de"}},
-			MessageId: "comment",
-		},
+	want := []gent.ContentPart{&gent.AssistantContent{
+		Type:      gent.AssistantContentReasoning,
+		Content:   []gent.ContentPart{gent.TextContent{Text: "abc"}},
+		MessageId: "reason",
+	}, &gent.AssistantContent{
+		Type:      gent.AssistantContentCommentary,
+		Content:   []gent.ContentPart{gent.TextContent{Text: "de"}},
+		MessageId: "comment",
+	},
 	}
 	snapshot := seq.Snapshot()
-	assert.Equal(t, want, snapshot.ModelCalls[0].Stream.MetaContent)
-	assert.True(t, snapshot.ModelCalls[0].Stream.MetaContentTruncated)
-	snapshot.ModelCalls[0].Stream.MetaContent[0].Content = []gent.ContentPart{
+	assert.Equal(t, want, snapshot.ModelCalls[0].Stream.Content)
+	assert.True(t, snapshot.ModelCalls[0].Stream.ContentTruncated)
+	snapshot.ModelCalls[0].Stream.Content[0].(*gent.AssistantContent).Content = []gent.ContentPart{
 		gent.TextContent{Text: "changed"},
 	}
-	assert.Equal(t, want, seq.Snapshot().ModelCalls[0].Stream.MetaContent)
+	assert.Equal(t, want, seq.Snapshot().ModelCalls[0].Stream.Content)
 }

@@ -35,13 +35,7 @@ func (m reviewModel) GenerateContentStream(
 	context.Context, *gent.ModelCallRequest,
 ) (gent.Stream, error) {
 	return gent.NewCompletedStream(&gent.ModelCallResponse{
-		Choices: []*gent.ContentChoice{
-			{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: m.text}},
-			},
-		},
-	}, m.err), nil
+		Choices: []*gent.ContentChoice{recoveryAnswerChoice(m.text)}}, m.err), nil
 }
 
 func TestReliabilitySharedAgent(t *testing.T) {
@@ -58,8 +52,13 @@ func TestReliabilitySharedAgent(t *testing.T) {
 		input    input
 		expected expected
 	}
-	want := expected{result: gent.ExecutionResult{TerminationReason: gent.TerminationSuccess,
-		Output: []gent.ContentPart{gent.TextContent{Text: "done"}}}}
+	want := expected{
+		result: gent.ExecutionResult{
+			Status:            gent.ExecutionFinished,
+			TerminationReason: gent.TerminationSuccess,
+			Output:            []gent.ContentPart{gent.TextContent{Text: "done"}},
+		},
+	}
 	tests := []testCase{
 		{"XML", input{format.NewXML(), `done`}, want},
 		{"Markdown", input{format.NewMarkdown(), `done`}, want},
@@ -69,22 +68,28 @@ func TestReliabilitySharedAgent(t *testing.T) {
 			agent := react.NewAgent(reviewModel{
 				text: tc.input.response,
 			}).WithToolResultFormat(tc.input.format)
-			runner := executor.NewRunner(agent, executor.Config{})
+			runner := executor.NewRunner(agent, &gent.Config{})
 			var contexts []*gent.ExecutionContext
 			for i := 0; i < 8; i++ {
-				contexts = append(contexts, gent.NewExecutionContext(context.Background(), "review",
-					gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "test"}))))
+				execCtx, err := runner.NewExecutionContext(context.Background(), "review")
+				if !assert.NoError(t, err) {
+					return
+				}
+				t.Cleanup(execCtx.Release)
+				contexts = append(contexts, execCtx)
 			}
 			var wg sync.WaitGroup
 			start := make(chan struct{})
-			for _, ctx := range contexts {
+			for _, execCtx := range contexts {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
 					<-start
-					_, result, err := runner.Execute(ctx)
+					_, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("test")))
 					assert.Equal(t, tc.expected.err, err)
-					assert.Equal(t, &tc.expected.result, result)
+					want := tc.expected.result
+					want.TurnId = execCtx.TurnId()
+					assert.Equal(t, &want, result)
 				}()
 			}
 			close(start)
@@ -93,53 +98,59 @@ func TestReliabilitySharedAgent(t *testing.T) {
 	}
 }
 
-type reviewCompletionHook struct {
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (h *reviewCompletionHook) OnAfterModelCall(
-	_ *gent.ExecutionContext, _ *gent.AfterModelCallEvent,
-) {
-	close(h.entered)
-	<-h.release
-}
-
 func TestReliabilityModelErrorWaitsForCompletion(t *testing.T) {
-	hook := &reviewCompletionHook{entered: make(chan struct{}), release: make(chan struct{})}
-	agent := react.NewAgent(reviewModel{err: errors.New("provider failed")})
-	runner := executor.NewRunner(agent, executor.Config{}).Subscribe(hook)
-	ctx := gent.NewExecutionContext(context.Background(), "review",
-		gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "test"})))
-	done := make(chan struct{})
+	entered, release := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	failure := errors.New("provider failed")
+	observer := &contentObserver{before: func(ctx context.Context, event *gent.RecordedEvent) error {
+		if event.Type != "model_call_finished" {
+			return nil
+		}
+		close(entered)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}}
+	store := newCheckpointStore()
+	runner, execCtx := newTestExecution(
+		t,
+		context.Background(),
+		react.NewAgent(
+			reviewModel{
+				err: failure,
+			},
+		),
+		&gent.Config{Codecs: store.codecs, Recorder: store, Subscribers: []*gent.SubscriberRegistration{
+			{Subscriber: observer, Delivery: gent.SubscriberLive}}},
+	)
+	done := make(chan error, 1)
 	go func() {
-		defer close(done)
-		_, _, err := runner.Execute(ctx)
-		assert.EqualError(t, err, "Loop.Next (iteration 1): model call failed: provider failed")
+		_, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("test")))
+		assert.Nil(t, result)
+		done <- err
 	}()
-	<-hook.entered
+	checkpointSignal(t, entered)
 	select {
 	case <-done:
-		t.Error("execution returned before model completion was recorded")
-	case <-time.After(100 * time.Millisecond):
+		t.Error("execution returned while a Subscriber callback remained active")
+	default:
 	}
-	close(hook.release)
-	<-done
-	view, err := ctx.Export()
-	if !assert.NoError(t, err) {
-		return
-	}
-	assert.NoError(t, gent.ValidateBundle(view))
-	assert.Equal(t, gent.PhaseTerminal, view.Checkpoint.Phase)
-	var finalEvents []string
-	for _, event := range view.Activity {
-		switch event.Type {
-		case "model_call_finished", "iteration_finished", "execution_finished":
-			finalEvents = append(finalEvents, event.Type)
+	unblock()
+	assert.ErrorIs(t, checkpointReceive(t, done), failure)
+	assert.Equal(t, gent.PhaseIterationReady, store.view.Checkpoint.Phase)
+	// The failed operation is live evidence. D103 does not make a completed error save.
+	assert.Nil(t, store.view.Checkpoint.Outcome)
+	var events []string
+	for _, event := range observer.recorded() {
+		if event.Type == "model_call_finished" || event.Type == "execution_finished" {
+			events = append(events, event.Type)
 		}
 	}
-	assert.Equal(t, []string{"model_call_finished", "iteration_finished", "execution_finished"},
-		finalEvents)
+	assert.Equal(t, []string{"model_call_finished"}, events)
 }
 
 func (l reviewLoop) Next(*gent.ExecutionContext) (*gent.AgentLoopResult, error) {
@@ -153,55 +164,54 @@ func (l reviewLoop) Next(*gent.ExecutionContext) (*gent.AgentLoopResult, error) 
 func TestReliabilityExecutionReleasesContext(t *testing.T) {
 	type input struct{ loopErr error }
 	type expected struct {
-		result   gent.ExecutionResult
-		err      error
-		canceled error
+		err       error
+		completed bool
 	}
 	type testCase struct {
 		name     string
 		input    input
 		expected expected
 	}
-	loopErr := errors.New("loop failed")
-	runErr := fmt.Errorf("Loop.Next (iteration 1): %w", loopErr)
-	tests := []testCase{
-		{"success", input{}, expected{
-			result:   gent.ExecutionResult{TerminationReason: gent.TerminationSuccess},
-			canceled: context.Canceled,
-		}},
-		{"loop error", input{loopErr}, expected{
-			result: gent.ExecutionResult{TerminationReason: gent.TerminationError, Error: runErr},
-			err:    runErr, canceled: context.Canceled,
-		}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			worker, cancel := context.WithCancel(context.Background())
+	failure := errors.New("loop failed")
+	for _, test := range []testCase{
+		{"success", input{}, expected{completed: true}},
+		{"loop error", input{failure}, expected{err: failure}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			owner, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			ctx := gent.NewExecutionContext(worker, "review", nil)
-			_, result, err := executor.NewRunner(reviewLoop{tc.input.loopErr}, executor.Config{}).
-				Execute(ctx)
-			assert.Equal(t, tc.expected.err, err)
-			assert.Equal(t, &tc.expected.result, result)
-			assert.Equal(t, tc.expected.canceled, ctx.Context().Err())
+			runner, execCtx := newTestExecution(t, owner, reviewLoop{test.input.loopErr}, nil)
+			_, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Run.")))
+			assert.ErrorIs(t, err, test.expected.err)
+			if test.expected.completed {
+				assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished, TurnId: execCtx.TurnId(),
+					TerminationReason: gent.TerminationSuccess}, result)
+			} else {
+				assert.Nil(t, result)
+			}
+			assert.ErrorIs(t, execCtx.Context().Err(), context.Canceled)
+			assert.NoError(t, owner.Err())
 		})
 	}
 }
 
 func TestReliabilityTraceUnsubscribeAfterClose(t *testing.T) {
 	before := reviewBufferWorkers()
-	seq, err := trace.NewSequencer("review", trace.Config{})
+	seq, err := trace.NewSequencer("", trace.Config{})
 	if !assert.NoError(t, err) {
 		return
 	}
 	ch, unsubscribe := seq.Subscribe()
-	ctx := gent.NewExecutionContext(context.Background(), "review", nil,
-		gent.WithRunId("review"), gent.WithObserver(seq))
-	ctx.PublishBeforeExecution()
-	for i := 0; i < 16; i++ {
-		ctx.PublishCommonEvent("review:event", "test event", i)
-	}
-	if !assert.NoError(t, ctx.FlushProgress()) {
+	loop := contentLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		for i := 0; i < 16; i++ {
+			execCtx.PublishCommonEvent("review:event", "test event", i)
+		}
+		return acceptRootOutput(execCtx, "Done.")
+	})
+	runner, execCtx := newTestExecution(t, context.Background(), loop,
+		&gent.Config{Subscribers: []*gent.SubscriberRegistration{{Subscriber: seq}}})
+	_, _, err = runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Run.")))
+	if !assert.NoError(t, err) {
 		return
 	}
 	seq.Close()
@@ -378,8 +388,10 @@ func TestReliabilityDrainedStreamReleasesMetadata(t *testing.T) {
 	runtime.ReadMemStats(&before)
 	stream := gent.NewStreamWithDuration()
 	for i := 0; i < 32; i++ {
-		// Source is not part of the final response. It must leave memory with its queue item.
-		assert.True(t, stream.Send(gent.StreamChunk{Source: strings.Repeat("x", 1<<20)}))
+		// Unretained preview content must leave memory with its queue item.
+		assert.True(t, stream.Send(gent.StreamChunk{Content: []gent.ContentPart{&gent.AssistantContent{
+			Type: gent.AssistantContentIntermediary, MessageId: "preview",
+			Content: []gent.ContentPart{gent.TextPart(strings.Repeat("x", 1<<20))}}}}))
 	}
 	stream.Complete(&gent.ModelCallResponse{}, nil)
 	for range stream.Chunks() {
@@ -395,9 +407,8 @@ func TestReliabilityDrainedStreamReleasesMetadata(t *testing.T) {
 }
 
 func TestReliabilityExpireRecordsDuringAppend(t *testing.T) {
-	ctx := gent.NewExecutionContext(context.Background(), "review", nil)
-	defer ctx.Release()
-	if !assert.NoError(t, ctx.AppendRecord(&gent.HistoryEntry{}, true)) {
+	execCtx := genttest.NewContext(t, &gent.Config{})
+	if !assert.NoError(t, execCtx.AppendRecord(&gent.HistoryEntry{}, true)) {
 		return
 	}
 	var wg sync.WaitGroup
@@ -416,7 +427,7 @@ func TestReliabilityExpireRecordsDuringAppend(t *testing.T) {
 				return
 			default:
 			}
-			err := ctx.AppendRecord(&gent.HistoryEntry{ExpireAfterIteration: i % 2}, true)
+			err := execCtx.AppendRecord(&gent.HistoryEntry{ExpireAfterIteration: i % 2}, true)
 			if err != nil && !errors.Is(err, gent.ErrHistoryConflict) {
 				t.Error(err)
 				return
@@ -435,7 +446,7 @@ func TestReliabilityExpireRecordsDuringAppend(t *testing.T) {
 				return
 			default:
 			}
-			if err := ctx.ExpireRecords(1); err != nil && !errors.Is(err, gent.ErrHistoryConflict) {
+			if err := execCtx.ExpireRecords(1); err != nil && !errors.Is(err, gent.ErrHistoryConflict) {
 				t.Error(err)
 				return
 			}
@@ -444,15 +455,15 @@ func TestReliabilityExpireRecordsDuringAppend(t *testing.T) {
 	close(start)
 	wg.Wait()
 	assert.Nil(t, <-panicResult, "concurrent public history methods must not panic")
-	assert.NoError(t, ctx.ExpireRecords(1))
-	assert.NoError(t, ctx.FlushProgress())
+	assert.NoError(t, execCtx.ExpireRecords(1))
 	var active []gent.EntryId
-	for _, entry := range ctx.History().Entries {
-		if entry.ExpireAfterIteration == 0 {
-			active = append(active, entry.Id)
-		}
+	selected, err := execCtx.CompactionInput()
+	assert.NoError(t, err)
+	for _, entry := range selected.Entries {
+		assert.Equal(t, 0, entry.ExpireAfterIteration)
+		active = append(active, entry.Id)
 	}
-	assert.Equal(t, active, ctx.ContextDraft().Active)
+	assert.Equal(t, active, execCtx.ContextDraft().Active)
 }
 
 func BenchmarkReliabilityEmitChunk(b *testing.B) {
@@ -460,17 +471,19 @@ func BenchmarkReliabilityEmitChunk(b *testing.B) {
 		b.Run(fmt.Sprint(count), func(b *testing.B) {
 			b.ReportAllocs()
 			for n := 0; n < b.N; n++ {
-				ctx := gent.NewExecutionContext(context.Background(), "review", nil)
+				runner := executor.NewRunner(reviewLoop{}, &gent.Config{})
+				ctx, err := runner.NewExecutionContext(context.Background(), "review")
+				if err != nil {
+					b.Fatal(err)
+				}
 				for i := 0; i < count; i++ {
-					if err := ctx.EmitChunk(gent.StreamChunk{
-						MetaContent: []*gent.MetaContent{
-							{
-								Type: gent.MetaContentIntermediary,
-								Content: []gent.ContentPart{
-									gent.TextContent{Text: "x"},
-								},
-							},
+					if err := ctx.EmitChunk(gent.StreamChunk{Content: []gent.ContentPart{&gent.AssistantContent{
+						Type: gent.AssistantContentIntermediary, MessageId: "progress",
+						Content: []gent.ContentPart{
+							gent.TextContent{Text: "x"},
 						},
+					},
+					},
 					}); err != nil {
 						b.Fatal(err)
 					}
@@ -482,8 +495,8 @@ func BenchmarkReliabilityEmitChunk(b *testing.B) {
 }
 
 func (reviewLoop) Output() gent.Output[string] { return output.NewTextOutput() }
-func (m reviewModel) PrepareRequest(ctx *gent.ExecutionContext,
+func (m reviewModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

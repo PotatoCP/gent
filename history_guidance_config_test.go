@@ -6,16 +6,15 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRecoveryRejectsChangedHandlerVersion(t *testing.T) {
+func TestRecoveryAllowsChangedToolConfiguration(t *testing.T) {
 	type input struct{ search, program bool }
 	type expected struct {
-		result        *gent.ExecutionResult
-		err           error
+		status        gent.ExecutionStatus
+		reason        gent.TerminationReason
 		toolCalls     int
 		modelRequests int
 	}
@@ -25,19 +24,48 @@ func TestRecoveryRejectsChangedHandlerVersion(t *testing.T) {
 		expected expected
 	}
 	cases := []testCase{
-		{"registry", input{}, expected{err: gent.ErrIncompatibleCheckpoint}},
-		{"search", input{search: true}, expected{err: gent.ErrIncompatibleCheckpoint}},
-		{"program", input{program: true}, expected{err: gent.ErrIncompatibleCheckpoint}},
+
+		{
+			"registry",
+			input{},
+			expected{
+				status:        gent.ExecutionFinished,
+				reason:        gent.TerminationSuccess,
+				modelRequests: 1,
+			},
+		},
+		{
+			"search",
+			input{
+				search: true,
+			},
+			expected{
+				status:        gent.ExecutionFinished,
+				reason:        gent.TerminationSuccess,
+				modelRequests: 1,
+			},
+		},
+		{
+			"program",
+			input{
+				program: true,
+			},
+			expected{
+				status:        gent.ExecutionFinished,
+				reason:        gent.TerminationSuccess,
+				modelRequests: 1,
+			},
+		},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			toolCalls := 0
-			build := func(model *guidanceModel, version string) *react.Agent[string] {
+			build := func(model *guidanceModel, description string) (*react.Agent[string], *gent.Config) {
 				tool := &recoverySearchTool{gent.DefineTool("book",
 					func(context.Context, *bookingInput) (*gent.ToolExecutionResponse, error) {
 						toolCalls++
 						return capturedToolResponse("booked", nil)
-					}).Description("Book a flight").ParameterSchema(nil).
+					}).Description(description).ParameterSchema(nil).
 					Recovery(func(context.Context, *gent.ToolRecoveryRequest[*bookingInput]) (
 						*gent.ToolRecoveryResponse, error,
 					) {
@@ -57,39 +85,30 @@ func TestRecoveryRejectsChangedHandlerVersion(t *testing.T) {
 				if test.input.program {
 					chain = toolchain.NewJsToolChainWrapper(chain)
 				}
-				return react.NewAgent(model).WithToolChain(chain).WithRecoveryVersion(version)
+				return react.NewAgent(model), &gent.Config{ToolChain: chain}
 			}
 			worker, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			store := &recoveryStore{codecs: gent.NewCodecRegistry(), cancel: cancel,
-				phase: gent.PhaseInitial,
-				view:  gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "guidance-config"}}
+				phase: gent.PhaseInitial}
 			model := &guidanceModel{finish: true}
-			agent := build(model, "guidance/v1")
-			ctx := gent.NewExecutionContext(worker, "booking", gent.NewBasicLoopData(nil),
-				gent.WithRunId("guidance-config"), gent.WithRecorder(store), gent.WithCodecs(store.codecs))
-			defer ctx.Release()
-			_, _, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
+			agent, config := build(model, "Original booking description")
+			config.Codecs, config.Recorder = store.codecs, store
+			runner, execCtx := newTestExecution(t, worker, agent, config)
+			_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Book a flight.")))
 			if !assert.ErrorIs(t, err, context.Canceled) {
 				return
 			}
 			assert.Equal(t, []*gent.ModelCallRequest(nil), model.requests)
 			freshModel := &guidanceModel{finish: true}
-			freshAgent := build(freshModel, "guidance/v2")
-			bindings := recoveryBindings(t, freshAgent)
-			data, err := store.codecs.Marshal(store.view)
+			freshAgent, freshConfig := build(freshModel, "Updated booking description")
+			_, result, err := resumeRecovery(t, freshAgent, store.runStateSnapshot, freshConfig)
 			if !assert.NoError(t, err) {
 				return
 			}
-			var saved gent.RunView
-			if !assert.NoError(t, bindings.Codecs.Unmarshal(data, &saved)) {
-				return
-			}
-			fresh, result, err := resumeRecovery(freshAgent, saved, bindings)
-			if fresh != nil {
-				defer fresh.Release()
-			}
-			assert.Equal(t, test.expected, expected{result, err, toolCalls, len(freshModel.requests)})
+			assert.Equal(t, test.expected, expected{result.Status, result.TerminationReason,
+				toolCalls, len(freshModel.requests)})
+
 		})
 	}
 }

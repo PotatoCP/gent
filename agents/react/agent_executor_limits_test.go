@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/rickchristie/gent"
-	"github.com/rickchristie/gent/executor"
+
 	"github.com/rickchristie/gent/output"
 	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
@@ -32,18 +32,13 @@ func (m *limitModel) GenerateContentStream(
 	}
 	choice := &gent.ContentChoice{Completion: gent.ModelCompletion{
 		Status: gent.ModelStatusToolCalls,
-	},
-		ToolCalls: []*gent.ModelToolCallRequest{{ID: fmt.Sprint(m.calls),
-			Type: "function", FunctionCall: &gent.FunctionCall{Name: name, Arguments: args}}}}
+	}, Parts: []gent.ContentPart{&gent.ModelToolCallRequest{ID: fmt.Sprint(m.calls),
+		Type: "function", FunctionCall: &gent.FunctionCall{Name: name, Arguments: args}}}}
 	if m.kind == "answer" {
-		choice = &gent.ContentChoice{
-			Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-			CandidateContent: []gent.ContentPart{gent.TextContent{Text: "invalid JSON"}},
-		}
+		choice = answerChoice("invalid JSON")
 	}
 	if m.kind == "custom" {
-		choice = &gent.ContentChoice{Completion: gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-			CandidateContent: []gent.ContentPart{gent.TextContent{Text: `{}`}}}
+		choice = answerChoice(`{}`)
 	}
 	return gent.NewCompletedStream(&gent.ModelCallResponse{Choices: []*gent.ContentChoice{choice},
 		Info: &gent.GenerationInfo{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}}, nil), nil
@@ -62,14 +57,14 @@ func TestAgent_NativeLimits(t *testing.T) {
 		reason    gent.TerminationReason
 		iteration int
 		value     float64
-		err       string
+		err       error
 	}
 	type testCase struct {
 		name  string
 		input input
 	}
 	cases := []testCase{
-		{"iterations", input{gent.SCIterations.Self(), "tool", 1, false}},
+		{"iterations", input{gent.SCIterations, "tool", 1, false}},
 		{"input", input{gent.SCInputTokens, "tool", 10, false}},
 		{"output", input{gent.SCOutputTokens, "tool", 5, false}},
 		{"total", input{gent.SCTotalTokens, "tool", 15, false}},
@@ -125,31 +120,31 @@ func TestAgent_NativeLimits(t *testing.T) {
 							gent.TextContent{Text: "Return an approved result."}}}, nil
 					})
 				}
-				agent := NewWithOutput(model, out).WithToolChain(chain)
+				agent := NewWithOutput(model, out)
 				threshold := float64(stop-1) * test.input.increment
-				if test.input.key == gent.SCIterations.Self() {
+				if test.input.key == gent.SCIterations {
 					threshold = float64(stop)
 				}
 				limit := gent.Limit{Type: gent.LimitExactKey, Key: test.input.key, MaxValue: threshold}
-				ctx := gent.NewExecutionContext(context.Background(), "limits",
-					gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Continue to use the tool."})))
-				ctx.SetLimits([]gent.Limit{limit})
-				_, result, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
-				if !assert.Error(t, err) {
+				runner, execCtx := newTestExecution(t, agent, &gent.Config{
+					ToolChain: chain, Limits: []gent.Limit{limit},
+				})
+				_, result, err := runner.NewTurn(execCtx,
+					gent.NewTask(gent.TextPart("Continue to use the tool.")))
+				if !assert.NoError(t, err) {
 					return
 				}
-				value := float64(ctx.Stats().GetCounter(test.input.key))
+				value := float64(execCtx.Stats().GetCounter(test.input.key))
 				if test.input.gauge {
-					value = ctx.Stats().GetGauge(test.input.key)
+					value = execCtx.Stats().GetGauge(test.input.key)
 				}
-				operator := ">"
-				if test.input.key == gent.SCIterations.Self() {
-					operator = ">="
-				}
-				want := expected{gent.TerminationLimitExceeded, stop, float64(stop) * test.input.increment,
-					fmt.Sprintf("limit exceeded: %s %s %v", test.input.key, operator, threshold)}
-				assert.Equal(t, want, expected{result.TerminationReason, ctx.Iteration(), value, err.Error()})
-				assert.Equal(t, &limit, result.ExceededLimit)
+				want := expected{gent.TerminationLimitExceeded, stop, float64(stop) * test.input.increment, nil}
+				assert.Equal(t, want, expected{result.TerminationReason, execCtx.Iteration(), value, err})
+				assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionPaused,
+					TurnId: execCtx.TurnId(), TerminationReason: gent.TerminationLimitExceeded,
+					ExceededLimit: &gent.LimitExceeded{Limit: &limit, MatchedKey: test.input.key,
+						CurrentValue: value},
+				}, result)
 			})
 		}
 	}
@@ -184,16 +179,16 @@ func TestAgent_NativePrefixLimit(t *testing.T) {
 				}
 				choice := &gent.ContentChoice{Completion: gent.ModelCompletion{
 					Status: gent.ModelStatusToolCalls,
-				},
-					ToolCalls: []*gent.ModelToolCallRequest{
-						nativeTestCall(fmt.Sprint(i), name, args),
-					}}
+				}, Parts: []gent.ContentPart{
+					nativeTestCall(fmt.Sprint(i), name, args),
+				}}
 				responses = append(responses, nativeTestResponse(choice))
 			}
 			model := newMockModel(responses...)
 			agent := NewAgent(model)
+			chain := toolchain.New()
 			for _, name := range []string{"alpha", "beta"} {
-				agent.RegisterTool(gent.DefineTool(name, func(context.Context, map[string]any) (
+				chain.RegisterTool(gent.DefineTool(name, func(context.Context, map[string]any) (
 					*gent.ToolExecutionResponse, error,
 				) {
 					if test.input.failures {
@@ -203,19 +198,22 @@ func TestAgent_NativePrefixLimit(t *testing.T) {
 				}).Description("Do work").ParameterSchema(nil).MustBuild())
 			}
 			limit := gent.Limit{Type: gent.LimitKeyPrefix, Key: test.input.key, MaxValue: 2}
-			ctx := newTestExecCtx(gent.NewBasicLoopData(gent.NewTask(gent.TextContent{
-				Text: "Use both tools.",
-			})))
-			ctx.SetLimits([]gent.Limit{limit})
-			_, result, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
-			assert.EqualError(t, err, fmt.Sprintf("limit exceeded: %s > 2", test.input.key))
-			assert.Equal(t, gent.TerminationLimitExceeded, result.TerminationReason)
-			assert.Equal(t, &limit, result.ExceededLimit)
-			assert.Equal(t, test.expected, expected{ctx.Stats().GetCounter(test.input.key + "alpha"),
-				ctx.Stats().GetCounter(test.input.key + "beta"), ctx.Iteration()})
+			recorder := &testRecorder{}
+			runner, execCtx := newTestExecution(t, agent, &gent.Config{
+				ToolChain: chain, Limits: []gent.Limit{limit}, Recorder: recorder,
+			})
+			_, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Use both tools.")))
+			assert.NoError(t, err)
+			assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionPaused,
+				TurnId: execCtx.TurnId(), TerminationReason: gent.TerminationLimitExceeded,
+				ExceededLimit: &gent.LimitExceeded{Limit: &limit,
+					MatchedKey: test.input.key + "beta", CurrentValue: 3},
+			}, result)
+			assert.Equal(t, test.expected, expected{execCtx.Stats().GetCounter(test.input.key + "alpha"),
+				execCtx.Stats().GetCounter(test.input.key + "beta"), execCtx.Iteration()})
 			var keys []gent.StatKey
-			for _, event := range ctx.Events() {
-				if exceeded, ok := event.(*gent.LimitExceededEvent); ok {
+			for _, event := range recorder.view.Activity {
+				if exceeded, ok := event.Payload.(*gent.LimitExceededEvent); ok {
 					keys = append(keys, exceeded.MatchedKey)
 				}
 			}
@@ -223,8 +221,8 @@ func TestAgent_NativePrefixLimit(t *testing.T) {
 		})
 	}
 }
-func (m *limitModel) PrepareRequest(ctx *gent.ExecutionContext,
+func (m *limitModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

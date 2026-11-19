@@ -1,0 +1,6 @@
+body { margin: 32px auto; padding: 0 24px; max-width: 880px;
+  color: #252d28; background: #faf9f6; font: 14px/1.6 sans-serif; }
+h1 { font: 32px Georgia, serif; }
+label { display: block; margin: 20px 0; }
+#notice { color: #687169; }
+#notice[data-status="error"] { color: #a54f29; }

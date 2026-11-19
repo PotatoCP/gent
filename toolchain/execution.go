@@ -1,6 +1,7 @@
 package toolchain
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,7 +22,40 @@ type callObservation struct {
 	duration       time.Duration
 }
 
-func (c *Registry) executeCall(ctx *gent.ExecutionContext, call *parsedCall) (
+// A returned author-tool failure is handled evidence. An invocation error is a framework
+// failure and must leave the accepted operation unfinished for restoration.
+type toolCallReturn struct {
+	response   *gent.ToolExecutionResponse
+	diagnostic error
+}
+
+func (c *Registry) executeCall(execCtx *gent.ExecutionContext, call *parsedCall) (
+	*gent.ToolCallRecord, error,
+) {
+	return c.executeCallWith(execCtx, call, func(ctx context.Context, tool, input any) (
+		*toolCallReturn, error,
+	) {
+		response, err := CallToolWithTypedInputReflect(ctx, tool, input)
+		return &toolCallReturn{response: response, diagnostic: err}, nil
+	})
+}
+
+// Internal tools run framework operations under the same validation and save barriers. Their
+// errors must reach the application before any result publication or tool-completed save.
+func (c *Registry) executeInternalCall(execCtx *gent.ExecutionContext, call *parsedCall) (
+	*gent.ToolCallRecord, error,
+) {
+	return c.executeCallWith(execCtx, call, func(ctx context.Context, tool, input any) (
+		*toolCallReturn, error,
+	) {
+		response, err := CallToolWithTypedInputReflect(ctx, tool, input)
+		return &toolCallReturn{response: response}, err
+	})
+}
+
+func (c *Registry) executeCallWith(execCtx *gent.ExecutionContext, call *parsedCall,
+	invoke func(context.Context, any, any) (*toolCallReturn, error),
+) (
 	*gent.ToolCallRecord, error,
 ) {
 	tool := c.toolMap[call.Name]
@@ -29,7 +63,7 @@ func (c *Registry) executeCall(ctx *gent.ExecutionContext, call *parsedCall) (
 	observation := callObservation{}
 	if tool == nil {
 		observation.diagnostic = fmt.Errorf("%w: %s", gent.ErrUnknownTool, call.Name)
-		observation.safeError = ctx.SteeringMessages().ToolUnavailable
+		observation.safeError = execCtx.SteeringMessages().ToolUnavailable
 	} else if call.parseError != nil {
 		observation.diagnostic = call.parseError
 		observation.invalidDetails = safeConversionDetails(call.parseError)
@@ -46,41 +80,43 @@ func (c *Registry) executeCall(ctx *gent.ExecutionContext, call *parsedCall) (
 	if beforeArgs == nil {
 		beforeArgs = call.Args
 	}
-	before := ctx.PublishBeforeToolCall(call.Name, beforeArgs, gent.WithToolCallId(call.Id))
-	if err := ctx.RecordingError(); err != nil {
+	before := execCtx.PublishBeforeToolCall(call.Name, beforeArgs, gent.WithToolCallId(call.Id),
+		gent.WithToolCallInputValidation(func(input any) error {
+			if observation.diagnostic != nil {
+				return nil // Original model argument failures retain their correction path.
+			}
+			return validateEffectiveInput(tool, compiled, input)
+		}))
+	if err := execCtx.RecordingError(); err != nil {
 		return nil, err
 	}
-	if err := ctx.Context().Err(); err != nil {
+	if err := execCtx.Context().Err(); err != nil {
 		return nil, err
 	}
 	if observation.diagnostic == nil {
 		observation.input = before.Args
-		if err := validateEffectiveInput(tool, compiled, before.Args); err != nil {
-			observation.diagnostic, observation.invalidDetails = err, safeConversionDetails(err)
-			var validation *schema.ValidationError
-			if errors.As(err, &validation) {
-				observation.invalidDetails = schema.SafeValidationDetails(err)
-			}
-		} else {
-			start := time.Now()
-			observation.response, observation.diagnostic = CallToolWithTypedInputReflect(
-				ctx.ToolContext(before.ToolCallId), tool, before.Args)
-			observation.duration = time.Since(start)
+		start := time.Now()
+		returned, err := invoke(execCtx.ToolContext(before.ToolCallId), tool, before.Args)
+		if err != nil {
+			return nil, fmt.Errorf("gent: internal tool %q in run %q turn %q context %q call %q: %w",
+				call.Name, execCtx.RunId(), execCtx.TurnId(), execCtx.ContextId(), before.ToolCallId, err)
 		}
+		observation.response, observation.diagnostic = returned.response, returned.diagnostic
+		observation.duration = time.Since(start)
 	}
-	if ctx.IsWorkerInterrupted() {
-		return nil, ctx.Context().Err()
+	if execCtx.IsWorkerInterrupted() {
+		return nil, execCtx.Context().Err()
 	}
 	if tool != nil && observation.safeError == "" {
 		observation.safeError = tool.(toolDefinition).UnrecoverableErrorInstructions()
 	}
-	result, err := buildCallRecord(ctx, call, compiled, observation)
+	result, err := buildCallRecord(execCtx, call, compiled, observation)
 	if err != nil {
 		return nil, err
 	}
-	ctx.PublishAfterToolCall(call.Name, observation.input, result, observation.duration,
+	execCtx.PublishAfterToolCall(call.Name, observation.input, result, observation.duration,
 		observation.diagnostic, gent.WithToolCallId(call.Id), gent.WithToolCallSource(before.Source))
-	return result, ctx.RecordingError()
+	return result, execCtx.RecordingError()
 }
 
 func validateEffectiveInput(tool any, compiled *schema.Schema, input any) error {
@@ -156,14 +192,14 @@ func safeConversionDetails(err error) string {
 	return "args: expected a complete JSON object with values compatible with the input schema."
 }
 
-func buildCallRecord(ctx *gent.ExecutionContext, call *parsedCall, compiled *schema.Schema,
+func buildCallRecord(execCtx *gent.ExecutionContext, call *parsedCall, compiled *schema.Schema,
 	observation callObservation,
 ) (*gent.ToolCallRecord, error) {
-	returned, err := ctx.SnapshotDiagnostic(observation.response)
+	returned, err := execCtx.SnapshotDiagnostic(observation.response)
 	if err != nil {
 		return nil, err
 	}
-	input, err := ctx.SnapshotDiagnostic(observation.input)
+	input, err := execCtx.SnapshotDiagnostic(observation.input)
 	if err != nil {
 		return nil, err
 	}
@@ -190,11 +226,11 @@ func buildCallRecord(ctx *gent.ExecutionContext, call *parsedCall, compiled *sch
 		}
 		response = &normalized
 	}
-	diagnostic, err := ctx.SnapshotDiagnostic(observation.diagnostic)
+	diagnostic, err := execCtx.SnapshotDiagnostic(observation.diagnostic)
 	if err != nil {
 		return nil, err
 	}
-	builder := gent.NewToolCallRecordBuilder(call.Id, ctx.AttemptId(), call.Name).
+	builder := gent.NewToolCallRecordBuilder(call.Id, execCtx.AttemptId(), call.Name).
 		Arguments(call.RawArguments, call.Args).Input(input).ReturnedResult(returned).Error(diagnostic).
 		DiscoveredTools(call.discovered...)
 	var parts []gent.ContentPart
@@ -202,12 +238,12 @@ func buildCallRecord(ctx *gent.ExecutionContext, call *parsedCall, compiled *sch
 		builder.CallError()
 		text := observation.safeError
 		if text == "" {
-			text = ctx.SteeringMessages().ToolError
+			text = execCtx.SteeringMessages().ToolError
 		}
 		parts = []gent.ContentPart{gent.TextPart(text)}
 	} else {
 		builder.Execution(response)
-		parts = gent.PrepareExecutionParts(response, ctx.SteeringMessages())
+		parts = gent.PrepareExecutionParts(response, execCtx.SteeringMessages())
 	}
 	return builder.ModelReply(call.ModelCallID, call.ModelName, parts...).Build()
 }

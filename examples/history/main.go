@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -14,27 +15,76 @@ import (
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
 	"github.com/rickchristie/gent/executor"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/rickchristie/gent/trace"
 )
 
 type memoryStore struct {
-	mu      sync.Mutex
-	view    gent.RunView
-	lease   uint64
-	updates chan *gent.SaveBatch
-	codecs  *gent.CodecRegistry
+	mu               sync.Mutex
+	lease            uint64
+	runId            string
+	cursor           uint64
+	batches          [][]byte
+	receipts         map[string][]byte
+	runStateSnapshot []byte
+	snapshotBatches  int
+	updates          chan *gent.SaveBatch
+	codecs           *gent.CodecRegistry
 }
 
-func (s *memoryStore) load() (gent.RunView, error) {
+func (s *memoryStore) loadState() (*gent.RunState, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	data, err := s.codecs.Marshal(s.view)
-	if err != nil {
-		return gent.RunView{}, err
+	saved, start := s.runStateSnapshot, s.snapshotBatches
+	tail := append([][]byte(nil), s.batches[start:]...)
+	runId := s.runId
+	s.mu.Unlock()
+	state := gent.NewRunState(runId)
+	if saved != nil {
+		loaded, err := s.codecs.UnmarshalRunState(saved)
+		if err != nil {
+			return nil, err
+		}
+		if loaded.Status != gent.RunStateReady {
+			return nil, fmt.Errorf("load state: %s: %s", loaded.Status, loaded.Detail)
+		}
+		state = loaded.State
 	}
-	var owned gent.RunView
-	err = s.codecs.Unmarshal(data, &owned)
-	return owned, err
+	for _, data := range tail {
+		var batch gent.SaveBatch
+		if err := s.codecs.Unmarshal(data, &batch); err != nil {
+			return nil, err
+		}
+		applied, err := state.Apply(&batch, s.codecs)
+		if err != nil {
+			return nil, err
+		}
+		if applied.Status != gent.ApplyApplied {
+			return nil, fmt.Errorf("apply tail: %s: %s", applied.Status, applied.Detail)
+		}
+	}
+	return state, nil
+}
+
+func (s *memoryStore) loadArchive() (*gent.RunView, error) {
+	s.mu.Lock()
+	batches := append([][]byte(nil), s.batches...)
+	runId := s.runId
+	s.mu.Unlock()
+	archive := gent.NewRunView(runId)
+	for _, data := range batches {
+		var batch gent.SaveBatch
+		if err := s.codecs.Unmarshal(data, &batch); err != nil {
+			return nil, err
+		}
+		applied, err := archive.Apply(&batch, s.codecs)
+		if err != nil {
+			return nil, err
+		}
+		if applied.Status != gent.ApplyApplied {
+			return nil, fmt.Errorf("apply archive: %s: %s", applied.Status, applied.Detail)
+		}
+	}
+	return archive, nil
 }
 
 func (s *memoryStore) nextLease() uint64 {
@@ -52,27 +102,62 @@ type writer struct {
 	stopped bool
 }
 
-func (w *writer) Save(_ context.Context, batch *gent.SaveBatch) error {
+func (w *writer) Save(ctx context.Context, batch *gent.SaveBatch,
+	captureRunStateSnapshot func() (*gent.RunState, error),
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// Encode complete batches. A RunStateSnapshot is optional and is published with the same
+	// transaction when captured. Old archive bytes remain available for full troubleshooting.
+	encoded, err := w.store.codecs.Marshal(batch)
+	if err != nil {
+		return err
+	}
 	w.store.mu.Lock()
 	if w.lease != w.store.lease {
 		w.store.mu.Unlock()
 		return errors.New("writer lease expired")
 	}
-	next, err := gent.ApplyBatch(w.store.view, batch, w.store.codecs)
-	if err != nil {
+	if prior, exists := w.store.receipts[batch.BatchId]; exists {
 		w.store.mu.Unlock()
-		return err
+		if !bytes.Equal(prior, encoded) {
+			return errors.New("conflicting duplicate batch")
+		}
+		return nil
 	}
-	w.store.view = next // The transaction commits history, activity, accounting, and checkpoint.
+	if batch.PreviousEventSequenceNumber != w.store.cursor ||
+		(w.store.runId != "" && w.store.runId != batch.RunId) {
+		w.store.mu.Unlock()
+		return errors.New("stale writer cursor or wrong run")
+	}
+	var saved []byte
+	if len(w.store.batches)%3 == 0 {
+		state, captureErr := captureRunStateSnapshot()
+		if captureErr == nil {
+			saved, captureErr = w.store.codecs.MarshalRunState(state)
+		}
+		if captureErr != nil {
+			w.store.mu.Unlock()
+			return captureErr
+		}
+	}
+	w.store.batches = append(w.store.batches, encoded)
+	w.store.receipts[batch.BatchId] = encoded
+	w.store.runId = batch.RunId
+	w.store.cursor = batch.Events[len(batch.Events)-1].EventSequenceNumber
+	if saved != nil {
+		w.store.runStateSnapshot, w.store.snapshotBatches = saved, len(w.store.batches)
+	}
 	w.store.mu.Unlock()
-	// Publication happens after commit. This deliberately bounded channel can lose updates; a
-	// browser detects gaps by cursor and periodically reloads the same full view for a lost finish.
+	// Notifications can be lost. A UI reloads the accepted archive after a gap, including a
+	// missing terminal notification. The batch and optional RunStateSnapshot are already stored.
 	select {
 	case w.store.updates <- batch:
 	default:
-		// A full reload is the chosen delivery mechanism when this demonstration queue is full.
+		// The example deliberately requires archive reload when this bounded queue is full.
 	}
-	if !w.stopped && batch.Checkpoint != nil && batch.Checkpoint.Phase == w.stop {
+	if !w.stopped && batch.Checkpoint.Phase == w.stop {
 		w.stopped = true
 		w.cancel()
 	}
@@ -90,13 +175,16 @@ func (m *demoModel) GenerateContentStream(
 	*gent.ModelCallRequest,
 ) (gent.Stream, error) {
 	choice := &gent.ContentChoice{
-		Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-		CandidateContent: []gent.ContentPart{gent.TextContent{Text: "P10 permits the refund."}},
+		Completion: gent.ModelCompletion{Status: gent.ModelStatusAnswer},
+		Parts: []gent.ContentPart{&gent.AssistantContent{
+			Type: gent.AssistantContentFinalAnswerCandidate, MessageId: "answer",
+			Content: []gent.ContentPart{gent.TextPart("P10 permits the refund.")}}},
+		CandidateSource: &gent.ContentSource{MessageIds: []string{"answer"}},
 	}
 	if !m.answer {
-		choice.CandidateContent = nil
+		choice.CandidateSource = nil
 		choice.Completion.Status = gent.ModelStatusToolCalls
-		choice.ToolCalls = []*gent.ModelToolCallRequest{{ID: "read-policy", Type: "function",
+		choice.Parts = []gent.ContentPart{&gent.ModelToolCallRequest{ID: "read-policy", Type: "function",
 			FunctionCall: &gent.FunctionCall{Name: "read_policy", Arguments: `{"id":"P10"}`}}}
 	}
 	m.answer = true
@@ -106,26 +194,24 @@ func (m *demoModel) GenerateContentStream(
 	}, nil), nil
 }
 
-func newAgent(answer bool, calls *int) *react.Agent[string] {
+func newTools(calls *int) gent.ToolChain {
 	// Recovery returns control to the model. It can request current data if the old read is absent.
-	return react.NewAgent(&demoModel{answer: answer}).WithRecoveryVersion("history-example/v1").
-		RegisterTool(gent.DefineTool("read_policy",
-			func(ctx context.Context, input policyInput) (*gent.ToolExecutionResponse,
-
-				error) {
-				if _, ok := gent.ToolIdentityFromContext(ctx); !ok {
-					return capturedToolResponse("", errors.New("missing tool identity"))
-				}
-				*calls++
-				return capturedToolResponse(input.Id+": refunds are permitted within 30 days", nil)
-			}).Description("Read policy evidence").ParameterSchema(nil).
-			Recovery(func(context.Context, *gent.ToolRecoveryRequest[policyInput]) (
-				*gent.ToolRecoveryResponse, error,
-			) {
-				return &gent.ToolRecoveryResponse{Status: gent.ToolRecoveryUnresolved,
-					Instructions: "The earlier read was not saved. Request current policy data if needed.",
-				}, nil
-			}).MustBuild())
+	return toolchain.New().RegisterTool(gent.DefineTool("read_policy",
+		func(ctx context.Context, input policyInput) (*gent.ToolExecutionResponse,
+			error) {
+			if _, ok := gent.ToolIdentityFromContext(ctx); !ok {
+				return capturedToolResponse("", errors.New("missing tool identity"))
+			}
+			*calls++
+			return capturedToolResponse(input.Id+": refunds are permitted within 30 days", nil)
+		}).Description("Read policy evidence").ParameterSchema(nil).
+		Recovery(func(context.Context, *gent.ToolRecoveryRequest[policyInput]) (
+			*gent.ToolRecoveryResponse, error,
+		) {
+			return &gent.ToolRecoveryResponse{Status: gent.ToolRecoveryUnresolved,
+				Instructions: "The earlier read was not saved. Request current policy data if needed.",
+			}, nil
+		}).MustBuild())
 }
 
 func run(out io.Writer) error {
@@ -138,70 +224,74 @@ func run(out io.Writer) error {
 }
 
 func demonstrate(out io.Writer, stop gent.ExecutionPhase) error {
-	store := &memoryStore{
-		view:    gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: string(stop)},
-		updates: make(chan *gent.SaveBatch, 1),
-		codecs:  gent.NewCodecRegistry(),
-	}
+	store := &memoryStore{updates: make(chan *gent.SaveBatch, 1),
+		codecs: gent.NewCodecRegistry(), receipts: make(map[string][]byte)}
 	worker, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	firstWriter := &writer{store: store, lease: store.nextLease(), stop: stop, cancel: cancel}
-	seq, err := trace.NewSequencer(string(stop), trace.Config{})
+	toolCalls := 0
+	runner := executor.NewRunner(react.NewAgent(&demoModel{}), &gent.Config{
+		Recorder: firstWriter, Codecs: store.codecs, ToolChain: newTools(&toolCalls)})
+	execCtx, err := runner.NewExecutionContext(worker, "refund")
 	if err != nil {
 		return err
 	}
-	toolCalls := 0
-	agent := newAgent(false, &toolCalls)
-	ctx := gent.NewExecutionContext(worker, "refund", gent.NewBasicLoopData(
-		gent.NewTask(gent.TextContent{
-			Text: "May I receive a refund under policy P10?",
-		})), gent.WithRunId(string(stop)),
-		gent.WithRecorder(firstWriter), gent.WithObserver(seq), gent.WithCodecs(store.codecs))
-	_, _, err = executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
+	defer execCtx.Release()
+	_, _, err = runner.NewTurn(execCtx,
+		gent.NewTask(gent.TextPart("May I receive a refund under policy P10?")))
 	if !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("expected worker interruption, received %v", err)
 	}
-	// A late observer loads one consistent stored cursor and everything covered by it. Buffered
-	// updates at or below that cursor are duplicates; a gap requires another full load.
-	bundle, err := store.load()
+	state, err := store.loadState()
 	if err != nil {
 		return err
 	}
-	if err := gent.ValidateBundle(bundle, store.codecs); err != nil {
-		return err
-	}
-	freshAgent := newAgent(true, &toolCalls)
-	freshExecutor := executor.NewRunner(freshAgent, executor.DefaultConfig())
-	bindings := gent.RestoreBindings{Codecs: store.codecs}
-
-	newWriter := &writer{store: store, lease: store.nextLease()}
-	restoredSeq, err := trace.RestoreSequencer(bundle, trace.Config{Codecs: bindings.Codecs})
+	next := executor.NewRunner(react.NewAgent(&demoModel{answer: true}), &gent.Config{
+		Codecs: store.codecs, ToolChain: newTools(&toolCalls),
+		Recorder: &writer{store: store, lease: store.nextLease()}})
+	restored, err := next.Restore(context.Background(), state)
 	if err != nil {
 		return err
 	}
-	bindings.Recorder = newWriter
-	bindings.Observers = []gent.RecordedEventObserver{restoredSeq}
-	if _, _, err := freshExecutor.Resume(context.Background(), bundle, bindings); err != nil {
+	if restored.Status != gent.RestoreReady {
+		return fmt.Errorf("restore: %s: %s", restored.Status, restored.Detail)
+	}
+	defer restored.Context.Release()
+	if _, _, err := next.Continue(restored.Context); err != nil {
 		return err
 	}
-	terminal, err := store.load() // Finds the lost completion even if no later update arrives.
+	// A late observer finds completion even though the notification queue lost it. Full archive
+	// replay and execution-state restoration serve different purposes and use separate types.
+	archive, err := store.loadArchive()
 	if err != nil {
 		return err
 	}
-	finished, err := gent.RestoreExecutionContext(
-		context.Background(),
-		terminal,
-		gent.RestoreBindings{Codecs: store.codecs},
-	)
+	display, err := trace.RestoreSequencer(*archive, trace.Config{Codecs: store.codecs})
 	if err != nil {
 		return err
 	}
-	_, result, err := freshExecutor.Continue(finished)
+	defer display.Close()
+	terminal, err := store.loadState()
 	if err != nil {
 		return err
+	}
+	finished, err := next.Restore(context.Background(), terminal)
+	if err != nil {
+		return err
+	}
+	if finished.Status != gent.RestoreReady {
+		return fmt.Errorf("restore completed turn: %s: %s", finished.Status, finished.Detail)
+	}
+	defer finished.Context.Release()
+	answer, result, err := next.GetLastTurnResult(finished.Context)
+	if err != nil {
+		return err
+	}
+	if result == nil || result.TerminationReason != gent.TerminationSuccess {
+		return errors.New("saved turn has no successful result")
 	}
 	_, err = fmt.Fprintf(out, "%s: %s; tool executions: %d; saved terminal result reused.\n",
-		stop, result.Output[0], toolCalls)
+		stop, answer, toolCalls)
 	return err
 }
 
@@ -211,8 +301,8 @@ func main() {
 		os.Exit(1)
 	}
 }
-func (m *demoModel) PrepareRequest(ctx *gent.ExecutionContext,
+func (m *demoModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

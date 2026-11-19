@@ -150,7 +150,7 @@ type linkedCount struct {
 }
 
 func processSchema[T any](raw string) func(*gent.ExecutionContext, string) (any, error) {
-	return func(ctx *gent.ExecutionContext, candidate string) (any, error) {
+	return func(execCtx *gent.ExecutionContext, candidate string) (any, error) {
 		var document map[string]any
 		decoder := json.NewDecoder(strings.NewReader(raw))
 		decoder.UseNumber()
@@ -161,7 +161,7 @@ func processSchema[T any](raw string) func(*gent.ExecutionContext, string) (any,
 		if err != nil {
 			return nil, err
 		}
-		return out.Process(ctx, text(candidate))
+		return out.Process(execCtx, text(candidate))
 	}
 }
 
@@ -268,8 +268,7 @@ func TestSchemaOutputSupportedMappings(t *testing.T) {
 				Content: text(`"AQID"`)}}},
 		{"literal dash field", input{`{"-":7}`, processSchema[dash](
 			`{"type":"object","required":["-"],"properties":{"-":{"type":"integer"}}}`)},
-			expected{&gent.OutputResult[dash]{Accepted: true, Value: dash{7},
-				Content: text(`{"-":7}`)}}},
+			expected{&gent.OutputResult[dash]{Accepted: true, Value: dash{7}, Content: text(`{"-":7}`)}}},
 		{"literal dash scalar null", input{`{"-":null}`, processSchema[dash](
 			`{"type":"object","required":["-"],"properties":{"-":{}}}`)},
 			expected{&gent.OutputResult[dash]{Steering: text(

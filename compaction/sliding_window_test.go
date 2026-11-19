@@ -1,7 +1,8 @@
 package compaction
 
 import (
-	"context"
+	"github.com/rickchristie/gent/internal/tt"
+
 	"testing"
 
 	"github.com/rickchristie/gent"
@@ -248,13 +249,9 @@ func TestSlidingWindow_Compact(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			data := gent.NewBasicLoopData(nil)
 
-			execCtx := gent.NewExecutionContext(
-				context.Background(), "test", data,
-			)
+			execCtx := tt.NewContext(t, &gent.Config{})
 			setTestRecords(t, execCtx, tc.input.scratchpad)
-			execCtx.SetLimits(nil)
 
 			strategy := NewSlidingWindow(
 				tc.input.windowSize,

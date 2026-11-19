@@ -9,8 +9,8 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/output"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -87,60 +87,71 @@ func TestProvidersIncompleteRetriesWithoutValidationOrTools(t *testing.T) {
 			testCase{provider + "/partial tool", input{provider, true, true}, want})
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			first := incompleteFixture(t, test.input.provider, test.input.tools, test.input.unnamed)
-			requests, validations, calls := 0, 0, 0
-			client := &http.Client{Transport: responseTransport(func(request *http.Request) (
-				*http.Response, error,
-			) {
-				if request.Method == http.MethodGet {
-					return fixtureHTTP(routerFixture, "application/json"), nil
-				}
-				requests++
-				if requests == 1 {
-					return fixtureHTTP(first, "application/json"), nil
-				}
-				if requests > 2 {
-					return nil, errors.New("unexpected incomplete retry")
-				}
-				return fixtureHTTP(providerResponse(test.input.provider, 3), "application/json"), nil
-			})}
-			out := output.NewTextOutput().SetCustomValidator("accept", func(_ *gent.ExecutionContext,
-				_ string,
-			) (*gent.OutputValidationResult, error) {
-				validations++
-				return &gent.OutputValidationResult{Accepted: true}, nil
-			})
-			agent := react.NewWithOutput(fixtureModel(test.input.provider, client), out).RegisterTool(
-				gent.DefineTool("lookup", func(context.Context, providerLookupInput) (
-					*gent.ToolExecutionResponse, error,
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				first := incompleteFixture(t, test.input.provider, test.input.tools, test.input.unnamed)
+				requests, validations, calls := 0, 0, 0
+				client := &http.Client{Transport: responseTransport(func(request *http.Request) (
+					*http.Response, error,
 				) {
-					calls++
-					return capturedToolResponse("record-seven", nil)
-				}).Description("Read").MustBuild())
-			task := gent.NewTask(gent.TextContent{Text: "Read the record."})
-			ctx := gent.NewExecutionContext(context.Background(), "incomplete", gent.NewBasicLoopData(task))
-			value, result, err := executor.Run(ctx, agent, executor.DefaultConfig())
-			if !assert.NoError(t, err) {
-				return
-			}
-			assert.Equal(t, test.expected, expected{requests, validations, calls,
-				ctx.Stats().GetCounter(gent.SCIterations), value, result.TerminationReason})
-			savedTask, err := ctx.Task()
-			assert.NoError(t, err)
-			assert.Equal(t, task, savedTask)
-			assert.Equal(t, int64(0), ctx.Stats().GetCounter(gent.SCOutputRejectedTotal))
-			var completions []gent.ModelStatus
-			for _, event := range ctx.Events() {
-				if after, ok := event.(*gent.AfterModelCallEvent); ok {
-					completions = append(completions, after.Response.Choices[0].Completion.Status)
+					if request.Method == http.MethodGet {
+						return fixtureHTTP(routerFixture, "application/json"), nil
+					}
+					requests++
+					if requests == 1 {
+						return fixtureHTTP(first, "application/json"), nil
+					}
+					if requests > 2 {
+						return nil, errors.New("unexpected incomplete retry")
+					}
+					return fixtureHTTP(providerResponse(test.input.provider, 3), "application/json"), nil
+				})}
+				out := output.NewTextOutput().SetCustomValidator("accept", func(_ *gent.ExecutionContext,
+					_ string,
+				) (*gent.OutputValidationResult, error) {
+					validations++
+					return &gent.OutputValidationResult{Accepted: true}, nil
+				})
+				agent := react.NewWithOutput(fixtureModel(test.input.provider, client), out)
+				chain := toolchain.New().RegisterTool(
+					gent.DefineTool("lookup", func(context.Context, providerLookupInput) (
+						*gent.ToolExecutionResponse, error,
+					) {
+						calls++
+						return capturedToolResponse("record-seven", nil)
+					}).Description("Read").MustBuild())
+				task := gent.NewTask(gent.TextContent{Text: "Read the record."})
+				runner, execCtx := newModelExecution(
+					t,
+					context.Background(),
+					agent,
+					&gent.Config{
+						ToolChain: chain,
+					},
+				)
+				value, result, err := runner.NewTurn(execCtx, task)
+				if !assert.NoError(t, err) {
+					return
 				}
-			}
-			assert.Equal(t, []gent.ModelStatus{
-				gent.ModelStatusIncomplete,
-				gent.ModelStatusAnswer,
-			}, completions)
-		})
+				assert.Equal(t, test.expected, expected{requests, validations, calls,
+					execCtx.Stats().GetCounter(gent.SCIterations), value, result.TerminationReason})
+				savedTask, err := execCtx.Task()
+				assert.NoError(t, err)
+				assert.Equal(t, task, savedTask)
+				assert.Equal(t, int64(0), execCtx.Stats().GetCounter(gent.SCOutputRejectedTotal))
+				var completions []gent.ModelStatus
+				for _, event := range providerEvents(execCtx) {
+					if after, ok := event.(*gent.AfterModelCallEvent); ok {
+						completions = append(completions, after.Response.Choices[0].Completion.Status)
+					}
+				}
+				assert.Equal(t, []gent.ModelStatus{
+					gent.ModelStatusIncomplete,
+					gent.ModelStatusAnswer,
+				}, completions)
+			},
+		)
 	}
 }
 
@@ -193,21 +204,18 @@ func TestProvidersNativeRefusal(t *testing.T) {
 				return &gent.OutputValidationResult{Accepted: true}, nil
 			})
 			agent := react.NewWithOutput(fixtureModel(test.input.provider, client), out)
-			ctx := gent.NewExecutionContext(context.Background(), "refusal", gent.NewBasicLoopData(
-				gent.NewTask(gent.TextContent{Text: "Read."})))
-			runner := executor.NewRunner(agent, executor.DefaultConfig())
-			value, result, err := runner.Execute(ctx)
+			runner, execCtx := newModelExecution(t, context.Background(), agent, nil)
+			value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read.")))
 			assert.NoError(t, err)
 			assert.Equal(t, "", value)
-			want := &gent.ExecutionResult{TerminationReason: gent.TerminationRefused,
-				Refusal: test.expected.refusal}
+			want := &gent.ExecutionResult{Status: gent.ExecutionFinished, TurnId: execCtx.TurnId(),
+				TerminationReason: gent.TerminationRefused,
+				Refusal:           test.expected.refusal}
 			assert.Equal(t, want, result)
 			assert.Equal(t, 0, validations)
-			saved, err := ctx.Export()
-			if !assert.NoError(t, err) {
-				return
-			}
-			value, result, err = runner.Resume(context.Background(), saved, gent.RestoreBindings{})
+			saved := execCtx.Config().Recorder.(*modelTestStore).saved
+			runner, restored := restoreModelExecution(t, context.Background(), agent, nil, saved)
+			value, result, err = runner.GetLastTurnResult(restored)
 			assert.NoError(t, err)
 			assert.Equal(t, "", value)
 			assert.Equal(t, want, result)

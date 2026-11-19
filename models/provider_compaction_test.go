@@ -11,9 +11,9 @@ import (
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
 	"github.com/rickchristie/gent/compaction"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/format"
 	"github.com/rickchristie/gent/output"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -28,11 +28,11 @@ func providerTextResponse(t *testing.T, provider, text string) string {
 
 type compactionCallChoice struct{}
 
-func (compactionCallChoice) OnBeforeModelCall(_ *gent.ExecutionContext,
+func (compactionCallChoice) beforeModelCall(_ context.Context,
 	event *gent.BeforeModelCallEvent,
-) {
+) error {
 	if event.StreamTopicId == "compaction" || event.Provider == "ollama" {
-		return
+		return nil
 	}
 	// Require the two tool turns before the answer where the endpoint supports tool choice.
 	// This makes the test's execution contract explicit instead of trusting a prompt alone.
@@ -40,6 +40,7 @@ func (compactionCallChoice) OnBeforeModelCall(_ *gent.ExecutionContext,
 	if event.Iteration <= 2 {
 		event.Request.Options.ToolChoice = "required"
 	}
+	return nil
 }
 
 // Use the same runner path for fixtures and live checks. Two compactions must retain the area,
@@ -74,9 +75,8 @@ func checkProviderCompaction(t *testing.T, base context.Context, model gent.Mode
 	if !assert.NoError(t, err) {
 		return
 	}
-	agent := react.NewWithOutput(model, out).RegisterTool(tool).
-		WithCallOptions(gent.WithMaxTokens(2048))
-	ctx := liveExecutionContext(base, "compaction", out.Instructions()+`
+	agent := react.NewWithOutput(model, out).WithCallOptions(gent.WithMaxTokens(2048))
+	task := liveTask(out.Instructions()+`
 Use history and tools to answer exactly.
 The prior_work_summary is saved history. Tool calls and results in that summary are completed work.
 Use those results without repeating completed calls.`,
@@ -85,29 +85,26 @@ then call lookup with id 8. Make each call exactly once, in separate turns.
 Return a JSON object with area, first, and second.
 Use the saved area and the two exact record texts.
 Do not add any other fields or text.`)
-	defer logCompactionFailure(t, ctx)
 	for _, text := range []string{
 		"The saved area is Tebet.", "Keep the saved area for the final answer.", "Now read the record.",
 	} {
-		if !assert.NoError(t, ctx.AppendRecord(&gent.HistoryEntry{
-			Messages: []*gent.MessageContent{{Role: gent.ChatMessageTypeHuman,
-				Parts: []gent.ContentPart{gent.TextContent{Text: text}}}},
-		}, true)) {
-			return
-		}
+		task.Messages = append(task.Messages, gent.TextParts(gent.ChatMessageTypeHuman, text))
 	}
-	ctx.SetCompaction(compaction.NewStatThresholdTrigger().OnGauge(gent.SGScratchpadLength, 3),
-		compaction.NewSummarization(model, format.NewMarkdown()).WithKeepRecent(1))
+	config := &gent.Config{ToolChain: toolchain.New().RegisterTool(tool), Limits: liveLimits(),
+		CompactionTrigger:  compaction.NewStatThresholdTrigger().OnCounter(gent.SCToolCalls, 1),
+		CompactionStrategy: compaction.NewSummarization(model, format.NewMarkdown()).WithKeepRecent(1),
+		Hooks:              &gent.Hooks{BeforeModelCall: (compactionCallChoice{}).beforeModelCall}}
+	runner, execCtx := newModelExecution(t, base, agent, config)
+	defer logCompactionFailure(t, execCtx)
 	var result *gent.ExecutionResult
-	runner := executor.NewRunner(agent, executor.DefaultConfig()).Subscribe(compactionCallChoice{})
-	actual.value, result, actual.err = runner.Execute(ctx)
+	actual.value, result, actual.err = runner.NewTurn(execCtx, task)
 	if !assert.NoError(t, actual.err) {
 		return
 	}
 	actual.content, actual.reason = gent.ContentText(result.Output), result.TerminationReason
-	actual.compactions = ctx.Stats().GetCounter(gent.SCCompactions)
+	actual.compactions = execCtx.Stats().GetCounter(gent.SCCompactions)
 	var summaries []*gent.MessageContent
-	for _, entry := range ctx.History().Entries {
+	for _, entry := range config.Recorder.(*modelTestStore).view.History.Entries {
 		if entry.Kind != gent.HistorySummary {
 			continue
 		}
@@ -122,7 +119,7 @@ Do not add any other fields or text.`)
 	if !assert.Len(t, summaries, 2) {
 		return
 	}
-	for _, event := range ctx.Events() {
+	for _, event := range providerEvents(execCtx) {
 		before, ok := event.(*gent.BeforeModelCallEvent)
 		if !ok {
 			continue
@@ -140,13 +137,18 @@ Do not add any other fields or text.`)
 			continue
 		}
 		messages := before.Request.Messages
-		if !assert.GreaterOrEqual(t, len(messages), 4) {
+		summaryIndex := len(task.Instructions) + len(task.Messages)
+		if !assert.GreaterOrEqual(t, len(messages), summaryIndex+2) {
 			return
 		}
-		assert.Equal(t, gent.ChatMessageTypeAI, messages[2].Role)
-		assert.Equal(t, summaries[actual.mainCalls-2].Parts, messages[2].Parts)
-		assert.Nil(t, messages[2].Continuation)
-		assert.NotNil(t, messages[3].Continuation, "recent native tool evidence must survive")
+		assert.Equal(t, gent.ChatMessageTypeAI, messages[summaryIndex].Role)
+		assert.Equal(t, summaries[actual.mainCalls-2].Parts, messages[summaryIndex].Parts)
+		assert.Nil(t, messages[summaryIndex].Continuation)
+		assert.NotNil(
+			t,
+			messages[summaryIndex+1].Continuation,
+			"recent native tool evidence must survive",
+		)
 		assert.Equal(t, gent.ChatMessageTypeTool, messages[len(messages)-1].Role)
 	}
 	answer := compactionValue{"Tebet", record + "-7", record + "-8"}
@@ -158,27 +160,14 @@ Do not add any other fields or text.`)
 		[]providerLookupInput{{ID: 7}, {ID: 8}}, 2, 2, 3, nil}
 	assert.Equal(t, want, actual)
 	// A saved compacted run must retain its accepted value without another model or tool call.
-	saved, err := ctx.Export()
-	if !assert.NoError(t, err) {
-		return
-	}
-	wire, err := ctx.Codecs().Marshal(saved)
-	if !assert.NoError(t, err) {
-		return
-	}
-	var bundle gent.RunView
-	if !assert.NoError(t, ctx.Codecs().Unmarshal(wire, &bundle)) {
-		return
-	}
+	saved := config.Recorder.(*modelTestStore).saved
 	for range 2 {
-		value, restored, err := runner.Resume(base, bundle, gent.RestoreBindings{
-			Configure: func(restored *gent.ExecutionContext) error {
-				restored.SetCompaction(
-					compaction.NewStatThresholdTrigger().OnGauge(gent.SGScratchpadLength, 3),
-					compaction.NewSummarization(model, format.NewMarkdown()).WithKeepRecent(1))
-				return nil
-			},
-		})
+		restoredRunner, restoredCtx := restoreModelExecution(t, base, agent, &gent.Config{
+			ToolChain: config.ToolChain, Limits: liveLimits(),
+			CompactionTrigger:  compaction.NewStatThresholdTrigger().OnCounter(gent.SCToolCalls, 1),
+			CompactionStrategy: compaction.NewSummarization(model, format.NewMarkdown()).WithKeepRecent(1),
+		}, saved)
+		value, restored, err := restoredRunner.GetLastTurnResult(restoredCtx)
 		assert.NoError(t, err)
 		assert.Equal(t, answer, value)
 		assert.Equal(t, result, restored)
@@ -187,20 +176,20 @@ Do not add any other fields or text.`)
 }
 
 // Only test records and model text appear here. Keep credentials and opaque provider items out.
-func logCompactionFailure(t *testing.T, ctx *gent.ExecutionContext) {
+func logCompactionFailure(t *testing.T, execCtx *gent.ExecutionContext) {
 	t.Helper()
 	if !t.Failed() {
 		return
 	}
-	for _, event := range ctx.Events() {
+	for _, event := range providerEvents(execCtx) {
 		after, ok := event.(*gent.AfterModelCallEvent)
 		if !ok || after.Response == nil {
 			continue
 		}
 		for _, choice := range after.Response.Choices {
 			t.Logf("topic=%s iteration=%d status=%s text=%q", after.StreamTopicId, after.Iteration,
-				choice.Completion.Status, gent.ContentText(choice.CandidateContent))
-			for _, call := range choice.ToolCalls {
+				choice.Completion.Status, gent.ContentText(choice.CandidateContent()))
+			for _, call := range choice.ToolCalls() {
 				t.Logf("tool=%s arguments=%s", call.FunctionCall.Name, call.FunctionCall.Arguments)
 			}
 		}
@@ -237,8 +226,7 @@ func TestProvidersRepeatedCompaction(t *testing.T) {
 					response = providerTextResponse(t, test.input.provider,
 						"The saved area is Tebet. The first record is record-seven-7.")
 				case 3:
-					response = strings.ReplaceAll(providerResponse(test.input.provider, 0),
-						"call-7", "call-8")
+					response = strings.ReplaceAll(providerResponse(test.input.provider, 0), "call-7", "call-8")
 					response = strings.ReplaceAll(response, ":7", ":8")
 				case 5:
 					response = providerTextResponse(t, test.input.provider,

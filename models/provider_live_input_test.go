@@ -52,8 +52,7 @@ func TestLiveProviderConcurrentCalls(t *testing.T) {
 						return
 					}
 					defer stream.Close()
-					for chunk := range stream.Chunks() {
-						assert.NoError(t, chunk.Err)
+					for range stream.Chunks() {
 					}
 					response, err := stream.Response()
 					if !assert.NoError(t, err) || !assert.Len(t, response.Choices, 1) {
@@ -61,7 +60,7 @@ func TestLiveProviderConcurrentCalls(t *testing.T) {
 					}
 					choice := response.Choices[0]
 					assert.Equal(t, test.expected, expected{
-						gent.ContentText(choice.CandidateContent), choice.Completion.Status, err})
+						gent.ContentText(choice.CandidateContent()), choice.Completion.Status, err})
 				})
 			}
 		})
@@ -98,15 +97,14 @@ func TestLiveProviderImageInput(t *testing.T) {
 				return
 			}
 			defer stream.Close()
-			for chunk := range stream.Chunks() {
-				assert.NoError(t, chunk.Err)
+			for range stream.Chunks() {
 			}
 			response, err := stream.Response()
 			if !assert.NoError(t, err) || !assert.Len(t, response.Choices, 1) {
 				return
 			}
 			assert.Equal(t, gent.ModelStatusAnswer, response.Choices[0].Completion.Status)
-			assert.Equal(t, "red", gent.ContentText(response.Choices[0].CandidateContent))
+			assert.Equal(t, "red", gent.ContentText(response.Choices[0].CandidateContent()))
 		})
 	}
 }

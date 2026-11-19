@@ -186,18 +186,23 @@ func TestProviderImageFailureUsesSafeGuidance(t *testing.T) {
 				return fixtureHTTP(providerResponse("openai", 3), "application/json"), nil
 			})}
 			model := NewResponses(&ResponsesConfig{Provider: "openai", Model: "fixture", HTTPClient: client})
-			ctx := gent.NewExecutionContext(context.Background(), "media", nil)
-			defer ctx.Release()
-			request := gent.NewModelCallRequest([]*gent.ModelMessage{{Role: gent.ChatMessageTypeHuman,
-				Parts: []gent.ContentPart{gent.ImageURLPart("https://media.example.test/expired")}}})
-			stream, err := ctx.GenerateContentStream(model, gent.ModelCall{}, request)
-			if !assert.NoError(t, err) {
-				return
-			}
-			for range stream.Chunks() {
-			}
-			_, err = stream.Response()
-			stream.Close()
+			loop := modelFixtureLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+				request := gent.NewModelCallRequest([]*gent.ModelMessage{{Role: gent.ChatMessageTypeHuman,
+					Parts: []gent.ContentPart{gent.ImageURLPart("https://media.example.test/expired")}}})
+				stream, err := execCtx.GenerateContentStream(model, gent.ModelCall{}, request)
+				if err != nil {
+					return nil, err
+				}
+				defer stream.Close()
+				for range stream.Chunks() {
+				}
+				if _, err := stream.Response(); err != nil {
+					return nil, err
+				}
+				return modelFixtureDone(execCtx)
+			})
+			runner, execCtx := newModelExecution(t, context.Background(), loop, nil)
+			_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read the image.")))
 			assert.Equal(t, test.expected.failure, err != nil)
 			assert.Equal(t, test.expected.requests, requests)
 			if test.expected.failure {
@@ -211,7 +216,7 @@ func TestProviderImageFailureUsesSafeGuidance(t *testing.T) {
 				"content": []map[string]any{{"type": "input_text", "text": text}}}})
 			assert.NoError(t, err)
 			assert.JSONEq(t, string(want), string(encoded))
-			events := ctx.Events()
+			events := providerEvents(execCtx)
 			var evidence []map[string]any
 			for _, event := range events {
 				if common, ok := event.(*gent.CommonEvent); ok && common.EventName == "gent:media_prepared" {

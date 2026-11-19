@@ -96,7 +96,7 @@ func cloneModelCall(call *ModelCall) *ModelCall {
 	}
 	if call.Stream != nil {
 		stream := *call.Stream
-		stream.MetaContent = gent.CloneMetaContent(call.Stream.MetaContent)
+		stream.Content = gent.CloneContentParts(call.Stream.Content)
 		clone.Stream = &stream
 	}
 	clone.Error = cloneError(call.Error)

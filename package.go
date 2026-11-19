@@ -1,146 +1,119 @@
-// Package gent provides typed contracts for LLM agents, model calls, tools, output, and saved runs.
-// Applications own models, prompts, storage, and deployment. The agents/react package supplies a
-// standard loop; custom Loop[T] implementations can reuse the same execution and storage contracts.
+// Package gent provides typed contracts for agent loops, models, tools, output, and saved runs.
+// Applications own provider clients, prompts, storage, and deployment. The agents/react package
+// supplies a standard Loop; executor.Runner uses the same lifecycle for custom loops.
 //
-// # Typed execution
+// # One conversation, multiple turns
 //
-// A Loop[T] performs one iteration and exposes Output[T]. The executor calls Next until the loop
-// terminates, a limit is exceeded, the context is canceled, or an operation fails. The runner saves
-// an accepted typed value and its delivery content before publishing final content or returning T.
+// Configure shared services once, create an ExecutionContext, and call NewTurn with each task.
+// The RunId stays fixed. Each accepted task has its own TurnId. NewTurn preserves earlier input,
+// assistant messages, native continuation, summaries, and custom run data. It resets declared
+// turn fields and gauges and records counter baselines. Continue keeps the unfinished task.
 //
-//	model := models.NewOpenAI(apiKey, modelName)
-//	out, err := output.NewJsonOutput[Order]()
-//	if err != nil {
-//	    return err
-//	}
-//	loop := react.NewWithOutput(model, out).RegisterTool(lookupOrder)
-//	task := &gent.Task{Messages: []*gent.ModelMessage{
-//	    gent.TextParts(gent.ChatMessageTypeSystem,
-//	        "Help the customer find the order. " + out.Instructions()),
-//	    gent.TextParts(gent.ChatMessageTypeHuman, "Where is order ORD-123?"),
-//	}}
-//	execCtx := gent.NewExecutionContext(ctx, "support", gent.NewBasicLoopData(task))
-//	order, result, err := executor.NewRunner(loop, executor.DefaultConfig()).Execute(execCtx)
-//	if err != nil {
-//	    return err
-//	}
-//	if result.TerminationReason != gent.TerminationSuccess {
-//	    return fmt.Errorf("agent ended with %s", result.TerminationReason)
-//	}
-//	fmt.Println(order.ID)
-//
-// react.NewAgent selects TextOutput and returns string. The output package also supplies
-// ImageOutput, JsonOutput[T], and SchemaOutput[T]. Value and pointer result types remain distinct.
-// Execute and Resume return (T, *ExecutionResult, error). Refusal is a separate terminal reason
-// with ModelRefusal evidence; it does not return an accepted value or an operation error.
-//
-// # Prompts and content
-//
-// A Task contains ordered pointers to ModelMessage. The caller writes system instructions and user
-// input. NewTask constructs one user message from ordered ContentPart values. TextContent,
-// BinaryContent, and supported URL parts can be concrete values or pointers inside that slice.
-// The model adapter maps roles and supported content to native fields. Unsupported input produces
-// an error; Gent does not convert a file into another input type.
-//
-// ExecutionContext freezes the initial task. Later request hooks and caller edits cannot change
-// that saved task. Compaction changes selected working history, never the original task. Put prior
-// conversation in working history when it should be eligible for compaction.
-//
-// Output.Instructions is optional guidance for caller composition. Configure requests native output
-// controls without changing messages. The agent does not insert system instructions, output tags,
-// or prompt templates. Use TimeProviderFunc, DefaultTimeProvider, or MockTimeProvider in caller
-// code
-// when a date-dependent task needs a custom clock or deterministic test data.
-//
-// # Output validation
-//
-// Output.Process receives complete ordered candidate content after native completion and tool
-// checks.
-// Local validation always runs, including when native schema enforcement was used. Built-in outputs
-// can then call an OutputCustomValidator[T] for application rules. Validators inspect the value;
-// transformations belong in a custom output processor with its own validation contract.
-//
-// OutputResult[T] exposes Accepted, Value, Content, and Steering. Accepted results have matching
-// value and delivery content and no steering. Expected rejection supplies useful steering with a
-// nil error. Operation errors stop execution. There is no answer-section detection or separate
-// Format method. A custom Loop[T] uses AcceptOutput to prepare its validated terminal result.
-//
-// The loop retains a rejected assistant candidate and native continuation, then appends steering.
-// That conversation group stays selected until the next main model request, including through
-// custom compaction. Further attempts use normal run limits. Incomplete native responses retain
-// evidence and retry, but never execute partial tool calls or enter the output processor. Native
-// refusal ends the run without correction.
-//
-// # Tools and tool chains
-//
-// Tools have typed input and output. DefineTool builds a tool from a function or bound method:
-//
-//	tool := gent.DefineTool("search", searchFunc).
-//	    Description("Search for information.").
-//	    Policy("Use the query supplied by the user.").MustBuild()
-//
-// ToolChain exposes native definitions, prepares a saved call plan, validates arguments, executes
-// steps, and supplies recovery decisions. Registry, SearchChain, and JsToolChainWrapper use the
-// same hooks and persistence contract. Tool outputs, media, policy, summaries, and recovery
-// guidance
-// remain structured. TextFormat only renders tool-result or summary sections when a chain needs
-// text; it does not parse model output or build the agent's starting prompt.
-//
-// Tool schemas use the shared schema package. Parameter fields are required unless explicitly
-// optional. Output inference also honors omitempty and omitzero. Native schemas do not replace
-// local validation. See Tool, ToolChain, and the toolchain package for full contracts.
-//
-// # Events and observers
-//
-// Mutable subscribers can intercept lifecycle, model, tool, and output-validation events. Use
-// BeforeModelCallSubscriber for request-owned dynamic context. Required output controls are checked
-// after hooks so a hook cannot silently remove the output contract.
-//
-// RecordedEventObserver sees accepted events after storage accepts them. This is the appropriate
-// boundary for durable trace or WebSocket delivery. Raw provider callbacks run before that barrier.
-// ExecutionContext.Events supplies owned local event snapshots for inspection.
-//
-// SubscribeAll streams provisional MetaContent and accepted Content as ordered content parts.
-// A provider stream can supply only provisional metadata and a response candidate. Final Content
-// is a complete snapshot after terminal saving. Replace the answer rather than append it; source
-// message IDs identify superseded previews. Child contexts retain separate final answers.
-// Deduplicate replay by RunId and EventNumber. StreamAccumulator keeps these channels separate.
-//
-// # Statistics and limits
-//
-// ExecutionStats counters propagate from children; gauges are local. Use StatKey.Self for a
-// per-context limit. An update that exceeds a limit records the event and cancels the context.
-//
-//	execCtx.SetLimits([]gent.Limit{
-//	    {Type: gent.LimitExactKey, Key: gent.SCIterations.Self(), MaxValue: 20},
-//	    {Type: gent.LimitExactKey, Key: gent.SCInputTokens, MaxValue: 100000},
-//	    {Type: gent.LimitKeyPrefix, Key: gent.SCToolCallsFor, MaxValue: 20},
+//	runner := executor.NewRunner(react.NewAgent(model), &gent.Config{
+//	    ToolChain: tools,
+//	    Recorder: recorder,
+//	    Limits: gent.DefaultLimits(),
 //	})
+//	execCtx, err := runner.NewExecutionContext(ctx, "support")
+//	if err != nil { return err }
+//	defer execCtx.Release()
+//	answer, result, err := runner.NewTurn(execCtx, &gent.Task{
+//	    Instructions: []*gent.ModelMessage{
+//	        gent.TextParts(gent.ChatMessageTypeSystem, "Use verified order facts."),
+//	    },
+//	    Messages: gent.NewTask(gent.TextPart("Where is order ORD-123?")).Messages,
+//	})
+//	if err != nil { return err }
+//	if result.Status == gent.ExecutionFinished &&
+//	    result.TerminationReason == gent.TerminationSuccess {
+//	    fmt.Println(answer)
+//	}
 //
-// SCOutputRejectedTotal counts rejected candidates. Separate local and custom counters describe
-// the validation stage. SCOutputCustomRejectedBy supports limits for named validators. Rejections
-// consume ordinary iterations and tokens; there is no separate output retry counter.
+// NewTurn and Continue return (T, *ExecutionResult, error). Busy and NoActiveTurn are explicit
+// statuses. A limit or Stop returns Paused with the unfinished turn. Success and refusal finish
+// the turn. Unexpected operation failures return zero T, nil result, and an error. Fix the cause,
+// restore accepted state, and Continue instead of resubmitting an accepted task.
 //
-// # History and recovery
+// Stop cancels the active attempt and saves a pause when possible; it does not wait. Release joins
+// owned resources and permanently disposes of the handle. The application routes Stop by current
+// RunId, TurnId, and AttemptId so an old browser command cannot stop a later attempt.
 //
-// ExecutionContext owns append-only evidence and an ordered active selection of HistoryEntry IDs.
-// AppendRecord and UpdateHistory keep observations and selection changes consistent. A compaction
-// strategy can retain all image-bearing entries or only the latest without rewriting originals.
-// Saved provider continuation retains native call IDs and opaque signed or encrypted fields.
+// # Prompts and output
 //
-// A RunRecorder accepts events and checkpoints atomically. Use CodecRegistry.Marshal and Unmarshal
-// for saved runs. The compact byte codec retains owned media, named types, and nil versus empty
-// slices. Register custom ValueCodec implementations before execution when a type needs them.
+// Task.Instructions supplies the effective system prefix. Nil inherits it, a non-nil slice replaces
+// it, and an empty slice clears it. Task.Messages contains conversation messages with at least one
+// user message and no system message. NewTask builds one user message from ordered ContentPart
+// values.
+// Task admission freezes its evidence. Generated corrections do not become user-authored input.
 //
-// Runner.Resume continues from the accepted checkpoint. A terminal restore returns the saved typed
-// result without another model call, image download, output process, or validator callback. The
-// output type, codec version, and configuration must match. Credentials are supplied again.
+// The caller decides whether to include Output.Instructions. Configure applies native controls;
+// local validation still runs. Output.Process receives selected answer-candidate content. Expected
+// rejection returns steering; an error stops the attempt. ReAct retains the native candidate and
+// correction until the next main request. Corrections use the ordinary configured limits.
 //
-// Custom loops identify executable behavior with a recovery version and implement CheckpointState
-// for mutable state. Custom LoopData, compaction components, and tool recovery use the same
-// explicit
-// contract. A saved tool-ready record does not prove an external effect completed. Tool.Recover
-// resolves an uncertain effect; an already saved result takes precedence over a recovery callback.
+// An accepted typed value and complete processed content are saved before the caller receives T
+// or a Subscriber receives accepted_answer. Its source IDs link transformed output to model
+// previews.
+// Restore and GetLastTurnResult do not process or publish a completed answer again.
 //
-// See docs/output.md, docs/models.md, and docs/history.md for examples and storage requirements.
+// # Persistence and recovery
+//
+// Recorder.Save stores complete SaveBatch values. Gent supplies a lazy capture callback for an
+// optional stable RunStateSnapshot. CodecRegistry.MarshalRunState and UnmarshalRunState preserve
+// the typed state and integrity checks. A captured RunStateSnapshot can be encoded after Save ends;
+// the capture callback itself is valid only during that Save call.
+//
+// Full batch replay and a RunStateSnapshot plus its accepted tail restore the same logical state
+// at the same EventSequenceNumber. This includes LoopData, history selection, counters, accepted
+// results, operation identities, and managed recovery evidence. It does not promise identical
+// future model output or undo external effects. A custom Next restarts at its entry point.
+//
+// RunState.Apply is compact execution replay. RunView.Apply reconstructs the full accepted archive
+// for inspection without models or tools. Compaction never deletes archived originals. Storage
+// owns transactions, exact-retry receipts, cursor checks, and writer fencing. A lost acknowledgment
+// must be reconciled before another writer continues. See Recorder and the history guide at
+// docs/content/storage/history.md.
+//
+// A Tool.Recover handler reports Completed, NotStarted, or Unresolved for an unfinished action.
+// Gent returns evidence through the original native call identity; it does not automatically
+// repeat the original action. Accepted reports and prepared responses are reused after restoration.
+// Managed JavaScript recovery returns inner-call evidence without restarting the script or its VM.
+//
+// # Observation and mutation
+//
+// Config.Subscribers registers typed, read-only event callbacks. Accepted delivery is the default;
+// Live delivery includes unsaved previews. AttemptId distinguishes provisional event positions that
+// can be reused after restoration. A failed or slow Subscriber stops independently of execution.
+// OnStop reports the delivery outcome. Browser transport and acknowledgments belong to the app.
+//
+// Config.Hooks supplies synchronous BeforeModelCall and BeforeToolCall callbacks. These can change
+// effective inputs before Gent freezes them. They cannot change saved input or operation identity.
+// An error blocks the dependent action. Hooks can repeat after interruption; use managed tools for
+// external actions that need recovery. trace.Sequencer implements Subscriber for display
+// projection.
+//
+// StreamChunk.Content and ContentChoice.Parts hold ordered assistant groups and tool-call parts.
+// AssistantContent classifies exposed reasoning, commentary, and answer candidates. Only Gent can
+// publish final_answer after acceptance. Opaque provider continuation stays separate from readable
+// content. A classification is not a portable provider wire field.
+//
+// # Configuration and limits
+//
+// An empty Config has no execution limits. DefaultLimits returns an explicit optional preset.
+// Supplying Limits replaces the rule set. LimitTurn uses the accepted turn baseline; LimitRun uses
+// cumulative counters. Continue and Restore preserve both. Recording and Subscriber bounds remain
+// active even when there are no execution-limit rules.
+//
+// Loop-specific prompts, models, and retry checks stay on the Loop. Shared tools, storage, Hooks,
+// Subscribers, limits, and compaction policy belong in Config. Use a fresh Runner and Restore to
+// change configuration. Compatible evolved code can continue saved runs without an old Runner
+// version. BasicLoopData is empty; custom data must capture and restore every added field.
+//
+// # Ownership
+//
+// Transferred values and borrowed getters are read-only. Copy only for independent mutable data or
+// a stable captured value. Successful Apply takes ownership of retained batch values; Ready Restore
+// transfers RunState to ExecutionContext. Rejected replay and failed Restore transfer no ownership.
+// See docs/content/operate/ownership.md, docs/content/agent/tools.md, and
+// docs/content/agent/outputs.md for component-specific contracts.
 package gent

@@ -2,7 +2,6 @@ package trace
 
 import (
 	"fmt"
-	"time"
 
 	"github.com/rickchristie/gent"
 )
@@ -18,34 +17,38 @@ func (s *Sequencer) project(
 	if recorded.RunId != s.runId {
 		return nil, gent.ErrWrongRun
 	}
-	value, err := registry.DecodeEvent(recorded)
+	value, err := registry.Clone(recorded.Payload)
 	if err != nil {
 		return nil, err
 	}
-	event := &Event{EventNumber: recorded.EventNumber, RunId: recorded.RunId, Ts: recorded.Ts,
-		Type: EventType(recorded.Type), EventName: recorded.EventName, ContextId: recorded.ContextId,
-		ParentContextId: recorded.ParentContextId, Iteration: recorded.Iteration,
-		AttemptId: recorded.AttemptId, ModelCallId: recorded.ModelCallId, ToolCallId: recorded.ToolCallId}
+	event := &Event{
+		EventSequenceNumber: recorded.EventSequenceNumber,
+		RunId:               recorded.RunId,
+		Ts:                  recorded.Ts,
+		Type:                EventType(recorded.Type),
+		EventName:           recorded.EventName,
+		ContextId:           recorded.ContextId,
+		Iteration:           recorded.Iteration,
+		TurnId:              recorded.TurnId,
+		AttemptId:           recorded.AttemptId,
+		ModelCallId:         recorded.ModelCallId,
+		ToolCallId:          recorded.ToolCallId,
+	}
 	if withBase, ok := value.(interface{ EventBase() *gent.BaseEvent }); ok {
 		base := withBase.EventBase()
-		event.Depth, event.Source = base.Depth, base.Source
+		event.Source = base.Source
 	}
 	payload := map[string]any{}
 	event.Payload = payload
 	switch saved := value.(type) {
 	case *gent.BeforeExecutionEvent:
-		event.Type = EventTypeContextStarted
-		if event.ParentContextId == "" && event.Depth == 0 {
-			event.Type = EventTypeExecutionStarted
-		}
+		event.Type = EventTypeExecutionStarted
 		payload["name"] = saved.Name
 	case *gent.AfterExecutionEvent:
-		event.Type = EventTypeContextFinished
-		if event.ParentContextId == "" && event.Depth == 0 {
-			event.Type = EventTypeExecutionFinished
-		}
+		event.Type = EventTypeExecutionFinished
 		event.Error = redactError(s.cfg.redactor, saved.Error)
-		result := &RunResult{TerminationReason: saved.TerminationReason, Error: event.Error}
+		result := &RunResult{TurnId: event.TurnId, TerminationReason: saved.TerminationReason,
+			Error: event.Error}
 		if s.cfg.IncludeRunOutput {
 			result.Output = jsonSafeValue(s.cfg.redactor.RedactRunOutput(saved.Output))
 		}
@@ -58,6 +61,9 @@ func (s *Sequencer) project(
 		payload["terminationReason"], payload["result"] = saved.TerminationReason, result
 		payload["status"] = runStatus(saved.TerminationReason, event.Error)
 		payload["durationMs"] = saved.Duration.Milliseconds()
+	case *gent.ExecutionResult:
+		payload["result"] = jsonSafeValue(saved)
+		payload["terminationReason"] = saved.TerminationReason
 	case *gent.BeforeIterationEvent:
 		event.Payload = nil
 	case *gent.AfterIterationEvent:
@@ -120,47 +126,37 @@ func (s *Sequencer) project(
 		if s.cfg.IncludeCommonPayload {
 			payload["data"] = jsonSafeValue(s.cfg.redactor.RedactCommonPayload(saved.EventName, saved.Data))
 		}
-		if saved.EventName != gent.EventNameChildSpawn && saved.EventName != gent.EventNameChildComplete {
-			break
-		}
-		data, _ := saved.Data.(map[string]any)
-		event.ContextId, _ = data["child_context_id"].(string)
-		event.ParentContextId, _ = data["parent_context_id"].(string)
-		event.Source, _ = data["child_source"].(string)
-		event.Depth = intFromAny(data["child_depth"])
-		childError, _ := data["error"].(error)
-		event.Error = redactError(s.cfg.redactor, childError)
-		event.Type = EventTypeContextStarted
-		if saved.EventName == gent.EventNameChildComplete {
-			event.Type = EventTypeContextFinished
-		}
-		payload = map[string]any{"name": data["child_name"], "parentContextId": event.ParentContextId,
-			"source": event.Source, "depth": event.Depth, "terminationReason": data["termination_reason"]}
-		if duration, ok := data["duration"].(time.Duration); ok {
-			payload["durationMs"] = duration.Milliseconds()
-		}
-		event.Payload = payload
-	case gent.HistoryChange:
+
+	case *gent.HistoryChange:
 		if s.cfg.IncludeStateChanges {
-			payload["data"] = jsonSafeValue(s.cfg.redactor.RedactStateChange(recorded.EventName, saved))
+			payload["data"] = jsonSafeValue(s.cfg.redactor.RedactStateChange(recorded.EventName, *saved))
 		}
-	case gent.StreamChunk:
-		if recorded.Type == "execution_content" {
-			saved.Content = redactedContent(s.cfg.redactor, saved.Content)
+	case *gent.StreamChunk:
+		// Display redaction can hide or replace every part. Keep the accepted item's identity
+		// separate from display content so a UI can still replace its linked previews.
+		if recorded.Type == "accepted_answer" {
+			for _, part := range saved.Content {
+				if item, ok := part.(*gent.AssistantContent); ok {
+					payload["messageId"] = item.MessageId
+					break
+				}
+			}
 		}
-		chunk := s.cfg.redactor.RedactChunk(saved)
-		event.Depth, event.Source = chunk.Depth, chunk.Source
-		event.StreamId, event.StreamTopicId = chunk.StreamId, chunk.StreamTopicId
-		event.Error = redactError(s.cfg.redactor, chunk.Err)
-		payload["streamId"], payload["streamTopicId"] = chunk.StreamId, chunk.StreamTopicId
-		payload["messageId"] = chunk.MessageId
+		chunk := s.cfg.redactor.RedactChunk(*saved)
+		if call := s.modelById[callKey(recorded.ModelCallId, recorded.AttemptId)]; call != nil {
+			event.StreamId, event.StreamTopicId = call.StreamId, call.StreamTopicId
+			event.Source = call.Source
+		}
+		payload["streamId"], payload["streamTopicId"] = event.StreamId, event.StreamTopicId
 		payload["sourceMessageIds"] = append([]string(nil), chunk.SourceMessageIds...)
-		if s.cfg.IncludeChunkText {
-			payload["metaContent"] = gent.CloneMetaContent(chunk.MetaContent)
-		}
-		if s.cfg.IncludeRunOutput && recorded.Type == "execution_content" {
+		if recorded.Type == "accepted_answer" {
+			if s.cfg.IncludeRunOutput {
+				payload["content"] = redactedContent(s.cfg.redactor, chunk.Content)
+			}
+		} else if s.cfg.IncludeChunkText {
 			payload["content"] = chunk.Content
 		}
+
 	default:
 		event.Payload = nil
 	}
@@ -175,10 +171,8 @@ func (s *Sequencer) applyEvent(event *Event) {
 	case EventTypeExecutionFinished:
 		s.applyContextFinished(event)
 		s.applyExecutionFinished(event)
-	case EventTypeContextStarted:
-		s.applyContextStarted(event)
-	case EventTypeContextFinished:
-		s.applyContextFinished(event)
+	case EventTypeExecutionPaused:
+		s.applyExecutionPaused(event)
 	case EventTypeIterationStarted:
 		s.applyIterationStarted(event)
 	case EventTypeIterationFinished:
@@ -187,8 +181,8 @@ func (s *Sequencer) applyEvent(event *Event) {
 		s.applyModelCallStarted(event)
 	case EventTypeModelCallFinished:
 		s.applyModelCallFinished(event)
-	case EventTypeExecutionContent:
-		s.applyExecutionContent(event)
+	case EventTypeAcceptedAnswer:
+		s.applyAcceptedAnswer(event)
 	case EventTypeModelStreamChunk:
 		s.applyModelChunk(event)
 	case EventTypeToolCallStarted:

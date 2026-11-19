@@ -92,12 +92,12 @@ func TestJsonOutputPointerValidation(t *testing.T) {
 }
 
 func jsonCandidate[T any](value string) func(*gent.ExecutionContext) (any, error) {
-	return func(ctx *gent.ExecutionContext) (any, error) {
+	return func(execCtx *gent.ExecutionContext) (any, error) {
 		out, err := output.NewJsonOutput[T]()
 		if err != nil {
 			return nil, err
 		}
-		return out.Process(ctx, text(value))
+		return out.Process(execCtx, text(value))
 	}
 }
 

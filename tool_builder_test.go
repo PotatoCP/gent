@@ -140,7 +140,9 @@ func TestDefineToolBuildErrors(t *testing.T) {
 func TestDefineToolEnumValues(t *testing.T) {
 	type status string
 	type code int
+	// shipped is the string enum fixture for a completed shipment.
 	const shipped status = "shipped"
+	// invalid is a named numeric input used to test rejection, not an allowed status value.
 	const invalid code = 1
 	type orderInput struct {
 		Status status `json:"status"`
@@ -196,6 +198,7 @@ func TestDefineToolEnumValues(t *testing.T) {
 
 func TestDefineToolExactNumbers(t *testing.T) {
 	type orderID uint64
+	// id checks exact numeric identity above JavaScript's safe integer range; it is not an enum.
 	const id orderID = 9007199254740993
 	type record struct {
 		ID orderID `json:"id"`
@@ -336,13 +339,28 @@ func TestDefineToolDispatch(t *testing.T) {
 		return capturedToolResponse("shipped", nil)
 	}).Parameters(schema.Field("order_id").MinLength(1), schema.Field("limit").Optional()).MustBuild()
 	chain := toolchain.New().RegisterTool(tool)
-	ctx := gent.NewExecutionContext(context.Background(), "builder", gent.NewBasicLoopData(nil))
-	defer ctx.Release()
-	plan, err := chain.PrepareCalls(ctx, []*gent.ModelToolCallRequest{{ID: "p", Type: "function",
-		FunctionCall: &gent.FunctionCall{Name: "lookup", Arguments: `{"order_id":"O1"}`}}})
+	loop := &contentLoopValue{
+		next: func(
+			execCtx *gent.ExecutionContext,
+		) (
+			*gent.AgentLoopResult,
+			error,
+		) {
+			plan, err := chain.PrepareCalls(execCtx, []*gent.ModelToolCallRequest{{ID: "p", Type: "function",
+				FunctionCall: &gent.FunctionCall{Name: "lookup", Arguments: `{"order_id":"O1"}`}}})
+			if err != nil {
+				return nil, err
+			}
+			record, err := chain.ExecuteNext(execCtx, plan, format.NewXML())
+			if err != nil {
+				return nil, err
+			}
+			return acceptRootOutput(execCtx, gent.ContentTextData(record.Response().Parts()))
+		},
+	}
+	runner, execCtx := newTestExecution(t, context.Background(), loop, &gent.Config{ToolChain: chain})
+	answer, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Look up O1.")))
 	assert.NoError(t, err)
-	record, err := chain.ExecuteNext(ctx, plan, format.NewXML())
-	assert.NoError(t, err)
-	assert.Equal(t, "shipped", gent.ContentTextData(record.Response().Parts()))
+	assert.Equal(t, "shipped", answer)
 	assert.Equal(t, 1, calls)
 }

@@ -1,7 +1,7 @@
 package compaction_test
 
 import (
-	"context"
+	"fmt"
 	"testing"
 
 	"github.com/rickchristie/gent"
@@ -14,8 +14,9 @@ import (
 func TestSummarization_RequiresCompletedSummary(t *testing.T) {
 	type input struct{ choice *gent.ContentChoice }
 	type expected struct {
-		summary string
-		err     string
+		summary      string
+		err          string
+		modelFailure bool
 	}
 	type testCase struct {
 		name     string
@@ -23,68 +24,114 @@ func TestSummarization_RequiresCompletedSummary(t *testing.T) {
 		expected expected
 	}
 	cases := []testCase{
-		{"completed summary", input{&gent.ContentChoice{
-			CandidateContent: []gent.ContentPart{
-				gent.TextContent{Text: "The order is paid."},
-			},
-			Completion: gent.ModelCompletion{
-				Status:         gent.ModelStatusAnswer,
-				ProviderReason: "stop",
-			},
-			MetaContent: []*gent.MetaContent{
-				{
-					Type:    gent.MetaContentReasoning,
-					Content: []gent.ContentPart{gent.TextContent{Text: "Check payment."}},
+
+		{
+			"completed summary",
+			input{
+				&gent.ContentChoice{
+
+					Completion: gent.ModelCompletion{
+
+						Status:         gent.ModelStatusAnswer,
+						ProviderReason: "stop",
+					},
+					CandidateSource: &gent.ContentSource{
+						MessageIds: []string{
+							"answer",
+						},
+					},
+					Parts: []gent.ContentPart{
+						&gent.AssistantContent{
+
+							Type:      gent.AssistantContentReasoning,
+							MessageId: "reason",
+							Content:   []gent.ContentPart{gent.TextContent{Text: "Check payment."}},
+						},
+						&gent.AssistantContent{
+							Type: gent.AssistantContentFinalAnswerCandidate, MessageId: "answer",
+							Content: []gent.ContentPart{gent.TextContent{Text: "The order is paid."}},
+						},
+					},
 				},
-				{
-					Type:    gent.MetaContentIntermediary,
-					Content: []gent.ContentPart{gent.TextContent{Text: "The order is paid."}},
+			},
+			expected{summary: `<prior_work_summary>
+The order is paid.
+</prior_work_summary>`},
+		},
+		{
+			"custom adapter without stop reason",
+			input{
+				&gent.ContentChoice{
+					Completion: gent.ModelCompletion{
+
+						Status: gent.ModelStatusAnswer,
+					},
+					CandidateSource: &gent.ContentSource{
+						MessageIds: []string{
+							"answer",
+						},
+					},
+					Parts: []gent.ContentPart{
+						&gent.AssistantContent{
+							Type:      gent.AssistantContentFinalAnswerCandidate,
+							MessageId: "answer",
+							Content: []gent.ContentPart{
+								gent.TextContent{
+									Text: "The order is paid.",
+								},
+							},
+						},
+					},
 				},
 			},
-		}}, expected{summary: `<prior_work_summary>
+			expected{summary: `<prior_work_summary>
 The order is paid.
-</prior_work_summary>`}},
-		{"custom adapter without stop reason",
-			input{&gent.ContentChoice{Completion: gent.ModelCompletion{
-				Status: gent.ModelStatusAnswer,
-			},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: "The order is paid."}},
-			}}, expected{summary: `<prior_work_summary>
-The order is paid.
-</prior_work_summary>`}},
+</prior_work_summary>`},
+		},
 		{"commentary only",
 			input{&gent.ContentChoice{Completion: gent.ModelCompletion{
 				Status:         gent.ModelStatusAnswer,
 				ProviderReason: "stop",
+			}, Parts: []gent.ContentPart{&gent.AssistantContent{
+				Type: gent.AssistantContentCommentary, MessageId: "comment",
+				Content: []gent.ContentPart{gent.TextContent{Text: "I will summarize the order."}},
 			},
-				MetaContent: []*gent.MetaContent{
-					{
-						Type:    gent.MetaContentCommentary,
-						Content: []gent.ContentPart{gent.TextContent{Text: "I will summarize the order."}},
-					},
-				},
+			},
 			}}, expected{err: "summarization model returned no summary text"}},
 		{"reasoning only",
 			input{&gent.ContentChoice{Completion: gent.ModelCompletion{
 				Status:         gent.ModelStatusAnswer,
 				ProviderReason: "stop",
+			}, Parts: []gent.ContentPart{&gent.AssistantContent{
+				Type: gent.AssistantContentReasoning, MessageId: "reason",
+				Content: []gent.ContentPart{gent.TextContent{Text: "Check payment."}},
 			},
-				MetaContent: []*gent.MetaContent{
-					{
-						Type:    gent.MetaContentReasoning,
-						Content: []gent.ContentPart{gent.TextContent{Text: "Check payment."}},
+			},
+			}}, expected{err: "summarization model returned no summary text"}},
+		{
+			"unknown metadata only",
+			input{
+				&gent.ContentChoice{
+					Completion: gent.ModelCompletion{
+
+						Status:         gent.ModelStatusAnswer,
+						ProviderReason: "stop",
+					},
+					Parts: []gent.ContentPart{
+						&gent.AssistantContent{
+							Type:      "status",
+							MessageId: "status",
+							Content: []gent.ContentPart{
+								gent.TextContent{
+									Text: "Preparing summary.",
+								},
+							},
+						},
 					},
 				},
-			}}, expected{err: "summarization model returned no summary text"}},
-		{"unknown metadata only",
-			input{&gent.ContentChoice{Completion: gent.ModelCompletion{
-				Status:         gent.ModelStatusAnswer,
-				ProviderReason: "stop",
 			},
-				MetaContent: []*gent.MetaContent{
-					{Type: "status", Content: []gent.ContentPart{gent.TextContent{Text: "Preparing summary."}}},
-				},
-			}}, expected{err: "summarization model returned no summary text"}},
+			expected{err: "summarization model returned no summary text"},
+		},
 		{"empty candidate",
 			input{
 				&gent.ContentChoice{
@@ -92,86 +139,250 @@ The order is paid.
 				},
 			},
 			expected{err: "summarization model returned no summary text"}},
-		{"blank candidate",
-			input{&gent.ContentChoice{Completion: gent.ModelCompletion{
-				Status:         gent.ModelStatusAnswer,
-				ProviderReason: "stop",
+		{
+			"blank candidate",
+			input{
+				&gent.ContentChoice{
+					Completion: gent.ModelCompletion{
+
+						Status:         gent.ModelStatusAnswer,
+						ProviderReason: "stop",
+					},
+					CandidateSource: &gent.ContentSource{
+						MessageIds: []string{
+							"answer",
+						},
+					},
+					Parts: []gent.ContentPart{
+						&gent.AssistantContent{
+							Type:      gent.AssistantContentFinalAnswerCandidate,
+							MessageId: "answer",
+							Content: []gent.ContentPart{
+								gent.TextContent{
+									Text: `
+	 `,
+								},
+							},
+						},
+					},
+				},
 			},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: `
-	 `}}}}, expected{err: "summarization model returned no summary text"}},
-		{"truncated summary", input{&gent.ContentChoice{
-			CandidateContent: []gent.ContentPart{
-				gent.TextContent{Text: "The order is"},
+			expected{err: "summarization model returned no summary text"},
+		},
+		{
+			"truncated summary",
+			input{
+				&gent.ContentChoice{
+
+					Completion: gent.ModelCompletion{
+
+						Status:         gent.ModelStatusIncomplete,
+						ProviderReason: "max_output_tokens",
+					},
+					CandidateSource: &gent.ContentSource{
+						MessageIds: []string{
+							"answer",
+						},
+					},
+					Parts: []gent.ContentPart{
+						&gent.AssistantContent{
+							Type:      gent.AssistantContentFinalAnswerCandidate,
+							MessageId: "answer",
+							Content: []gent.ContentPart{
+
+								gent.TextContent{Text: "The order is"},
+							},
+						},
+					},
+				},
 			},
-			Completion: gent.ModelCompletion{
-				Status:         gent.ModelStatusIncomplete,
-				ProviderReason: "max_output_tokens",
+			expected{err: "summarization model returned incomplete instead of a completed summary"},
+		},
+		{
+			"tool request with text",
+			input{
+				&gent.ContentChoice{
+
+					Completion: gent.ModelCompletion{
+
+						Status:         gent.ModelStatusToolCalls,
+						ProviderReason: "tool_calls",
+					},
+					CandidateSource: &gent.ContentSource{
+						MessageIds: []string{
+							"answer",
+						},
+					},
+					Parts: append(
+						[]gent.ContentPart{
+							&gent.AssistantContent{
+								Type:      gent.AssistantContentFinalAnswerCandidate,
+								MessageId: "answer",
+								Content: []gent.ContentPart{
+
+									gent.TextContent{Text: "Check payment first."},
+								},
+							},
+						},
+						[]gent.ContentPart{&gent.ModelToolCallRequest{ID: "call-1", Type: "function",
+							FunctionCall: &gent.FunctionCall{Name: "lookup", Arguments: `{}`}}}...,
+					),
+				},
 			},
-		}}, expected{
-			err: "summarization model returned incomplete instead of a completed summary"}},
-		{"tool request with text", input{&gent.ContentChoice{
-			CandidateContent: []gent.ContentPart{
-				gent.TextContent{Text: "Check payment first."},
+			expected{err: "summarization model returned tool_calls instead of a completed summary"},
+		},
+		{
+			"continuation with text",
+			input{
+				&gent.ContentChoice{
+
+					Continuation: &gent.ProviderContinuation{Provider: "fixture"},
+					Completion: gent.ModelCompletion{
+
+						Status:         gent.ModelStatusContinue,
+						ProviderReason: "pause_turn",
+					},
+					CandidateSource: &gent.ContentSource{
+						MessageIds: []string{
+							"answer",
+						},
+					},
+					Parts: []gent.ContentPart{
+						&gent.AssistantContent{
+							Type:      gent.AssistantContentFinalAnswerCandidate,
+							MessageId: "answer",
+							Content: []gent.ContentPart{
+
+								gent.TextContent{Text: "The order is"},
+							},
+						},
+					},
+				},
 			},
-			Completion: gent.ModelCompletion{
-				Status:         gent.ModelStatusToolCalls,
-				ProviderReason: "tool_calls",
+			expected{err: "summarization model returned continue instead of a completed summary"},
+		},
+		{
+			"unknown completion state",
+			input{
+				&gent.ContentChoice{
+
+					Completion: gent.ModelCompletion{
+
+						Status:         gent.ModelStatusFailed,
+						ProviderReason: "unknown",
+					},
+					CandidateSource: &gent.ContentSource{
+						MessageIds: []string{
+							"answer",
+						},
+					},
+					Parts: []gent.ContentPart{
+						&gent.AssistantContent{
+							Type:      gent.AssistantContentFinalAnswerCandidate,
+							MessageId: "answer",
+							Content: []gent.ContentPart{
+
+								gent.TextContent{Text: "The order is paid."},
+							},
+						},
+					},
+				},
 			},
-			ToolCalls: []*gent.ModelToolCallRequest{{ID: "call-1", Type: "function",
-				FunctionCall: &gent.FunctionCall{Name: "lookup", Arguments: `{}`}}},
-		}}, expected{err: "summarization model returned tool_calls instead of a completed summary"}},
-		{"continuation with text", input{&gent.ContentChoice{
-			Continuation: &gent.ProviderContinuation{Provider: "fixture"},
-			CandidateContent: []gent.ContentPart{
-				gent.TextContent{Text: "The order is"},
+			expected{err: "summarization model returned failed instead of a completed summary"},
+		},
+		{
+			"answer with tool calls",
+			input{
+				&gent.ContentChoice{
+
+					Completion: gent.ModelCompletion{
+						Status: gent.ModelStatusAnswer,
+					},
+					CandidateSource: &gent.ContentSource{
+						MessageIds: []string{
+							"answer",
+						},
+					},
+					Parts: append(
+						[]gent.ContentPart{
+							&gent.AssistantContent{
+								Type:      gent.AssistantContentFinalAnswerCandidate,
+								MessageId: "answer",
+								Content: []gent.ContentPart{
+									gent.TextContent{
+										Text: "Check payment first.",
+									},
+								},
+							},
+						},
+						[]gent.ContentPart{
+							&gent.ModelToolCallRequest{
+								ID:           "call-1",
+								Type:         "function",
+								FunctionCall: &gent.FunctionCall{Name: "lookup", Arguments: `{}`},
+							},
+						}...,
+					),
+				},
 			},
-			Completion: gent.ModelCompletion{
-				Status:         gent.ModelStatusContinue,
-				ProviderReason: "pause_turn",
+			expected{modelFailure: true, err: "gent: answer completion contains tool calls"},
+		},
+		{
+			"answer with refusal data",
+			input{
+				&gent.ContentChoice{
+
+					Completion: gent.ModelCompletion{
+						Status: gent.ModelStatusAnswer,
+						Refusal: &gent.ModelRefusal{
+							Code: "blocked",
+						},
+					},
+					CandidateSource: &gent.ContentSource{
+						MessageIds: []string{
+							"answer",
+						},
+					},
+					Parts: []gent.ContentPart{
+						&gent.AssistantContent{
+							Type:      gent.AssistantContentFinalAnswerCandidate,
+							MessageId: "answer",
+							Content: []gent.ContentPart{
+								gent.TextContent{
+									Text: "Check payment first.",
+								},
+							},
+						},
+					},
+				},
 			},
-		}}, expected{err: "summarization model returned continue instead of a completed summary"}},
-		{"unknown completion state", input{&gent.ContentChoice{
-			CandidateContent: []gent.ContentPart{
-				gent.TextContent{Text: "The order is paid."},
-			},
-			Completion: gent.ModelCompletion{
-				Status:         gent.ModelStatusFailed,
-				ProviderReason: "unknown",
-			},
-		}}, expected{err: "summarization model returned failed instead of a completed summary"}},
-		{"answer with tool calls", input{&gent.ContentChoice{
-			Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-			CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Check payment first."}},
-			ToolCalls: []*gent.ModelToolCallRequest{{ID: "call-1", Type: "function",
-				FunctionCall: &gent.FunctionCall{Name: "lookup", Arguments: `{}`}}},
-		}}, expected{err: "summarization model completion: gent: answer completion contains tool calls"}},
-		{"answer with refusal data", input{&gent.ContentChoice{
-			Completion: gent.ModelCompletion{Status: gent.ModelStatusAnswer,
-				Refusal: &gent.ModelRefusal{Code: "blocked"}},
-			CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Check payment first."}},
-		}}, expected{err: `summarization model completion: ` +
-			`gent: completion "answer" has inconsistent refusal data`}},
+			expected{modelFailure: true, err: `gent: completion "answer" has inconsistent refusal data`},
+		},
 		{"invalid custom state", input{&gent.ContentChoice{
 			Completion: gent.ModelCompletion{Status: "custom"},
-		}}, expected{err: `summarization model completion: gent: unknown model completion "custom"`}},
+		}}, expected{modelFailure: true, err: `gent: unknown model completion "custom"`}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := gent.NewExecutionContext(context.Background(), "summary",
-				gent.NewBasicLoopData(nil))
-			defer ctx.Release()
-			if !assert.NoError(t, ctx.AppendRecord(&gent.HistoryEntry{
+			execCtx := tt.NewContext(t, &gent.Config{})
+			defer execCtx.Release()
+			if !assert.NoError(t, execCtx.AppendRecord(&gent.HistoryEntry{
 				Messages: []*gent.MessageContent{{Role: gent.ChatMessageTypeHuman,
 					Parts: []gent.ContentPart{gent.TextContent{Text: "The order is paid."}}}},
 			}, true)) {
 				return
 			}
-			original, err := ctx.Scratchpad()
+			// This unit test inspects an unsaved proposal. It does not create an execution savepoint.
+			original, err := execCtx.Scratchpad()
 			if !assert.NoError(t, err) {
 				return
 			}
-			draft := ctx.ContextDraft()
-			selection, err := ctx.CompactionInput()
+			originalBytes, err := execCtx.Codecs().Marshal(original)
+			if !assert.NoError(t, err) {
+				return
+			}
+			draft := execCtx.ContextDraft()
+			selection, err := execCtx.CompactionInput()
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -179,32 +390,38 @@ The order is paid.
 				Choices: []*gent.ContentChoice{test.input.choice},
 			})
 			strategy := compaction.NewSummarization(model, format.NewXML())
-			update, err := strategy.Compact(ctx, selection)
+			update, err := strategy.Compact(execCtx, selection)
 			if test.expected.err != "" {
-				assert.EqualError(t, err, test.expected.err)
-				assert.Equal(t, gent.HistoryUpdate{}, update)
-				active, readErr := ctx.Scratchpad()
+				wantError := test.expected.err
+				if test.expected.modelFailure {
+					callId := execCtx.ContextId() + ":model:1"
+					wantError = fmt.Sprintf("summarization model call: gent: model stream/response "+
+						"for call %q in run %q turn %q context %q: gent: model call %q choice 0: %s",
+						callId, execCtx.RunId(), execCtx.TurnId(), execCtx.ContextId(), callId, wantError)
+				}
+				assert.EqualError(t, err, wantError)
+				assert.Nil(t, update)
+				active, readErr := execCtx.Scratchpad()
 				assert.NoError(t, readErr)
 				assert.Equal(t, original, active)
-				assert.Equal(t, draft, ctx.ContextDraft())
+				assert.Equal(t, draft, execCtx.ContextDraft())
 				return
 			}
-			if !assert.NoError(t, err) || !assert.NoError(t, ctx.UpdateHistory(update)) {
+			if !assert.NoError(t, err) || !assert.NoError(t, execCtx.UpdateHistory(*update)) {
 				return
 			}
-			active, err := ctx.Scratchpad()
+			active, err := execCtx.Scratchpad()
 			if !assert.NoError(t, err) || !assert.Len(t, active, 1) {
 				return
 			}
 			assert.Equal(t, []*gent.MessageContent{{Role: gent.ChatMessageTypeAI,
 				Parts: []gent.ContentPart{gent.TextContent{Text: test.expected.summary}}}},
 				active[0].Messages)
-			assert.Equal(t, update.Active, ctx.ContextDraft().Active)
-			for _, entry := range original {
-				saved, found := ctx.History().Entry(entry.Id)
-				assert.True(t, found)
-				assert.Equal(t, entry, saved)
-			}
+			assert.Equal(t, update.Active, execCtx.ContextDraft().Active)
+			// Compact proposes a selection; it must not mutate the borrowed source records.
+			afterBytes, err := execCtx.Codecs().Marshal(original)
+			assert.NoError(t, err)
+			assert.Equal(t, originalBytes, afterBytes)
 		})
 	}
 }

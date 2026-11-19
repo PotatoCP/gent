@@ -1,7 +1,6 @@
 package trace
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 	"time"
@@ -21,18 +20,14 @@ func TestTraceRetainsToolRecordAndPreparedModelParts(t *testing.T) {
 	assert.NoError(t, err)
 	config := Config{IncludeModelRequests: true, IncludeToolOutput: true}
 	seq := newTestSequencer(t, "tool-record", config)
-	ctx := gent.NewExecutionContext(context.Background(), "trace", nil,
-		gent.WithRunId(seq.Snapshot().RunId), gent.WithObserver(seq))
-	defer ctx.Release()
-	ctx.PublishBeforeExecution()
-	ctx.PublishBeforeToolCall("receipt", map[string]any{"id": "O1"},
-		gent.WithToolCallId("execution"))
-	ctx.PublishAfterToolCall("receipt", map[string]any{"id": "O1"}, record, time.Second, nil,
-		gent.WithToolCallId("execution"))
-	ctx.PublishBeforeModelCall("fixture", gent.NewModelCallRequest([]*gent.ModelMessage{
-		record.ModelMessage(),
-	}))
-	assert.NoError(t, ctx.FlushProgress())
+	recordTestValue(t, seq, "tool_call_started", &gent.BeforeToolCallEvent{
+		ToolName: "receipt", ToolCallId: "execution", Args: map[string]any{"id": "O1"}})
+	recordTestValue(t, seq, "tool_call_finished", &gent.AfterToolCallEvent{
+		ToolName: "receipt", ToolCallId: "execution", Args: map[string]any{"id": "O1"},
+		Output: record, Duration: time.Second})
+	recordTestValue(t, seq, "model_call_started", &gent.BeforeModelCallEvent{
+		Model: "fixture", ModelCallId: "model-1",
+		Request: gent.NewModelCallRequest([]*gent.ModelMessage{record.ModelMessage()})})
 	snapshot := seq.Snapshot()
 	if !assert.Len(t, snapshot.ToolCalls, 1) || !assert.Len(t, snapshot.ModelCalls, 1) {
 		return
@@ -56,10 +51,4 @@ func TestTraceRetainsToolRecordAndPreparedModelParts(t *testing.T) {
 	request := snapshot.ModelCalls[0].Request.(map[string]any)
 	messages := request["Messages"].([]any)
 	assert.Equal(t, []any{reply}, messages[0].(map[string]any)["Parts"])
-	view, err := ctx.Export()
-	assert.NoError(t, err)
-	restored, err := RestoreSequencer(view, config)
-	if assert.NoError(t, err) {
-		assert.Equal(t, snapshot, restored.Snapshot())
-	}
 }

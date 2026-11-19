@@ -1,18 +1,13 @@
 package react
 
-import genttest "github.com/rickchristie/gent/internal/tt"
-
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/rickchristie/gent"
 	agentutil "github.com/rickchristie/gent/agents"
-	"github.com/rickchristie/gent/events"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/output"
 	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
@@ -28,19 +23,6 @@ func nativeTestResponse(choice *gent.ContentChoice) *gent.ModelCallResponse {
 		return &gent.ModelCallResponse{}
 	}
 	return &gent.ModelCallResponse{Choices: []*gent.ContentChoice{choice}}
-}
-
-func nativeTestSource(ctx *gent.ExecutionContext, call int) *gent.ContentSource {
-	id := fmt.Sprintf("%s:model:%d", ctx.ContextId(), call)
-	var ids []string
-	for _, event := range ctx.Events() {
-		if after, ok := event.(*gent.AfterModelCallEvent); ok && after.ModelCallId == id {
-			ids = after.Response.Choices[0].CandidateSource.MessageIds
-		}
-	}
-	return &gent.ContentSource{ModelCallId: id,
-		StreamId: fmt.Sprintf("iter-%d", ctx.Iteration()), StreamTopicId: "llm-response",
-		MessageIds: ids}
 }
 
 // This adapter has no display chunks. Its completed response still needs the same size and
@@ -80,36 +62,42 @@ func TestNativeAgent_RequestAndToolHistory(t *testing.T) {
 		}).Description("Read a record").ParameterSchema(nil).MustBuild()}
 	calls := []*gent.ModelToolCallRequest{nativeTestCall("call-a", "lookup", `{"id":7}`),
 		nativeTestCall("call-b", "lookup", `{"id":8}`)}
-	model := newMockModel(nativeTestResponse(&gent.ContentChoice{Completion: gent.ModelCompletion{
-		Status: gent.ModelStatusToolCalls,
-	},
-		CandidateContent: []gent.ContentPart{
-			gent.TextContent{Text: "I will check."},
-		},
-		ToolCalls: calls, MetaContent: []*gent.MetaContent{
-			{
-				Type: gent.MetaContentReasoning,
-				Content: []gent.ContentPart{
-					gent.TextContent{Text: "private reasoning"},
-				},
-				MessageId: "reasoning",
-			},
-		}}),
-		nativeTestResponse(&gent.ContentChoice{
-			Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-			CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Done."}},
-		}))
-	agent := NewAgent(model).RegisterTool(tool).
-		WithCallOptions(gent.WithTemperature(0.4), gent.WithTopP(0.9))
+	parts := []gent.ContentPart{
+		&gent.AssistantContent{Type: gent.AssistantContentReasoning, MessageId: "reasoning",
+			Content: []gent.ContentPart{gent.TextPart("private reasoning")}},
+		&gent.AssistantContent{Type: gent.AssistantContentIntermediary, MessageId: "commentary",
+			Content: []gent.ContentPart{gent.TextPart("I will check.")}},
+		calls[0], calls[1],
+	}
+	model := newMockModel(nativeTestResponse(&gent.ContentChoice{
+		Completion: gent.ModelCompletion{Status: gent.ModelStatusToolCalls}, Parts: parts,
+	}), nativeTestResponse(answerChoice("Done.")))
+	agent := NewAgent(model).WithCallOptions(gent.WithTemperature(0.4), gent.WithTopP(0.9))
+	recorder := &testRecorder{}
+	runner, execCtx := newTestExecution(t, agent, &gent.Config{
+		ToolChain: toolchain.New().RegisterTool(tool), Recorder: recorder,
+	})
 	system := "Support agent. Read only."
-	ctx := newTestExecCtx(gent.NewBasicLoopData(&gent.Task{Messages: []*gent.ModelMessage{
-		gent.TextParts(gent.ChatMessageTypeSystem, system),
-		gent.TextParts(gent.ChatMessageTypeHuman, "Read two records."),
-	}}))
-	result, err := agent.Next(ctx)
+	value, result, err := runner.NewTurn(
+		execCtx,
+		&gent.Task{
+
+			Instructions: []*gent.ModelMessage{gent.TextParts(gent.ChatMessageTypeSystem, system)},
+			Messages: []*gent.ModelMessage{
+				gent.TextParts(
+					gent.ChatMessageTypeHuman,
+					"Read two records.",
+				),
+			},
+		},
+	)
 	if !assert.NoError(t, err) {
 		return
 	}
+	assert.Equal(t, "Done.", value)
+	assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished, TurnId: execCtx.TurnId(),
+		TerminationReason: gent.TerminationSuccess,
+		Output:            []gent.ContentPart{gent.TextPart("Done.")}}, result)
 	makeReply := func(id string) *gent.ModelToolCallResponse {
 		parts := []gent.ContentPart{gent.TextPart("record"),
 			gent.ImageURLPart("https://example.com/record.png"), gent.TextPart("Use the image.")}
@@ -117,25 +105,16 @@ func TestNativeAgent_RequestAndToolHistory(t *testing.T) {
 		assert.NoError(t, err)
 		return reply
 	}
-	assert.Equal(t, &gent.AgentLoopResult{Action: gent.LAContinue}, result)
-	result, err = agent.Next(ctx)
-	if !assert.NoError(t, err) {
-		return
-	}
-	assert.Equal(t, &gent.AgentLoopResult{TerminationReason: gent.TerminationSuccess,
-		Action:        gent.LATerminate,
-		Result:        []gent.ContentPart{gent.TextContent{Text: "Done."}},
-		ContentSource: nativeTestSource(ctx, 2),
-		Value: genttest.Value(gent.ContentText([]gent.ContentPart{
-			gent.TextContent{Text: "Done."},
-		})),
-	}, result)
 
 	initial := []*gent.ModelMessage{gent.TextParts(gent.ChatMessageTypeSystem, system),
 		gent.TextParts(gent.ChatMessageTypeHuman, "Read two records.")}
+	reasoning := *parts[0].(*gent.AssistantContent)
+	commentary := *parts[1].(*gent.AssistantContent)
+	reasoning.MessageId = savedAssistantId(t, recorder, 0, 0)
+	commentary.MessageId = savedAssistantId(t, recorder, 0, 1)
 	want := append(append([]*gent.ModelMessage(nil), initial...),
-		&gent.ModelMessage{Role: gent.ChatMessageTypeAI, Parts: []gent.ContentPart{
-			gent.TextContent{Text: "I will check."}, calls[0], calls[1]}},
+		&gent.ModelMessage{Role: gent.ChatMessageTypeAI,
+			Parts: []gent.ContentPart{&reasoning, &commentary, calls[0], calls[1]}},
 		&gent.ModelMessage{Role: gent.ChatMessageTypeTool, Parts: []gent.ContentPart{
 			makeReply("call-a")}},
 		&gent.ModelMessage{Role: gent.ChatMessageTypeTool, Parts: []gent.ContentPart{
@@ -154,10 +133,8 @@ func TestNativeAgent_RequestAndToolHistory(t *testing.T) {
 		assert.Equal(t, wantOptions, gent.NewModelCallRequest(nil, options...).Options)
 	}
 	assert.Equal(t, []map[string]any{{"id": json.Number("7")}, {"id": json.Number("8")}}, inputs)
-	assert.Equal(t, int64(2), ctx.Stats().GetCounter(gent.SCToolCalls))
-	bundle, err := ctx.Export()
-	assert.NoError(t, err)
-	assert.NoError(t, gent.ValidateBundle(bundle, ctx.Codecs()))
+	assert.Equal(t, int64(2), execCtx.Stats().GetCounter(gent.SCToolCalls))
+	assert.NoError(t, gent.ValidateBundle(*recorder.view, execCtx.Codecs()))
 }
 
 func TestNativeAgent_RetryInvalidCalls(t *testing.T) {
@@ -177,8 +154,7 @@ func TestNativeAgent_RetryInvalidCalls(t *testing.T) {
 			input{&gent.ContentChoice{Completion: gent.ModelCompletion{
 				Status:         gent.ModelStatusIncomplete,
 				ProviderReason: "length",
-			},
-				ToolCalls: []*gent.ModelToolCallRequest{nativeTestCall("a", "lookup", "{}")}}},
+			}, Parts: []gent.ContentPart{nativeTestCall("a", "lookup", "{}")}}},
 			expected{"The response was incomplete. Use a shorter answer or fewer tool calls.", 0}},
 		{"empty",
 			input{
@@ -188,16 +164,13 @@ func TestNativeAgent_RetryInvalidCalls(t *testing.T) {
 		{"duplicate IDs",
 			input{&gent.ContentChoice{Completion: gent.ModelCompletion{
 				Status: gent.ModelStatusToolCalls,
-			},
-				ToolCalls: []*gent.ModelToolCallRequest{
-					nativeTestCall("a", "lookup", "{}"), nativeTestCall("a", "lookup", "{}")}}},
+			}, Parts: []gent.ContentPart{
+				nativeTestCall("a", "lookup", "{}"), nativeTestCall("a", "lookup", "{}")}}},
 			expected{`duplicate model tool call ID "a"`, 1}},
 		{"bad JSON",
 			input{&gent.ContentChoice{Completion: gent.ModelCompletion{
 				Status: gent.ModelStatusToolCalls,
-			},
-				ToolCalls: []*gent.ModelToolCallRequest{
-					nativeTestCall("a", "lookup", "{")}}},
+			}, Parts: []gent.ContentPart{nativeTestCall("a", "lookup", "{")}}},
 			expected{gent.DefaultSteeringMessages().InvalidArguments + `
 Invalid arguments for tool "lookup".
 args: expected a complete JSON object with values compatible with the input schema.
@@ -209,34 +182,23 @@ Expected input schema:
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			model := newMockModel(nativeTestResponse(test.input.choice),
-				nativeTestResponse(&gent.ContentChoice{
-					Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-					CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Done."}},
-				}))
-			agent := NewAgent(model).RegisterTool(gent.DefineTool("lookup",
+				nativeTestResponse(answerChoice("Done.")))
+			chain := toolchain.New().RegisterTool(gent.DefineTool("lookup",
 				func(context.Context, map[string]any) (*gent.ToolExecutionResponse, error) {
 					t.Error("invalid response must not execute tools")
 					return capturedToolResponse("", nil)
 				}).Description("Read").ParameterSchema(nil).MustBuild())
-			ctx := newTestExecCtx(gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Read."})))
-			result, err := agent.Next(ctx)
+			runner, execCtx := newTestExecution(t, NewAgent(model), &gent.Config{ToolChain: chain})
+			value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read.")))
 			if !assert.NoError(t, err) {
 				return
 			}
-			assert.Equal(t, &gent.AgentLoopResult{Action: gent.LAContinue}, result)
+			assert.Equal(t, "Done.", value)
+			assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished,
+				TurnId: execCtx.TurnId(), TerminationReason: gent.TerminationSuccess,
+				Output: []gent.ContentPart{gent.TextPart("Done.")}}, result)
 			assert.Equal(t, test.expected.parseErrors,
-				ctx.Stats().GetCounter(gent.SCToolchainParseErrorTotal))
-			ctx.IncrementIteration()
-			result, err = agent.Next(ctx)
-			assert.NoError(t, err)
-			assert.Equal(t, &gent.AgentLoopResult{TerminationReason: gent.TerminationSuccess,
-				Action:        gent.LATerminate,
-				Result:        []gent.ContentPart{gent.TextContent{Text: "Done."}},
-				ContentSource: nativeTestSource(ctx, 2),
-				Value: genttest.Value(gent.ContentText([]gent.ContentPart{
-					gent.TextContent{Text: "Done."},
-				})),
-			}, result)
+				execCtx.Stats().GetCounter(gent.SCToolchainParseErrorTotal))
 			if test.name == "bad JSON" {
 				messages := model.capturedMessages[1]
 				assert.Len(t, messages, 3)
@@ -245,7 +207,7 @@ Expected input schema:
 				assert.True(t, present)
 				assert.Equal(t, gent.ToolInvalidArguments, status)
 				assert.Equal(t, test.expected.feedback, gent.ContentTextData(reply.Parts()))
-				assert.Equal(t, int64(1), ctx.Stats().GetCounter(gent.SCToolCallsInvalidArgumentsTotal))
+				assert.Equal(t, int64(1), execCtx.Stats().GetCounter(gent.SCToolCallsInvalidArgumentsTotal))
 				return
 			}
 			wantMessages := []*gent.ModelMessage{gent.TextParts(gent.ChatMessageTypeHuman, "Read.")}
@@ -270,18 +232,9 @@ type nativeAnswer struct {
 }
 
 func TestNativeAgent_JSONValidation(t *testing.T) {
-	model := newMockModel(nativeTestResponse(&gent.ContentChoice{
-		Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-		CandidateContent: []gent.ContentPart{gent.TextContent{Text: "invalid"}},
-	}),
-		nativeTestResponse(&gent.ContentChoice{
-			Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-			CandidateContent: []gent.ContentPart{gent.TextContent{Text: `{"status":"pending"}`}},
-		}),
-		nativeTestResponse(&gent.ContentChoice{
-			Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-			CandidateContent: []gent.ContentPart{gent.TextContent{Text: `{"status":"done"}`}},
-		}))
+	model := newMockModel(nativeTestResponse(answerChoice("invalid")),
+		nativeTestResponse(answerChoice(`{"status":"pending"}`)),
+		nativeTestResponse(answerChoice(`{"status":"done"}`)))
 	var values []nativeAnswer
 	out, err := output.NewJsonOutput[nativeAnswer]()
 	if !assert.NoError(t, err) {
@@ -298,34 +251,30 @@ func TestNativeAgent_JSONValidation(t *testing.T) {
 			gent.TextContent{Text: "Check the status."}}}, nil
 	})
 	agent := NewWithOutput(model, out)
-	ctx := newTestExecCtx(gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Check."})))
-	first, err := agent.Next(ctx)
-	assert.NoError(t, err)
-	assert.Equal(t, gent.LAContinue, first.Action)
-	second, err := agent.Next(ctx)
-	assert.NoError(t, err)
-	assert.Equal(t, &gent.AgentLoopResult{
-		Action: gent.LAContinue,
-	}, second)
-	third, err := agent.Next(ctx)
-	assert.NoError(t, err)
-	assert.Equal(t, &gent.AgentLoopResult{TerminationReason: gent.TerminationSuccess,
-		Action:        gent.LATerminate,
-		Result:        []gent.ContentPart{gent.TextContent{Text: `{"status":"done"}`}},
-		ContentSource: nativeTestSource(ctx, 3), Value: genttest.Value(nativeAnswer{Status: "done"}),
-	}, third)
+	recorder := &testRecorder{}
+	runner, execCtx := newTestExecution(t, agent, &gent.Config{Recorder: recorder})
+	value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Check.")))
+	if !assert.NoError(t, err) {
+		return
+	}
+	assert.Equal(t, nativeAnswer{Status: "done"}, value)
+	assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished,
+		TurnId: execCtx.TurnId(), TerminationReason: gent.TerminationSuccess,
+		Output: []gent.ContentPart{gent.TextPart(`{"status":"done"}`)}}, result)
 	thirdRequest := model.capturedMessages[2]
+	pending := answerChoice(`{"status":"pending"}`)
+	pending.Parts[0].(*gent.AssistantContent).MessageId = savedAssistantId(t, recorder, 1, 0)
 	assert.Equal(t, []*gent.ModelMessage{
-		gent.TextParts(gent.ChatMessageTypeAI, `{"status":"pending"}`),
+		&gent.ModelMessage{Role: gent.ChatMessageTypeAI, Parts: pending.Parts},
 		gent.TextParts(gent.ChatMessageTypeHuman, "Check the status."),
 	}, thirdRequest[len(thirdRequest)-2:])
 	assert.Equal(t, []nativeAnswer{{"pending"}, {"done"}}, values)
-	assert.Equal(t, int64(1), ctx.Stats().GetCounter(gent.SCOutputLocalRejectedTotal))
-	assert.Equal(t, int64(1), ctx.Stats().GetCounter(gent.SCOutputCustomRejectedBy+"status"))
-	assert.Equal(t, int64(2), ctx.Stats().GetCounter(gent.SCOutputRejectedTotal))
-	assert.Equal(t, float64(0), ctx.Stats().GetGauge(gent.SGOutputLocalRejectedConsecutive))
-	assert.Equal(t, float64(0), ctx.Stats().GetGauge(gent.SGOutputCustomRejectedConsecutive))
-	assert.Equal(t, float64(0), ctx.Stats().GetGauge(gent.SGOutputRejectedConsecutive))
+	assert.Equal(t, int64(1), execCtx.Stats().GetCounter(gent.SCOutputLocalRejectedTotal))
+	assert.Equal(t, int64(1), execCtx.Stats().GetCounter(gent.SCOutputCustomRejectedBy+"status"))
+	assert.Equal(t, int64(2), execCtx.Stats().GetCounter(gent.SCOutputRejectedTotal))
+	assert.Equal(t, float64(0), execCtx.Stats().GetGauge(gent.SGOutputLocalRejectedConsecutive))
+	assert.Equal(t, float64(0), execCtx.Stats().GetGauge(gent.SGOutputCustomRejectedConsecutive))
+	assert.Equal(t, float64(0), execCtx.Stats().GetGauge(gent.SGOutputRejectedConsecutive))
 }
 
 func TestNativeAgent_FinalOnlySizeAndRepetition(t *testing.T) {
@@ -347,36 +296,32 @@ func TestNativeAgent_FinalOnlySizeAndRepetition(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			model := newMockModel(nativeTestResponse(&gent.ContentChoice{Completion: gent.ModelCompletion{
-				Status: gent.ModelStatusToolCalls,
-			},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: test.input.content}},
-				ToolCalls: []*gent.ModelToolCallRequest{nativeTestCall("a", "lookup",
-					test.input.args)}}))
+			choice := answerChoice(test.input.content)
+			choice.Completion.Status = gent.ModelStatusToolCalls
+			choice.Parts = append(choice.Parts, nativeTestCall("a", "lookup", test.input.args))
+			model := newMockModel(nativeTestResponse(choice), nativeTestResponse(answerChoice("Done.")))
 			config := agentutil.DefaultRepetitionConfig()
 			config.Enabled = test.input.repetition
 			config.BlockSize = 50
 			agent := NewAgent(&nativeFinalModel{model}).WithMaxResponseChars(test.input.max).
-				WithRepetitionConfig(config).RegisterTool(gent.DefineTool("lookup",
+				WithRepetitionConfig(config)
+			chain := toolchain.New().RegisterTool(gent.DefineTool("lookup",
 				func(context.Context, map[string]any) (*gent.ToolExecutionResponse, error) {
 					t.Error("truncated response must not execute tools")
 					return capturedToolResponse("", nil)
 				}).Description("Read").ParameterSchema(nil).MustBuild())
-			ctx := newTestExecCtx(gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Read."})))
-			result, err := agent.Next(ctx)
-			assert.NoError(t, err)
-			assert.Equal(t, gent.LAContinue, result.Action)
-			assert.Equal(t, test.expected.loops, ctx.Stats().GetCounter(gent.SCRepetitionLoopTotal))
+			runner, execCtx := newTestExecution(t, agent, &gent.Config{ToolChain: chain})
+			value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read.")))
+			if !assert.NoError(t, err) {
+				return
+			}
+			assert.Equal(t, "Done.", value)
+			assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished,
+				TurnId: execCtx.TurnId(), TerminationReason: gent.TerminationSuccess,
+				Output: []gent.ContentPart{gent.TextPart("Done.")}}, result)
+			assert.Equal(t, test.expected.loops, execCtx.Stats().GetCounter(gent.SCRepetitionLoopTotal))
 		})
 	}
-}
-
-type nativeLimitHook struct{ key gent.StatKey }
-
-func (hook *nativeLimitHook) OnLimitExceeded(
-	_ *gent.ExecutionContext, event *gent.LimitExceededEvent,
-) {
-	hook.key = event.MatchedKey
 }
 
 func TestNativeAgent_ToolLimits(t *testing.T) {
@@ -399,32 +344,32 @@ func TestNativeAgent_ToolLimits(t *testing.T) {
 			var effects []string
 			model := newMockModel(nativeTestResponse(&gent.ContentChoice{Completion: gent.ModelCompletion{
 				Status: gent.ModelStatusToolCalls,
-			},
-				ToolCalls: []*gent.ModelToolCallRequest{
-					nativeTestCall("a", "first", "{}"), nativeTestCall("b", "second", "{}")}}),
+			}, Parts: []gent.ContentPart{
+				nativeTestCall("a", "first", "{}"), nativeTestCall("b", "second", "{}")}}),
 				nativeTestResponse(&gent.ContentChoice{Completion: gent.ModelCompletion{
 					Status: gent.ModelStatusToolCalls,
-				},
-					ToolCalls: []*gent.ModelToolCallRequest{
-						nativeTestCall("c", "second", "{}"), nativeTestCall("d", "first", "{}")}}))
+				}, Parts: []gent.ContentPart{
+					nativeTestCall("c", "second", "{}"), nativeTestCall("d", "first", "{}")}}))
 			agent := NewAgent(model)
+			chain := toolchain.New()
 			for _, name := range []string{"first", "second"} {
-				agent.RegisterTool(gent.DefineTool(name, func(context.Context, map[string]any) (
+				chain.RegisterTool(gent.DefineTool(name, func(context.Context, map[string]any) (
 					*gent.ToolExecutionResponse, error,
 				) {
 					effects = append(effects, name)
 					return capturedToolResponse("ok", nil)
 				}).Description("Read").ParameterSchema(nil).MustBuild())
 			}
-			ctx := newTestExecCtx(gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Read."})))
-			ctx.SetLimits([]gent.Limit{{Type: gent.LimitKeyPrefix,
-				Key: gent.SCToolCallsFor, MaxValue: test.input.max}})
-			hook := &nativeLimitHook{}
-			_, _, err := executor.NewRunner(agent, executor.DefaultConfig()).
-				WithEvents(events.NewRegistry().Subscribe(hook)).Execute(ctx)
-			assert.EqualError(t, err, "limit exceeded: gent:tool_calls: > "+
-				map[float64]string{0: "0", 1: "1"}[test.input.max])
-			assert.Equal(t, test.expected, expected{effects, hook.key})
+			runner, execCtx := newTestExecution(t, agent, &gent.Config{ToolChain: chain,
+				Limits: []gent.Limit{{Type: gent.LimitKeyPrefix,
+					Key: gent.SCToolCallsFor, MaxValue: test.input.max}},
+			})
+			_, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read.")))
+			if !assert.NoError(t, err) || !assert.NotNil(t, result.ExceededLimit) {
+				return
+			}
+			assert.Equal(t, gent.ExecutionPaused, result.Status)
+			assert.Equal(t, test.expected, expected{effects, result.ExceededLimit.MatchedKey})
 		})
 	}
 }
@@ -433,35 +378,40 @@ func TestNativeAgent_MissingCallID(t *testing.T) {
 	call := nativeTestCall("", "lookup", "{}")
 	call.Type = ""
 	model := newMockModel(
-		nativeTestResponse(&gent.ContentChoice{
-			Completion: gent.ModelCompletion{Status: gent.ModelStatusToolCalls},
-			ToolCalls:  []*gent.ModelToolCallRequest{call},
-		}),
-		nativeTestResponse(&gent.ContentChoice{
-			Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-			CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Done."}},
-		}))
-	agent := NewAgent(model).WithToolChain(toolchain.New().RegisterTool(
+		nativeTestResponse(
+			&gent.ContentChoice{
+
+				Completion: gent.ModelCompletion{
+					Status: gent.ModelStatusToolCalls,
+				},
+				Parts: []gent.ContentPart{
+					call,
+				},
+			},
+		),
+		nativeTestResponse(answerChoice("Done.")),
+	)
+	chain := toolchain.New().RegisterTool(
 		gent.DefineTool("lookup",
 			func(context.Context, map[string]any) (*gent.ToolExecutionResponse, error) {
 				return capturedToolResponse("ok", nil)
 			}).Description("Read").
-			ParameterSchema(nil).MustBuild()))
-	ctx := newTestExecCtx(gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Read."})))
-	_, err := agent.Next(ctx)
+			ParameterSchema(nil).MustBuild())
+	runner, execCtx := newTestExecution(t, NewAgent(model), &gent.Config{ToolChain: chain})
+	value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read.")))
 	if !assert.NoError(t, err) {
 		return
 	}
-	_, err = agent.Next(ctx)
-	assert.NoError(t, err)
+	assert.Equal(t, "Done.", value)
+	assert.Equal(t, gent.ExecutionFinished, result.Status)
 	saved := model.capturedMessages[1][1].Parts[0].(*gent.ModelToolCallRequest)
 	assert.NotEmpty(t, saved.ID)
 	assert.Equal(t, "function", saved.Type)
 	assert.Equal(t, &gent.ModelMessage{Role: gent.ChatMessageTypeTool, Parts: []gent.ContentPart{
 		preparedTestReply(saved.ID, "lookup", "ok")}}, model.capturedMessages[1][2])
 }
-func (m *nativeFinalModel) PrepareRequest(ctx *gent.ExecutionContext,
+func (m *nativeFinalModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

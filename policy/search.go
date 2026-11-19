@@ -41,15 +41,15 @@ type PolicySearchInput struct {
 //	tc.RegisterTool(tool)
 //
 // SearchResultMode controls what PolicySearchTool returns for each match.
-type SearchResultMode int
+type SearchResultMode string
 
 const (
 	// SearchResultFull returns the full policy content (default).
-	SearchResultFull SearchResultMode = iota
+	SearchResultFull SearchResultMode = ""
 	// SearchResultSnippet returns policy ID + search snippet.
-	SearchResultSnippet
+	SearchResultSnippet SearchResultMode = "snippet"
 	// SearchResultTitle returns only the policy ID.
-	SearchResultTitle
+	SearchResultTitle SearchResultMode = "title"
 )
 
 type PolicySearchTool struct {
@@ -253,8 +253,7 @@ func (t *PolicySearchTool) Call(
 		}
 		switch t.resultMode {
 		case SearchResultTitle:
-			fmt.Fprintf(&sb, "id: %s\ndescription: %s",
-				p.Id, p.Description)
+			fmt.Fprintf(&sb, "id: %s\ndescription: %s", p.Id, p.Description)
 		case SearchResultSnippet:
 			fmt.Fprintf(&sb, "id: %s\n%s", p.Id, r.Snippet)
 		default:

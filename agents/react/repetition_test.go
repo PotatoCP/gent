@@ -8,302 +8,109 @@ import (
 
 	"github.com/rickchristie/gent"
 	agentutil "github.com/rickchristie/gent/agents"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// ============================================================================
-// Integration test — agent recovers from repetition via format error path
-// ============================================================================
-
-func TestAgent_RepetitionDetection_Recovery(t *testing.T) {
-	cfg := agentutil.DefaultRepetitionConfig()
-	cfg.BlockSize = 50
-
-	loopBlock := strings.Repeat("I am stuck in a loop and cannot proceed. ", 2)
-	if len(loopBlock) > cfg.BlockSize {
-		loopBlock = loopBlock[:cfg.BlockSize]
-	} else {
-		loopBlock += strings.Repeat("x", cfg.BlockSize-len(loopBlock))
+func TestAgent_ResponseGuardRecovery(t *testing.T) {
+	type input struct {
+		text string
+		max  int
+		tool bool
 	}
-	loopingResponse := strings.Repeat(loopBlock, 5)
-
-	validResponse := "Done."
-
-	model := newMockModel(
-		&gent.ModelCallResponse{
-			Choices: []*gent.ContentChoice{
-				{
-					Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-					CandidateContent: []gent.ContentPart{gent.TextContent{Text: loopingResponse}},
-				},
-			},
-			Info: &gent.GenerationInfo{InputTokens: 100, OutputTokens: 500},
-		},
-		&gent.ModelCallResponse{
-			Choices: []*gent.ContentChoice{
-				{
-					Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-					CandidateContent: []gent.ContentPart{gent.TextContent{Text: validResponse}},
-				},
-			},
-			Info: &gent.GenerationInfo{InputTokens: 100, OutputTokens: 50},
-		},
-	)
-
-	agent := NewAgent(model).
-		WithRepetitionConfig(cfg).
-		WithToolChain(newMockToolChain())
-
-	data := gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "test task"}))
-	execCtx := gent.NewExecutionContext(context.Background(), "repetition-test", data)
-
-	// First call: model loops -> detected -> truncated -> format error -> LAContinue.
-	result, err := agent.Next(execCtx)
-	require.NoError(t, err, "agent should not return error on repetition")
-	assert.Equal(t, gent.LAContinue, result.Action,
-		"agent should continue after repetition detection")
-
-	// Verify loop stats were incremented.
-	assert.Equal(t, int64(1),
-		execCtx.Stats().GetCounter(gent.SCRepetitionLoopTotal))
-	assert.Equal(t, float64(1),
-		execCtx.Stats().GetGauge(gent.SGRepetitionLoopConsecutive))
-
-	// Second call: model returns valid answer -> agent terminates.
-	// Consecutive gauge should reset.
-	result, err = agent.Next(execCtx)
-	require.NoError(t, err)
-	assert.Equal(t, gent.LATerminate, result.Action,
-		"agent should terminate with valid answer")
-	assert.Equal(t, float64(0),
-		execCtx.Stats().GetGauge(gent.SGRepetitionLoopConsecutive),
-		"consecutive gauge should reset on successful termination")
-}
-
-// ============================================================================
-// Terminate mode test
-// ============================================================================
-
-func TestAgent_RepetitionDetection_TerminateImmediately(t *testing.T) {
+	type expected struct {
+		loops     int64
+		gauges    []float64
+		toolCalls int
+	}
+	type testCase struct {
+		name     string
+		input    input
+		expected expected
+	}
 	cfg := agentutil.DefaultRepetitionConfig()
 	cfg.BlockSize = 50
-	cfg.Action = agentutil.RepetitionTerminate
+	block := strings.Repeat("I am stuck in a loop and cannot proceed. ", 2)[:cfg.BlockSize]
+	looping := strings.Repeat(block, 5)
+	// Two repetitions are below the streaming threshold (3), but above CheckAccumulated's
+	// relaxed threshold (2). The size guard triggers first, then detects the repetition.
+	shortBlock := strings.Repeat("I am stuck in this loop. ", 3)[:cfg.BlockSize]
+	twoStep := strings.Repeat(shortBlock, 2) + strings.Repeat("padding text ", 10)
 
-	loopBlock := strings.Repeat("x", cfg.BlockSize)
-	loopingResponse := strings.Repeat(loopBlock, 5)
-
-	model := newMockModel(&gent.ModelCallResponse{
-		Choices: []*gent.ContentChoice{
-			{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: loopingResponse}},
-			},
-		},
-		Info: &gent.GenerationInfo{InputTokens: 100, OutputTokens: 500},
-	})
-
-	agent := NewAgent(model).
-		WithRepetitionConfig(cfg).
-		WithToolChain(newMockToolChain())
-
-	data := gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "test"}))
-	execCtx := gent.NewExecutionContext(context.Background(), "term-test", data)
-
-	_, err := agent.Next(execCtx)
-	require.Error(t, err, "should return fatal error in terminate mode")
-	assert.Contains(t, err.Error(), "repetition detected")
-}
-
-// ============================================================================
-// Gauge reset test — tool execution resets consecutive gauge
-// ============================================================================
-
-func TestAgent_RepetitionGauge_ResetsOnToolExecution(t *testing.T) {
-	cfg := agentutil.DefaultRepetitionConfig()
-	cfg.BlockSize = 50
-
-	loopBlock := strings.Repeat("x", cfg.BlockSize)
-	loopingResponse := strings.Repeat(loopBlock, 5)
-
-	// Call 1: loop detected (gauge -> 1)
-	// Call 2: valid tool call (gauge -> 0)
-
-	model := newMockModel(
-		&gent.ModelCallResponse{
-			Choices: []*gent.ContentChoice{
-				{
-					Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-					CandidateContent: []gent.ContentPart{gent.TextContent{Text: loopingResponse}},
-				},
-			},
-			Info: &gent.GenerationInfo{InputTokens: 100, OutputTokens: 500},
-		},
-		&gent.ModelCallResponse{
-			Choices: []*gent.ContentChoice{{Completion: gent.ModelCompletion{
-				Status: gent.ModelStatusToolCalls,
-			},
-				ToolCalls: []*gent.ModelToolCallRequest{
-					nativeTestCall("work", "test_tool", "{}"),
-				}}},
-			Info: &gent.GenerationInfo{InputTokens: 100, OutputTokens: 50},
-		},
-	)
-
-	tc := newMockToolChain()
-	tc.RegisterTool(gent.DefineTool("test_tool",
-		func(context.Context, map[string]any) (*gent.ToolExecutionResponse, error) {
-			return capturedToolResponse("tool result", nil)
-		}).
-		Description("Read a result").ParameterSchema(nil).MustBuild())
-
-	agent := NewAgent(model).WithRepetitionConfig(cfg).WithToolChain(tc)
-
-	data := gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "test"}))
-	execCtx := gent.NewExecutionContext(context.Background(), "gauge-test", data)
-
-	// Iteration 1: loop -> gauge=1
-	result, err := agent.Next(execCtx)
-	require.NoError(t, err)
-	assert.Equal(t, gent.LAContinue, result.Action)
-	assert.Equal(t, float64(1),
-		execCtx.Stats().GetGauge(gent.SGRepetitionLoopConsecutive))
-
-	// Iteration 2: tool call -> gauge reset to 0
-	result, err = agent.Next(execCtx)
-	require.NoError(t, err)
-	assert.Equal(t, gent.LAContinue, result.Action)
-	assert.Equal(t, float64(0),
-		execCtx.Stats().GetGauge(gent.SGRepetitionLoopConsecutive),
-		"gauge should reset after successful tool execution")
-}
-
-// ============================================================================
-// MaxResponseChars two-step check tests
-// ============================================================================
-
-func TestAgent_MaxResponseChars_TooLongButNotLooping(t *testing.T) {
-	// A long unique response exceeds MaxResponseChars. Since there's no repetition,
-	// the agent should inject a "too long" reminder, not a loop reminder.
-	// Generate unique text where every paragraph has completely different vocabulary
-	// to avoid SimHash near-duplicate false positives across overlapping windows.
+	// Use unique paragraphs to avoid SimHash near-duplicate matches in overlapping windows.
 	words := []string{
 		"alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
 		"india", "juliet", "kilo", "lima", "mike", "november", "oscar", "papa",
 		"quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey", "xray",
 	}
-	var sb strings.Builder
-	for i := 0; i < 200; i++ {
-		w := words[i%len(words)]
-		fmt.Fprintf(&sb, "%s%d_%d_%d_%d ", w, i, i*7, i*13, i*31)
+	var text strings.Builder
+	for i := range 200 {
+		fmt.Fprintf(&text, "%s%d_%d_%d_%d ", words[i%len(words)], i, i*7, i*13, i*31)
 	}
-	longResponse := sb.String()
-
-	validResponse := "Done."
-
-	model := newMockModel(
-		&gent.ModelCallResponse{
-			Choices: []*gent.ContentChoice{
-				{
-					Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-					CandidateContent: []gent.ContentPart{gent.TextContent{Text: longResponse}},
-				},
-			},
-			Info: &gent.GenerationInfo{InputTokens: 100, OutputTokens: 3000},
-		},
-		&gent.ModelCallResponse{
-			Choices: []*gent.ContentChoice{
-				{
-					Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-					CandidateContent: []gent.ContentPart{gent.TextContent{Text: validResponse}},
-				},
-			},
-			Info: &gent.GenerationInfo{InputTokens: 100, OutputTokens: 50},
-		},
-	)
-
-	agent := NewAgent(model).
-		WithMaxResponseChars(500). // Very low limit to trigger truncation.
-		WithToolChain(newMockToolChain())
-
-	data := gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "test"}))
-	execCtx := gent.NewExecutionContext(context.Background(), "too-long-test", data)
-
-	// First call: too long but not looping -> conciseness reminder, LAContinue.
-	result, err := agent.Next(execCtx)
-	require.NoError(t, err)
-	assert.Equal(t, gent.LAContinue, result.Action)
-
-	// Loop stats should NOT be incremented.
-	assert.Equal(t, int64(0),
-		execCtx.Stats().GetCounter(gent.SCRepetitionLoopTotal),
-		"loop counter should not increment for non-looping long response")
-	assert.Equal(t, float64(0),
-		execCtx.Stats().GetGauge(gent.SGRepetitionLoopConsecutive),
-		"loop gauge should not increment for non-looping long response")
-
-	// Second call: concise valid answer -> terminate.
-	result, err = agent.Next(execCtx)
-	require.NoError(t, err)
-	assert.Equal(t, gent.LATerminate, result.Action)
+	cases := []testCase{
+		{"repetition then answer", input{looping, 0, false}, expected{1, []float64{1}, 0}},
+		{"tool resets repetition gauge", input{looping, 0, true}, expected{1, []float64{1, 0}, 1}},
+		{"long unique answer", input{text.String(), 500, false}, expected{0, []float64{0}, 0}},
+		{"size guard detects repetition", input{twoStep, len(twoStep) - 10, false},
+			expected{1, []float64{1}, 0}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			responses := []*gent.ModelCallResponse{nativeTestResponse(answerChoice(test.input.text))}
+			if test.input.tool {
+				responses = append(responses, nativeTestResponse(&gent.ContentChoice{
+					Completion: gent.ModelCompletion{Status: gent.ModelStatusToolCalls},
+					Parts:      []gent.ContentPart{nativeTestCall("work", "test_tool", "{}")},
+				}))
+			}
+			responses = append(responses, nativeTestResponse(answerChoice("Done.")))
+			model := newMockModel(responses...)
+			calls := 0
+			chain := toolchain.New().RegisterTool(gent.DefineTool("test_tool",
+				func(context.Context, map[string]any) (*gent.ToolExecutionResponse, error) {
+					calls++
+					return capturedToolResponse("tool result", nil)
+				}).Description("Read a result").ParameterSchema(nil).MustBuild())
+			loop := NewAgent(model).WithRepetitionConfig(cfg).WithMaxResponseChars(test.input.max)
+			recorder := &testRecorder{}
+			runner, execCtx := newTestExecution(t, loop, &gent.Config{
+				ToolChain: chain, Recorder: recorder,
+			})
+			value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("test task")))
+			require.NoError(t, err)
+			assert.Equal(t, "Done.", value)
+			assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished,
+				TurnId: execCtx.TurnId(), TerminationReason: gent.TerminationSuccess,
+				Output: []gent.ContentPart{gent.TextPart("Done.")}}, result)
+			var gauges []float64
+			for _, batch := range recorder.batches {
+				if batch.Checkpoint.Phase == gent.PhaseIterationCompleted {
+					gauges = append(gauges,
+						batch.Runtime.Contexts[0].Gauges[string(gent.SGRepetitionLoopConsecutive)])
+				}
+			}
+			assert.Equal(t, test.expected, expected{
+				execCtx.Stats().GetCounter(gent.SCRepetitionLoopTotal), gauges, calls,
+			})
+			assert.Equal(t, float64(0), execCtx.Stats().GetGauge(gent.SGRepetitionLoopConsecutive))
+			assert.Equal(t, len(responses), model.callCount)
+		})
+	}
 }
 
-func TestAgent_MaxResponseChars_TooLongAndLooping(t *testing.T) {
-	// A response exceeds MaxResponseChars AND contains repetition. The two-step check
-	// should detect the loop and use the loop recovery path (with loop stats).
+func TestAgent_RepetitionDetection_TerminateImmediately(t *testing.T) {
 	cfg := agentutil.DefaultRepetitionConfig()
 	cfg.BlockSize = 50
-
-	loopBlock := strings.Repeat("I am stuck in this loop. ", 3)
-	if len(loopBlock) > cfg.BlockSize {
-		loopBlock = loopBlock[:cfg.BlockSize]
-	} else {
-		loopBlock += strings.Repeat(" ", cfg.BlockSize-len(loopBlock))
-	}
-	// 2 repetitions: below the streaming threshold (3) but above CheckAccumulated's
-	// relaxed threshold (2). MaxResponseChars triggers first, then the two-step
-	// check finds the repetition.
-	loopingResponse := strings.Repeat(loopBlock, 2) + strings.Repeat("padding text ", 10)
-
-	validResponse := "Done."
-
-	model := newMockModel(
-		&gent.ModelCallResponse{
-			Choices: []*gent.ContentChoice{
-				{
-					Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-					CandidateContent: []gent.ContentPart{gent.TextContent{Text: loopingResponse}},
-				},
-			},
-			Info: &gent.GenerationInfo{InputTokens: 100, OutputTokens: 200},
-		},
-		&gent.ModelCallResponse{
-			Choices: []*gent.ContentChoice{
-				{
-					Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-					CandidateContent: []gent.ContentPart{gent.TextContent{Text: validResponse}},
-				},
-			},
-			Info: &gent.GenerationInfo{InputTokens: 100, OutputTokens: 50},
-		},
-	)
-
-	agent := NewAgent(model).
-		WithRepetitionConfig(cfg).
-		WithMaxResponseChars(len(loopingResponse) - 10). // Just under total, forces truncation.
-		WithToolChain(newMockToolChain())
-
-	data := gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "test"}))
-	execCtx := gent.NewExecutionContext(context.Background(), "long-loop-test", data)
-
-	// First call: too long + loop detected -> loop recovery path.
-	result, err := agent.Next(execCtx)
-	require.NoError(t, err)
-	assert.Equal(t, gent.LAContinue, result.Action)
-
-	// Loop stats SHOULD be incremented (it's a genuine loop).
-	assert.Equal(t, int64(1),
-		execCtx.Stats().GetCounter(gent.SCRepetitionLoopTotal))
-	assert.Equal(t, float64(1),
-		execCtx.Stats().GetGauge(gent.SGRepetitionLoopConsecutive))
+	cfg.Action = agentutil.RepetitionTerminate
+	model := newMockModel(nativeTestResponse(answerChoice(strings.Repeat("x", cfg.BlockSize*5))))
+	loop := NewAgent(model).WithRepetitionConfig(cfg)
+	runner, execCtx := newTestExecution(t, loop, &gent.Config{})
+	value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("test")))
+	require.ErrorIs(t, err, agentutil.ErrRepetitionDetected)
+	assert.EqualError(t, err, fmt.Sprintf(
+		"gent: Loop.Next %T failed in run %q turn %q iteration 1: model call failed: %s",
+		loop, execCtx.RunId(), execCtx.TurnId(), agentutil.ErrRepetitionDetected))
+	assert.Equal(t, "", value)
+	assert.Nil(t, result)
 }

@@ -73,8 +73,6 @@ func setupSearchChain(tools []indexableToolFunc, engines []gent.ToolSearcher) *S
 func searchTestFormat() gent.TextFormat { return testFormat() }
 
 func TestSharedSearchAndTargetExecution(t *testing.T) {
-	ctx := newExecCtx()
-	defer ctx.Release()
 	calls := 0
 	tool := gent.DefineTool("lookup", func(_ context.Context, input validationInput) (
 		*gent.ToolExecutionResponse, error,
@@ -88,40 +86,55 @@ func TestSharedSearchAndTargetExecution(t *testing.T) {
 	chain.RegisterDeprecatedTool(newIndexableTool("old", "Old order lookup", "Orders", nil, nil,
 		func(context.Context, map[string]any) (string, error) { return "old", nil }))
 	assert.NoError(t, chain.Initialize())
-	wantNames := []string{searchToolName, executeToolName}
-	assert.Equal(t, wantNames, nativeNames(t, chain, ctx))
-	search := executeNativeTestCall(t, chain, ctx, nativeCall(searchToolName,
-		`{"query":"lookup","query_type":"regex"}`))
-	assert.Equal(t, gent.ToolExecuted, search.Execution().Status)
-	part, ok := search.Execution().Parts[0].(gent.DataContent)
-	if !assert.True(t, ok) {
-		return
-	}
-	assert.Equal(t, 1, len(part.Value().([]any)))
-	assert.Equal(t, wantNames, nativeNames(t, chain, ctx),
-		"discovery must not promote native definitions")
-	call := executeNativeTestCall(t, chain, ctx, nativeCall(executeToolName,
-		`{"tool":"lookup","args":{"id":"O7"}}`))
-	assert.Equal(t, "lookup", call.Name())
-	assert.Equal(t, executeToolName, call.Response().Name())
-	assert.Equal(t, "provider-id", call.Response().ToolCallID())
-	assert.Equal(t, `{"id":"O7"}`, recordText(call))
-	assert.Equal(t, 1, calls)
-	bad := executeNativeTestCall(t, chain, ctx, nativeCall(executeToolName,
-		`{"tool":"lookup","args":{"id":7}}`))
-	assert.Equal(t, gent.ToolInvalidArguments, bad.Execution().Status)
-	want := gent.DefaultSteeringMessages().InvalidArguments + "\n" +
-		"Invalid arguments for tool \"lookup\".\nargs.id: expected string.\n" +
-		"Expected input schema:\n" + completeInputSchema
-	assert.Equal(t, want, recordText(bad))
-	assert.Equal(t, 1, calls)
-	old := executeNativeTestCall(t, chain, ctx, nativeCall(executeToolName,
-		`{"tool":"old","args":{}}`))
-	assert.Equal(t, "old", recordText(old))
-	before := ctx.PublishBeforeModelCall("test", gent.NewModelCallRequest(nil))
-	assert.Len(t, before.ToolSearches, 1)
-	assert.Equal(t, []string{"lookup"}, before.ToolSearches[0].Names)
-	assert.Empty(t, ctx.PublishBeforeModelCall("test", gent.NewModelCallRequest(nil)).ToolSearches)
+	runToolScenario(
+		t,
+		chain,
+		&gent.Config{},
+		func(execCtx *gent.ExecutionContext) {
+			wantNames := []string{searchToolName, executeToolName}
+			assert.Equal(t, wantNames, nativeNames(t, chain, execCtx))
+			search := executeNativeTestCall(t, chain, execCtx, nativeCall(searchToolName,
+				`{"query":"lookup","query_type":"regex"}`))
+			assert.Equal(t, gent.ToolExecuted, search.Execution().Status)
+			part, ok := search.Execution().Parts[0].(gent.DataContent)
+			if !assert.True(t, ok) {
+				return
+			}
+			assert.Equal(t, 1, len(part.Value().([]any)))
+			assert.Equal(t, wantNames, nativeNames(t, chain, execCtx),
+				"discovery must not promote native definitions")
+			call := executeNativeTestCall(t, chain, execCtx, nativeCall(executeToolName,
+				`{"tool":"lookup","args":{"id":"O7"}}`))
+			assert.Equal(t, "lookup", call.Name())
+			assert.Equal(t, executeToolName, call.Response().Name())
+			assert.Equal(t, "provider-id", call.Response().ToolCallID())
+			assert.Equal(t, `{"id":"O7"}`, recordText(call))
+			assert.Equal(t, 1, calls)
+			bad := executeNativeTestCall(t, chain, execCtx, nativeCall(executeToolName,
+				`{"tool":"lookup","args":{"id":7}}`))
+			assert.Equal(t, gent.ToolInvalidArguments, bad.Execution().Status)
+			want := gent.DefaultSteeringMessages().InvalidArguments + "\n" +
+				"Invalid arguments for tool \"lookup\".\nargs.id: expected string.\n" +
+				"Expected input schema:\n" + completeInputSchema
+			assert.Equal(t, want, recordText(bad))
+			assert.Equal(t, 1, calls)
+			old := executeNativeTestCall(t, chain, execCtx, nativeCall(executeToolName,
+				`{"tool":"old","args":{}}`))
+			assert.Equal(t, "old", recordText(old))
+			before := execCtx.PublishBeforeModelCall("test", gent.NewModelCallRequest(nil))
+			assert.Len(t, before.ToolSearches, 1)
+			assert.Equal(t, []string{"lookup"}, before.ToolSearches[0].Names)
+			assert.Empty(
+				t,
+				execCtx.PublishBeforeModelCall(
+					"test",
+					gent.NewModelCallRequest(
+						nil,
+					),
+				).ToolSearches,
+			)
+		},
+	)
 }
 
 func TestSearchResultStates(t *testing.T) {
@@ -160,9 +173,7 @@ func TestSearchResultStates(t *testing.T) {
 			chain := NewSearch(SearchHintSimpleList).
 				WithNoResultsMessage("NO MATCHES").RegisterEngine(engine)
 			assert.NoError(t, chain.Initialize())
-			ctx := newExecCtx()
-			defer ctx.Release()
-			record := executeNativeTestCall(t, chain, ctx, nativeCall(searchToolName,
+			record, _ := runNativeTestCall(t, chain, &gent.Config{}, nativeCall(searchToolName,
 				`{"query":"order","query_type":"test"}`))
 			status, _ := record.Response().ExecutionStatus()
 			assert.Equal(t, test.expected, expected{record.Kind(), status, recordText(record)})
@@ -194,25 +205,46 @@ func TestSearchPaginationAndConcurrentUse(t *testing.T) {
 	}
 	var workers sync.WaitGroup
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			for range 4 {
-				workers.Add(1)
-				go func() {
-					defer workers.Done()
-					ctx := newExecCtx()
-					defer ctx.Release()
-					result, err := chain.Search(ctx, &gent.ToolSearchRequest{Query: "order", QueryType: "regex",
-						Page: test.input.page})
-					assert.NoError(t, err)
-					assert.Equal(t, test.expected, expected{result.Names, result.Instructions})
-				}()
-			}
-			workers.Wait()
-		})
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				for range 4 {
+					workers.Add(1)
+					go func() {
+						defer workers.Done()
+						execCtx := newExecCtx(t)
+						defer execCtx.Release()
+						result, err := chain.Search(
+							execCtx,
+							&gent.ToolSearchRequest{
+								Query:     "order",
+								QueryType: "regex",
+								Page:      test.input.page,
+							},
+						)
+						assert.NoError(t, err)
+						assert.Equal(t, test.expected, expected{result.Names, result.Instructions})
+					}()
+				}
+				workers.Wait()
+			},
+		)
 	}
-	ctx := newExecCtx()
-	defer ctx.Release()
-	assert.Equal(t, []string{searchToolName, executeToolName, "order_a"}, nativeNames(t, chain, ctx))
+	execCtx := newExecCtx(t)
+	defer execCtx.Release()
+	assert.Equal(
+		t,
+		[]string{
+			searchToolName,
+			executeToolName,
+			"order_a",
+		},
+		nativeNames(
+			t,
+			chain,
+			execCtx,
+		),
+	)
 }
 
 func TestSearchInitializationFailures(t *testing.T) {
@@ -232,8 +264,7 @@ func TestSearchInitializationFailures(t *testing.T) {
 		}},
 			expected{`SearchChain.Initialize: engine "test" IndexAll failed: index unavailable`}},
 		{"missing pin", input{func() *SearchChain {
-			return NewSearch(SearchHintSimpleList).
-				RegisterEngine(NewRegexToolSearcher()).Pin("missing")
+			return NewSearch(SearchHintSimpleList).RegisterEngine(NewRegexToolSearcher()).Pin("missing")
 		}},
 			expected{`pinned tool "missing" is not registered`}},
 	}

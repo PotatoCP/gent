@@ -139,7 +139,11 @@ func (m *Chat) openRouterControls(ctx context.Context, body map[string]any,
 		body["modalities"] = o.ResponseModalities
 	}
 	for _, message := range request.Messages {
-		for _, part := range message.Parts {
+		readable, err := readableAssistantParts(message.Parts)
+		if err != nil {
+			return decision, err
+		}
+		for _, part := range readable {
 			modality := ""
 			switch p := partValue(part).(type) {
 			case gent.ImageURLContent:

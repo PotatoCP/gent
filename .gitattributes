@@ -1,0 +1,2 @@
+# Development applications stay in source but are not part of release source archives.
+examples/chat export-ignore

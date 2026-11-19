@@ -9,7 +9,6 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
@@ -32,19 +31,13 @@ func (m *guidanceModel) GenerateContentStream(
 	_ context.Context, request *gent.ModelCallRequest,
 ) (gent.Stream, error) {
 	m.requests = append(m.requests, request)
-	choice := &gent.ContentChoice{
-		Completion: gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-		CandidateContent: []gent.ContentPart{
-			gent.TextContent{Text: "Check the booking before another attempt."},
-		},
-	}
+	choice := recoveryAnswerChoice("Check the booking before another attempt.")
 	if !m.finish {
-		choice.CandidateContent = nil
+		choice = &gent.ContentChoice{Completion: gent.ModelCompletion{Status: gent.ModelStatusToolCalls}}
 		for _, name := range []string{"lookup", "book", "later"} {
-			choice.Completion.Status = gent.ModelStatusToolCalls
-			choice.ToolCalls = append(choice.ToolCalls, &gent.ModelToolCallRequest{ID: "provider-" + name,
-				Type: "function", FunctionCall: &gent.FunctionCall{
-					Name: name, Arguments: `{"request_id":"request-7"}`}})
+			choice.Parts = append(choice.Parts, &gent.ModelToolCallRequest{ID: "provider-" + name,
+				Type: "function", FunctionCall: &gent.FunctionCall{Name: name,
+					Arguments: `{"request_id":"request-7"}`}})
 		}
 		if m.program {
 			script := m.script
@@ -55,9 +48,8 @@ func (m *guidanceModel) GenerateContentStream(
 			if err != nil {
 				return nil, err
 			}
-			choice.Completion.Status = gent.ModelStatusToolCalls
-			choice.ToolCalls = []*gent.ModelToolCallRequest{{ID: "provider-program", Type: "function",
-				FunctionCall: &gent.FunctionCall{Name: "run_code", Arguments: string(args)}}}
+			choice.Parts = []gent.ContentPart{&gent.ModelToolCallRequest{ID: "provider-program",
+				Type: "function", FunctionCall: &gent.FunctionCall{Name: "run_code", Arguments: string(args)}}}
 		}
 	}
 	response := &gent.ModelCallResponse{Choices: []*gent.ContentChoice{choice}}
@@ -67,20 +59,24 @@ func (m *guidanceModel) GenerateContentStream(
 var errRecoveryAck = errors.New("recovery acknowledgement lost")
 
 type guidanceStore struct {
-	view            gent.RunView
-	codecs          *gent.CodecRegistry
-	cancel          context.CancelFunc
-	afterEffect     bool
-	loseRecoveryAck bool
+	view             gent.RunView
+	codecs           *gent.CodecRegistry
+	cancel           context.CancelFunc
+	afterEffect      bool
+	loseRecoveryAck  bool
+	runStateSnapshot []byte
 }
 
-func (s *guidanceStore) Save(_ context.Context, batch *gent.SaveBatch) error {
+func (s *guidanceStore) Save(
+	_ context.Context, batch *gent.SaveBatch,
+	captureRunStateSnapshot func() (*gent.RunState, error),
+) error {
 	if s.afterEffect {
 		for _, event := range batch.Events {
 			if event.Type != "tool_call_finished" {
 				continue
 			}
-			value, err := s.codecs.Decode(*event.Payload)
+			value, err := s.codecs.DecodeEvent(event)
 			if err != nil {
 				return err
 			}
@@ -89,17 +85,26 @@ func (s *guidanceStore) Save(_ context.Context, batch *gent.SaveBatch) error {
 			}
 		}
 	}
-	next, err := gent.ApplyBatch(s.view, batch, s.codecs)
+	if s.view.RunId == "" {
+		s.view = *gent.NewRunView(batch.RunId)
+	}
+	if err := applyTestBatch(&s.view, batch, s.codecs); err != nil {
+		return err
+	}
+	state, err := captureRunStateSnapshot()
 	if err != nil {
 		return err
 	}
-	s.view = next
+	s.runStateSnapshot, err = s.codecs.MarshalRunState(state)
+	if err != nil {
+		return err
+	}
 	if s.loseRecoveryAck {
 		for _, event := range batch.Events {
 			if event.Type != "tool_call_finished" {
 				continue
 			}
-			value, err := s.codecs.Decode(*event.Payload)
+			value, err := s.codecs.DecodeEvent(event)
 			if err != nil {
 				return err
 			}
@@ -155,7 +160,7 @@ func TestNativeRecoveryGuidance(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			effects := map[string]int{}
-			build := func(model *guidanceModel) *react.Agent[string] {
+			build := func(model *guidanceModel) (*react.Agent[string], *gent.Config) {
 				var chain gent.ToolChain = toolchain.New()
 				if test.input.search {
 					chain = toolchain.NewSearch(toolchain.SearchHintSimpleList).
@@ -191,47 +196,42 @@ func TestNativeRecoveryGuidance(t *testing.T) {
 				if test.input.program {
 					selected = toolchain.NewJsToolChainWrapper(chain)
 				}
-				return react.NewAgent(model).WithToolChain(selected).WithRecoveryVersion("guidance/v1")
+				return react.NewAgent(model), &gent.Config{ToolChain: selected}
 			}
 			worker, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			store := &guidanceStore{codecs: gent.NewCodecRegistry(), cancel: cancel,
-				afterEffect: test.input.afterEffect,
-				view:        gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "guidance"}}
+				afterEffect: test.input.afterEffect}
 			model := &guidanceModel{program: test.input.program}
-			data := gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Book once."}))
-			ctx := gent.NewExecutionContext(worker, "booking", data,
-				gent.WithRunId("guidance"), gent.WithRecorder(store), gent.WithCodecs(store.codecs))
-			defer ctx.Release()
-			_, _, err := executor.NewRunner(build(model), executor.DefaultConfig()).Execute(ctx)
+			agent, config := build(model)
+			config.Recorder, config.Codecs = store, store.codecs
+			runner, execCtx := newTestExecution(t, worker, agent, config)
+			_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Book once.")))
 			assert.Error(t, err)
 			assert.Equal(t, test.expected.effects, effects)
 			freshModel := &guidanceModel{program: test.input.program, finish: true}
-			freshAgent := build(freshModel)
-			bindings := recoveryBindings(t, freshAgent)
-			savedData, err := store.codecs.Marshal(store.view)
-			if !assert.NoError(t, err) {
-				return
-			}
-			var saved gent.RunView
-			if !assert.NoError(t, bindings.Codecs.Unmarshal(savedData, &saved)) {
-				return
-			}
+			freshAgent, freshConfig := build(freshModel)
+			freshConfig = testConfig(t, freshAgent, freshConfig)
+			saved := store.runStateSnapshot
+			archive := store.view
 			if test.input.loseRecoveryAck {
-				recoveryStore := &guidanceStore{view: saved, codecs: bindings.Codecs,
+				recoveryStore := &guidanceStore{view: archive, codecs: freshConfig.Codecs,
 					loseRecoveryAck: true}
-				bindings.Recorder = recoveryStore
-				_, _, err := resumeRecovery(freshAgent, saved, bindings)
+				freshConfig.Recorder = recoveryStore
+				_, _, err := resumeRecovery(t, freshAgent, saved, freshConfig)
 				if !assert.ErrorIs(t, err, errRecoveryAck) {
 					return
 				}
 				assert.Empty(t, freshModel.requests)
-				saved = recoveryStore.view
+				saved = recoveryStore.runStateSnapshot
+				archive = recoveryStore.view
 				freshModel = &guidanceModel{program: test.input.program, finish: true}
-				freshAgent = build(freshModel)
-				bindings = recoveryBindings(t, freshAgent)
+				freshAgent, freshConfig = build(freshModel)
+				freshConfig = testConfig(t, freshAgent, freshConfig)
 			}
-			restored, result, err := resumeRecovery(freshAgent, saved, bindings)
+			finalStore := &guidanceStore{view: archive, codecs: freshConfig.Codecs}
+			freshConfig.Recorder = finalStore
+			restored, result, err := resumeRecovery(t, freshAgent, saved, freshConfig)
 			if !assert.NoError(t, err) {
 				return
 			}
@@ -250,7 +250,7 @@ func TestNativeRecoveryGuidance(t *testing.T) {
 			if test.input.program {
 				bookNumber = 3
 			}
-			bookID := fmt.Sprintf("%s:tool:%d", ctx.ContextId(), bookNumber)
+			bookID := fmt.Sprintf("%s:tool:%d", execCtx.ContextId(), bookNumber)
 			// Recovery keeps the native call IDs and provides plain guidance without wrapper fields.
 			var replies []*gent.ModelToolCallResponse
 			for _, message := range freshModel.requests[0].Messages {
@@ -274,9 +274,7 @@ func TestNativeRecoveryGuidance(t *testing.T) {
 				assert.Equal(t, gent.ToolRecoveryNotStarted, status)
 			}
 
-			view, err := restored.Export()
-			assert.NoError(t, err)
-			assert.NoError(t, gent.ValidateBundle(view, restored.Codecs()))
+			view := finalStore.view
 			var unknown []*gent.ToolCallRecord
 			for _, event := range view.Activity {
 				if event.Type != "tool_call_finished" {
@@ -314,7 +312,7 @@ func (*recoverySearchTool) SyntheticQueries() []string { return []string{"book a
 
 func TestInterruptedProgramKeepsSearchDiscovery(t *testing.T) {
 	effects := 0
-	build := func(model *guidanceModel) *react.Agent[string] {
+	build := func(model *guidanceModel) (*react.Agent[string], *gent.Config) {
 		chain := toolchain.NewSearch(toolchain.SearchHintSimpleList).
 			RegisterEngine(toolchain.NewRegexToolSearcher())
 		chain.RegisterTool(&recoverySearchTool{gent.DefineTool("book",
@@ -326,32 +324,23 @@ func TestInterruptedProgramKeepsSearchDiscovery(t *testing.T) {
 		if !assert.NoError(t, chain.Initialize()) {
 			t.FailNow()
 		}
-		return react.NewAgent(model).WithToolChain(toolchain.NewJsToolChainWrapper(chain)).
-			WithRecoveryVersion("search-program/v1")
+		return react.NewAgent(model), &gent.Config{ToolChain: toolchain.NewJsToolChainWrapper(chain)}
 	}
 	worker, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	store := &guidanceStore{codecs: gent.NewCodecRegistry(), cancel: cancel,
-		view: gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "search-program"}}
+	store := &guidanceStore{codecs: gent.NewCodecRegistry(), cancel: cancel}
 	model := &guidanceModel{program: true, script: `tool.call({tool:"tool_registry_search",
 args:{query_type:"regex",query:"book"}});
 tool.call({tool:"book",args:{request_id:"request-7"}});`}
-	ctx := gent.NewExecutionContext(worker, "search program",
-		gent.NewBasicLoopData(gent.NewTask(gent.TextContent{
-			Text: "Book a flight.",
-		})), gent.WithRunId("search-program"),
-		gent.WithRecorder(store), gent.WithCodecs(store.codecs))
-	_, _, err := executor.NewRunner(build(model), executor.DefaultConfig()).Execute(ctx)
+	agent, config := build(model)
+	config.Codecs, config.Recorder = store.codecs, store
+	runner, execCtx := newTestExecution(t, worker, agent, config)
+	_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Book a flight.")))
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, 0, effects)
 	freshModel := &guidanceModel{finish: true}
-	fresh := build(freshModel)
-	bindings := recoveryBindings(t, fresh)
-	encoded, err := store.codecs.Marshal(store.view)
-	assert.NoError(t, err)
-	var saved gent.RunView
-	assert.NoError(t, bindings.Codecs.Unmarshal(encoded, &saved))
-	_, result, err := resumeRecovery(fresh, saved, bindings)
+	fresh, freshConfig := build(freshModel)
+	_, result, err := resumeRecovery(t, fresh, store.runStateSnapshot, freshConfig)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -363,8 +352,8 @@ tool.call({tool:"book",args:{request_id:"request-7"}});`}
 	}
 	assert.Equal(t, []string{"tool_registry_search", "execute_tool", "run_code"}, names)
 }
-func (m *guidanceModel) PrepareRequest(ctx *gent.ExecutionContext,
+func (m *guidanceModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

@@ -9,7 +9,8 @@ import (
 
 // SummarizationStrategy compacts the scratchpad by
 // summarizing older entries into a single summary
-// entry. Recent entries are preserved untouched.
+// entry. Recent non-user entries can remain unchanged. User input follows its separate retention
+// allowance; newest tasks and pinned user messages have no permanent protection.
 //
 // This implements both "progressive summarization" and
 // "summary buffer hybrid" patterns:
@@ -17,14 +18,15 @@ import (
 //   - KeepRecent > 0: hybrid (keep last N, summarize rest)
 //
 // Pinned entries (importance score >=
-// ImportanceScorePinned) are always preserved untouched,
+// ImportanceScorePinned), other than eligible user input, remain unchanged,
 // regardless of their position.
 //
 // # Result Ordering
 //
-// The compacted scratchpad is ordered as:
+// Retained user projections preserve their own chronological order. One counted omission notice
+// precedes the first projection when needed. The rest of the compacted scratchpad is ordered as:
 //
-//	[synthetic] → [pinned...] → [toKeep...]
+//	[retained users...] → [synthetic] → [pinned...] → [toKeep...]
 //
 // This ordering cannot preserve the original chronological
 // positions of pinned entries. Summarization collapses
@@ -49,7 +51,7 @@ import (
 //
 // Given that no ordering is perfect, [synthetic, pinned,
 // toKeep] is chosen because it produces the best agent
-// loop performance:
+// loop context. This is a design tradeoff, not a measured quality guarantee:
 //
 //  1. Context before detail. The synthetic summary
 //     establishes what the agent has been doing — the
@@ -86,10 +88,9 @@ import (
 //
 // # Multi-Modal Handling
 //
-// Images, audio, and other media in non-pinned entries are dropped during summarization.
-// Text, tool call IDs, names, arguments, and result text are passed to the summary model.
-// Tool evidence must remain available even when an assistant turn has no text.
-// If media is important, pin the entry.
+// Covered text, tool identities and results, and attributed media are passed to the summary model.
+// The summary is text. Keep a required or pinned non-user entry when its original media must remain
+// in the next main call. Compaction never removes the original media from the accepted archive.
 //
 // # Model Usage
 //
@@ -103,21 +104,22 @@ import (
 // By default, the strategy sends the static instructions as
 // a system message and the dynamic content (existing summary
 // + new messages) as a user message. This two-message
-// structure enables prompt caching by LLM providers — the
+// structure preserves an opportunity for prompt caching — the
 // system message is identical across compaction calls and
-// can be cached. Override with [WithPrompt] to use a single
-// user message instead (disables prompt caching).
+// can be reused under provider rules. Override with [WithPrompt] to use a single user message.
+// Compaction need not invalidate an unchanged leading prefix; no cache hit is guaranteed.
 //
 // # Example
 //
 //	strategy := compaction.NewSummarization(model, textFormat).
 //	    WithKeepRecent(5)
 type SummarizationStrategy struct {
-	model        gent.Model
-	textFormat   gent.TextFormat
-	keepRecent   int
-	systemPrompt string
-	userPrompt   string
+	userRetention *gent.UserMessageRetentionConfig
+	model         gent.Model
+	textFormat    gent.TextFormat
+	keepRecent    int
+	systemPrompt  string
+	userPrompt    string
 }
 
 // NewSummarization creates a SummarizationStrategy with the given model and text format.
@@ -154,8 +156,8 @@ func (s *SummarizationStrategy) WithKeepRecent(
 //
 // When WithPrompt is used, the system message is cleared
 // and the entire prompt is sent as a single user message.
-// This disables prompt caching but provides full control
-// over the prompt format.
+// This gives full control over the prompt format. Cache reuse depends on the actual request
+// prefix and provider rules.
 func (s *SummarizationStrategy) WithPrompt(
 	prompt string,
 ) *SummarizationStrategy {
@@ -624,51 +626,15 @@ const DefaultSummarizationUserPrompt = `%s
 
 // Compact implements gent.CompactionStrategy.
 func (s *SummarizationStrategy) Compact(
-	execCtx *gent.ExecutionContext, input gent.CompactionInput,
-) (gent.HistoryUpdate, error) {
-	scratchpad := input.Entries
-	unchanged := gent.HistoryUpdate{ExpectedDraftRevision: input.Revision, Active: input.EntryIds()}
-
-	// Separate: pinned, existing summary, summarizable,
-	// recent
-	var (
-		pinned            []*gent.HistoryEntry
-		existingSummaries []*gent.HistoryEntry
-		nonPinned         []*gent.HistoryEntry
-	)
-
-	// First pass: extract pinned and existing summary
-	for _, iter := range scratchpad {
-		if isPinned(iter) {
-			pinned = append(pinned, iter)
-			continue
-		}
-		if iter.Origin ==
-			gent.RecordCompactedSynthetic {
-			existingSummaries = append(existingSummaries, iter)
-			continue
-		}
-		nonPinned = append(nonPinned, iter)
+	execCtx *gent.ExecutionContext, input *gent.CompactionInput,
+) (*gent.HistoryUpdate, error) {
+	retentionInput, retentionStrategy, users, err := s.retentionInput(input)
+	if err != nil {
+		return nil, err
 	}
-
-	// Split non-pinned into toSummarize and toKeep
-	var toSummarize []*gent.HistoryEntry
-	var toKeep []*gent.HistoryEntry
-
-	if s.keepRecent > 0 &&
-		len(nonPinned) > s.keepRecent {
-		splitIdx := len(nonPinned) - s.keepRecent
-		toSummarize = nonPinned[:splitIdx]
-		toKeep = nonPinned[splitIdx:]
-	} else if s.keepRecent == 0 && len(nonPinned) > 0 {
-		toSummarize = nonPinned
-	} else {
-		// Nothing to summarize
-		return unchanged, nil
-	}
-
-	if len(toSummarize) == 0 {
-		return unchanged, nil
+	existingSummaries, toSummarize, toKeep := s.summaryGroups(input, users)
+	if len(toSummarize) == 0 && len(existingSummaries) == 0 && !retentionInput.EarlierContentOmitted {
+		return &gent.HistoryUpdate{ExpectedDraftRevision: input.Revision, Active: input.EntryIds()}, nil
 	}
 
 	// Build summarization input
@@ -682,6 +648,15 @@ func (s *SummarizationStrategy) Compact(
 	}
 
 	newMessages := extractTextFromEntries(toSummarize)
+	if prefix := execCtx.Instructions(); len(prefix) != 0 {
+		context := &gent.HistoryEntry{}
+		for _, message := range prefix {
+			context.Messages = append(context.Messages, &gent.MessageContent{Role: message.Role,
+				Parts: message.Parts})
+		}
+		newMessages = "## Current System Instructions (read-only context)\n\n" +
+			extractText(context) + "\n\n" + newMessages
+	}
 	userText := fmt.Sprintf(
 		s.userPrompt, existingText, newMessages,
 	)
@@ -727,6 +702,7 @@ func (s *SummarizationStrategy) Compact(
 			},
 		}
 	}
+	messages = append(messages, summaryAttachments(toSummarize)...)
 	streamID := fmt.Sprintf(
 		"compaction-summarization-%d",
 		execCtx.Iteration(),
@@ -737,7 +713,7 @@ func (s *SummarizationStrategy) Compact(
 		gent.NewModelCallRequest(messages),
 	)
 	if err != nil {
-		return gent.HistoryUpdate{}, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"summarization model call: %w", err,
 		)
 	}
@@ -753,13 +729,13 @@ func (s *SummarizationStrategy) Compact(
 	response, err := stream.Response()
 	<-drainDone
 	if err != nil {
-		return gent.HistoryUpdate{}, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"summarization model call: %w", err,
 		)
 	}
 
 	if len(response.Choices) == 0 {
-		return gent.HistoryUpdate{}, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"summarization model returned no choices",
 		)
 	}
@@ -768,21 +744,20 @@ func (s *SummarizationStrategy) Compact(
 	// Custom models need the same boundary check as bundled adapters. Inconsistent content
 	// cannot become trusted history even when its status claims to be a complete answer.
 	if err := choice.ValidateCompletion(); err != nil {
-		return gent.HistoryUpdate{}, fmt.Errorf("summarization model completion: %w", err)
+		return nil, fmt.Errorf("summarization model completion: %w", err)
 	}
 	if state := choice.Completion.Status; state != gent.ModelStatusAnswer {
-		return gent.HistoryUpdate{}, fmt.Errorf(
-			"summarization model returned %s instead of a completed summary", state)
+		return nil, fmt.Errorf("summarization model returned %s instead of a completed summary", state)
 	}
-	if strings.TrimSpace(gent.ContentText(choice.CandidateContent)) == "" {
-		return gent.HistoryUpdate{}, fmt.Errorf("summarization model returned no summary text")
+	if strings.TrimSpace(gent.ContentText(choice.CandidateContent())) == "" {
+		return nil, fmt.Errorf("summarization model returned no summary text")
 	}
 
 	summaryText := s.textFormat.FormatSections(
 		[]gent.FormattedSection{
 			{
 				Name:    "prior_work_summary",
-				Content: gent.ContentText(choice.CandidateContent),
+				Content: gent.ContentText(choice.CandidateContent()),
 			},
 		},
 	)
@@ -803,29 +778,45 @@ func (s *SummarizationStrategy) Compact(
 		Origin: gent.RecordCompactedSynthetic,
 	}
 
-	// Rebuild scratchpad: synthetic + pinned + toKeep.
-	// See "Result Ordering" in the type doc for why this
-	// ordering is used and why chronological ordering
-	// cannot be preserved.
-	result := make(
-		[]*gent.HistoryEntry,
-		0,
-		1+len(pinned)+len(toKeep),
-	)
-	result = append(result, synthetic)
-	result = append(result, pinned...)
-	result = append(result, toKeep...)
-
+	retained, err := retentionStrategy.Retain(retentionInput)
+	if err != nil {
+		return nil, fmt.Errorf("gent: user retention: %w", err)
+	}
+	if err := validateUserRetention(retentionInput, retained); err != nil {
+		return nil, err
+	}
+	userEntries, err := retainedUserEntries(execCtx, retentionInput, retained)
+	if err != nil {
+		return nil, err
+	}
+	var covered []gent.EntryId
+	for _, record := range existingSummaries {
+		covered = append(covered, record.Id)
+	}
+	for _, record := range toSummarize {
+		covered = append(covered, record.Id)
+	}
+	synthetic.Replaces = covered
+	synthetic.SetMetadata(retentionDecisionKey, map[string]any{
+		"coveredEntryIds": covered,
+		"maxBytes":        retentionInput.MaxBytes, "marker": retentionInput.Marker,
+		"strategy": fmt.Sprintf("%T", retentionStrategy), "retainedBytes": retained.RetainedBytes,
+		"earlierContentOmitted": retained.EarlierContentOmitted,
+	})
 	entry, err := execCtx.NewHistoryEntry(synthetic)
 	if err != nil {
-		return gent.HistoryUpdate{}, err
+		return nil, err
 	}
-	active := []gent.EntryId{entry.Id}
-	for _, record := range result[1:] {
+	appended := append(userEntries, entry)
+	var active []gent.EntryId
+	for _, record := range appended {
 		active = append(active, record.Id)
 	}
-	return gent.HistoryUpdate{ExpectedDraftRevision: input.Revision,
-		AppendedEntries: []*gent.HistoryEntry{entry}, Active: active,
+	for _, record := range toKeep {
+		active = append(active, record.Id)
+	}
+	return &gent.HistoryUpdate{ExpectedDraftRevision: input.Revision,
+		AppendedEntries: appended, Active: active,
 		Compaction: &gent.CompactionRecord{SummaryIds: []gent.EntryId{entry.Id}}}, nil
 }
 
@@ -833,33 +824,48 @@ func (s *SummarizationStrategy) Compact(
 func extractText(entry *gent.HistoryEntry) string {
 	var parts []string
 	for _, msg := range entry.Messages {
-		for _, part := range msg.Parts {
-			switch value := part.(type) {
-			case gent.TextContent:
-				if value.Text != "" {
-					parts = append(parts, value.Text)
-				}
-			case *gent.TextContent:
-				if value.Text != "" {
-					parts = append(parts, value.Text)
-				}
-			case gent.ModelToolCallRequest:
-				text := fmt.Sprintf("Tool call %q (%s)", value.ID, value.Type)
-				if value.FunctionCall != nil {
-					text = fmt.Sprintf("Tool call %q: %s\nArguments: %s", value.ID,
-						value.FunctionCall.Name, value.FunctionCall.Arguments)
-				}
-				parts = append(parts, text)
-			case *gent.ModelToolCallRequest:
-				parts = append(parts, fmt.Sprintf("Tool call %q: %s\nArguments: %s",
-					value.ID, value.FunctionCall.Name, value.FunctionCall.Arguments))
-			case *gent.ModelToolCallResponse:
-				parts = append(parts, fmt.Sprintf("Tool result %q: %s\n%s", value.ToolCallID(),
-					value.Name(), gent.ContentTextData(value.Parts())))
-			}
-		}
+		parts = append(parts, "Role: "+string(msg.Role))
+		parts = appendSummaryText(parts, msg.Parts)
 	}
 	return strings.Join(parts, "\n")
+}
+
+func appendSummaryText(parts []string, content []gent.ContentPart) []string {
+	for _, part := range content {
+		switch value := part.(type) {
+		case gent.CachedContent:
+			// Cache hints change request handling, not the content covered by a summary. Unwrap
+			// them before retention can remove the original text from the active context.
+			parts = appendSummaryText(parts, []gent.ContentPart{value.ContentPart})
+		case *gent.CachedContent:
+			parts = appendSummaryText(parts, []gent.ContentPart{value.ContentPart})
+		case *gent.AssistantContent:
+			parts = append(parts, "Assistant item: "+string(value.Type),
+				gent.ContentTextData(value.Content))
+		case gent.TextContent:
+			if value.Text != "" {
+				parts = append(parts, value.Text)
+			}
+		case *gent.TextContent:
+			if value.Text != "" {
+				parts = append(parts, value.Text)
+			}
+		case gent.ModelToolCallRequest:
+			text := fmt.Sprintf("Tool call %q (%s)", value.ID, value.Type)
+			if value.FunctionCall != nil {
+				text = fmt.Sprintf("Tool call %q: %s\nArguments: %s", value.ID,
+					value.FunctionCall.Name, value.FunctionCall.Arguments)
+			}
+			parts = append(parts, text)
+		case *gent.ModelToolCallRequest:
+			parts = append(parts, fmt.Sprintf("Tool call %q: %s\nArguments: %s",
+				value.ID, value.FunctionCall.Name, value.FunctionCall.Arguments))
+		case *gent.ModelToolCallResponse:
+			parts = append(parts, fmt.Sprintf("Tool result %q: %s\n%s", value.ToolCallID(),
+				value.Name(), gent.ContentTextData(value.Parts())))
+		}
+	}
+	return parts
 }
 
 // extractTextFromEntries extracts text from multiple entries, with numbered message headings.

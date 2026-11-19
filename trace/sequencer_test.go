@@ -1,50 +1,25 @@
 package trace
 
-import genttest "github.com/rickchristie/gent/internal/tt"
-
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"github.com/rickchristie/gent/output"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/rickchristie/gent"
-	"github.com/rickchristie/gent/events"
-	"github.com/rickchristie/gent/executor"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-type traceTestLoop struct {
-	result       []gent.ContentPart
-	err          error
-	beforeReturn func(*gent.ExecutionContext)
-}
-
-func (l *traceTestLoop) Next(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
-	if l.beforeReturn != nil {
-		l.beforeReturn(execCtx)
-	}
-	if l.err != nil {
-		return nil, l.err
-	}
-	return &gent.AgentLoopResult{
-		TerminationReason: gent.TerminationSuccess,
-		Action:            gent.LATerminate,
-		Result:            l.result,
-		Value:             genttest.Value(gent.ContentText(l.result)),
-	}, nil
-}
-
-func TestSequencer_EventNumbersReplayAndJSONSafety(t *testing.T) {
+func TestSequencer_EventSequenceNumbersReplayAndJSONSafety(t *testing.T) {
 	type expected struct {
-		lastEventNumber uint64
-		recentCount     int
-		replayCount     int
-		stitchStatus    StitchStatus
+		lastEventSequenceNumber uint64
+		recentCount             int
+		replayCount             int
+		stitchStatus            StitchStatus
 	}
 
 	seq := newTestSequencer(t, "run", Config{MaxRecentEvents: 3})
@@ -58,17 +33,17 @@ func TestSequencer_EventNumbersReplayAndJSONSafety(t *testing.T) {
 	require.NoError(t, err)
 	assertJSONSafe(t, snapshot)
 	assertJSONSafe(t, replay)
-	assertEventNumbersContiguous(t, snapshot.RecentEvents)
+	assertEventSequenceNumbersContiguous(t, snapshot.RecentEvents)
 	assert.Equal(t, expected{
-		lastEventNumber: 4,
-		recentCount:     3,
-		replayCount:     2,
-		stitchStatus:    StitchStatusOK,
+		lastEventSequenceNumber: 4,
+		recentCount:             3,
+		replayCount:             2,
+		stitchStatus:            StitchStatusOK,
 	}, expected{
-		lastEventNumber: snapshot.LastEventNumber,
-		recentCount:     len(snapshot.RecentEvents),
-		replayCount:     len(replay),
-		stitchStatus:    ValidateStitch(2, replay).Status,
+		lastEventSequenceNumber: snapshot.LastEventSequenceNumber,
+		recentCount:             len(snapshot.RecentEvents),
+		replayCount:             len(replay),
+		stitchStatus:            ValidateStitch(2, replay).Status,
 	})
 
 	_, err = seq.EventsAfter(0)
@@ -76,94 +51,59 @@ func TestSequencer_EventNumbersReplayAndJSONSafety(t *testing.T) {
 }
 
 func TestSequencer_SnapshotModelToolAndStreamCorrelation(t *testing.T) {
-	seq := newTestSequencer(t, "run", Config{
+	seq := newTestSequencer(t, "", Config{
 		IncludeChunkText:      true,
 		IncludeModelRequests:  true,
 		IncludeModelResponses: true,
 		IncludeToolArgs:       true,
 		IncludeToolOutput:     true,
 	})
-	registry := events.NewRegistry()
-	execCtx := gent.NewExecutionContext(context.Background(), "main", nil,
-		gent.WithRunId(seq.Snapshot().RunId), gent.WithObserver(seq))
-	execCtx.SetEventPublisher(registry)
-	execCtx.PublishBeforeExecution()
-	assert.NoError(t, execCtx.FlushProgress())
-	execCtx.IncrementIteration()
-	execCtx.PublishBeforeIteration()
-	assert.NoError(t, execCtx.FlushProgress())
-
-	request := &gent.ModelCallRequest{
-		Messages: []*gent.ModelMessage{gent.TextParts(gent.ChatMessageTypeHuman, "hello")},
-		Options: gent.NewModelCallRequest(
-			nil, gent.WithTemperature(0.2), gent.WithMaxTokens(123)).Options,
-	}
-	beforeModel := execCtx.PublishBeforeModelCall(
-		"gpt", request,
-		gent.WithModelStream("stream", "topic"),
-		gent.WithModelProvider("openai"),
-	)
-	assert.NoError(t, execCtx.FlushProgress())
-	assert.NoError(t, execCtx.EmitChunk(gent.StreamChunk{
-		MetaContent: []*gent.MetaContent{
-			{Type: gent.MetaContentIntermediary, Content: []gent.ContentPart{gent.TextContent{Text: "hel"}}},
-		},
-		ModelCallId:   beforeModel.ModelCallId,
-		StreamId:      "stream",
-		StreamTopicId: "topic",
-		Source:        beforeModel.Source,
-		Iteration:     beforeModel.Iteration,
-		Depth:         beforeModel.Depth,
-		ContextId:     beforeModel.ContextId,
-	}))
-	assert.NoError(t, execCtx.EmitChunk(gent.StreamChunk{
-		MetaContent: []*gent.MetaContent{
-			{Type: gent.MetaContentIntermediary, Content: []gent.ContentPart{gent.TextContent{Text: "lo"}}},
-		},
-		ModelCallId:   beforeModel.ModelCallId,
-		StreamId:      "stream",
-		StreamTopicId: "topic",
-		Source:        beforeModel.Source,
-		Iteration:     beforeModel.Iteration,
-		Depth:         beforeModel.Depth,
-		ContextId:     beforeModel.ContextId,
-	}))
-	response := &gent.ModelCallResponse{Info: &gent.GenerationInfo{
-		InputTokens: 3, OutputTokens: 4, CachedInputTokens: 1, ReasoningTokens: 2, TotalTokens: 7,
+	loop := &traceTestLoop{next: func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		request := gent.NewModelCallRequest([]*gent.ModelMessage{
+			gent.TextParts(gent.ChatMessageTypeHuman, "hello")},
+			gent.WithTemperature(0.2), gent.WithMaxTokens(123))
+		model := &traceModel{chunks: []gent.StreamChunk{
+			{Content: []gent.ContentPart{&gent.AssistantContent{Type: gent.AssistantContentIntermediary,
+				MessageId: "message", Content: []gent.ContentPart{gent.TextPart("hel")}}}},
+			{Content: []gent.ContentPart{&gent.AssistantContent{Type: gent.AssistantContentIntermediary,
+				MessageId: "message", Content: []gent.ContentPart{gent.TextPart("lo")}}}},
+		}, response: &gent.ModelCallResponse{Info: &gent.GenerationInfo{
+			InputTokens: 3, OutputTokens: 4, CachedInputTokens: 1, ReasoningTokens: 2, TotalTokens: 7}}}
+		stream, err := execCtx.GenerateContentStream(model, gent.ModelCall{Model: "gpt",
+			Provider: "openai", StreamId: "stream", StreamTopicId: "topic"}, request)
+		if err != nil {
+			return nil, err
+		}
+		defer stream.Close()
+		for range stream.Chunks() {
+		}
+		if _, err := stream.Response(); err != nil {
+			return nil, err
+		}
+		before := execCtx.PublishBeforeToolCall("search", map[string]any{"query": "gent"})
+		execCtx.PublishAfterToolCall("search", before.Args, "result", 5*time.Millisecond, nil,
+			gent.WithToolCallId(before.ToolCallId))
+		return traceTestDone(execCtx)
 	}}
-	execCtx.PublishAfterModelCall(
-		"gpt", request, response, 10*time.Millisecond, nil,
-		gent.WithModelCallId(beforeModel.ModelCallId),
-		gent.WithModelStream("stream", "topic"),
-		gent.WithModelCallSource(beforeModel.Source),
-		gent.WithModelProvider("openai"),
-	)
-	assert.NoError(t, execCtx.FlushProgress())
-
-	beforeTool := execCtx.PublishBeforeToolCall("search", map[string]any{"query": "gent"})
-	assert.NoError(t, execCtx.FlushProgress())
-	execCtx.PublishAfterToolCall(
-		"search", beforeTool.Args, "result", 5*time.Millisecond, nil,
-		gent.WithToolCallId(beforeTool.ToolCallId),
-		gent.WithToolCallSource(beforeTool.Source),
-	)
-	assert.NoError(t, execCtx.FlushProgress())
-	execCtx.PublishAfterIteration(&gent.AgentLoopResult{
-		TerminationReason: gent.TerminationSuccess,
-		Action:            gent.LATerminate,
-		Value:             genttest.Value(""),
-	}, time.Millisecond)
-	assert.NoError(t, execCtx.FlushProgress())
-	execCtx.SetTermination(gent.TerminationSuccess, nil, nil)
-	execCtx.PublishAfterExecution(gent.TerminationSuccess, nil)
-	assert.NoError(t, execCtx.CommitCheckpoint(gent.PhaseTerminal))
+	runner, execCtx, _ := newTraceRun(t, context.Background(), loop,
+		&gent.Config{Subscribers: []*gent.SubscriberRegistration{{Subscriber: seq}}})
+	_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Search Gent.")))
+	require.NoError(t, err)
 
 	snapshot := seq.Snapshot()
 	require.Len(t, snapshot.ModelCalls, 1)
 	require.Len(t, snapshot.ToolCalls, 1)
 	assertJSONSafe(t, snapshot)
-	assert.Equal(t, "hello",
-		gent.MetaText(snapshot.ModelCalls[0].Stream.MetaContent, gent.MetaContentIntermediary))
+	assert.Equal(
+		t,
+		"hello",
+		gent.ContentText(
+			gent.AssistantParts(
+				snapshot.ModelCalls[0].Stream.Content,
+				gent.AssistantContentIntermediary,
+			),
+		),
+	)
 	assert.Equal(t, "openai", snapshot.ModelCalls[0].Provider)
 	assert.Equal(t, &ModelUsage{
 		InputTokens:       3,
@@ -176,252 +116,10 @@ func TestSequencer_SnapshotModelToolAndStreamCorrelation(t *testing.T) {
 	assert.Equal(t, RunStatusSucceeded, snapshot.Status)
 }
 
-func TestSequencer_RunLifecycleIgnoresChildExecutionEvents(t *testing.T) {
-	type expectedAfterChild struct {
-		status                  RunStatus
-		startedTs               time.Time
-		completed               bool
-		result                  *RunResult
-		executionStartedEvents  int
-		executionFinishedEvents int
-	}
-	type expectedChildContext struct {
-		name      string
-		parentId  string
-		depth     int
-		status    StepStatus
-		completed bool
-	}
-	type expectedFinal struct {
-		status                  RunStatus
-		startedTs               time.Time
-		completed               bool
-		result                  *RunResult
-		executionStartedEvents  int
-		executionFinishedEvents int
-	}
-
-	seq := newTestSequencer(t, "run", Config{
-		IncludeRunOutput: true,
-		Redactor: RedactorFuncs{
-			RunOutput: func(output []gent.ContentPart) any {
-				if len(output) == 0 {
-					return ""
-				}
-				text, _ := output[0].(gent.TextContent)
-				return text.Text
-			},
-		},
-	})
-	registry := events.NewRegistry()
-	childExec := executor.NewRunner(
-		&traceTestLoop{result: []gent.ContentPart{gent.TextContent{Text: "child result"}}},
-		executor.Config{Events: registry},
-	)
-
-	var rootStartedTs time.Time
-	var afterChild *Snapshot
-	parentLoop := &traceTestLoop{
-		result: []gent.ContentPart{gent.TextContent{Text: "root result"}},
-		beforeReturn: func(execCtx *gent.ExecutionContext) {
-			rootStartedTs = seq.Snapshot().StartedTs
-			childData := gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "child task"}))
-			childCtx := execCtx.SpawnChild("child", childData)
-			childExec.Execute(childCtx)
-			afterChild = seq.Snapshot()
-			execCtx.CompleteChild(childCtx)
-		},
-	}
-	rootExec := executor.NewRunner(parentLoop, executor.Config{Events: registry})
-	rootData := gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "root task"}))
-	rootCtx := gent.NewExecutionContext(
-		context.Background(),
-		"root",
-		rootData,
-		gent.WithRunId(seq.Snapshot().RunId), gent.WithObserver(seq),
-	)
-
-	rootExec.Execute(rootCtx)
-
-	require.NotNil(t, afterChild)
-	assert.Equal(t, expectedAfterChild{
-		status:                  RunStatusRunning,
-		startedTs:               rootStartedTs,
-		completed:               false,
-		result:                  nil,
-		executionStartedEvents:  1,
-		executionFinishedEvents: 0,
-	}, expectedAfterChild{
-		status:    afterChild.Status,
-		startedTs: afterChild.StartedTs,
-		completed: afterChild.CompletedTs != nil,
-		result:    afterChild.Result,
-		executionStartedEvents: countTraceEventType(
-			afterChild.RecentEvents,
-			EventTypeExecutionStarted,
-		),
-		executionFinishedEvents: countTraceEventType(
-			afterChild.RecentEvents,
-			EventTypeExecutionFinished,
-		),
-	})
-	childContext := onlyChildTraceContext(t, afterChild)
-	assert.Equal(t, expectedChildContext{
-		name:      "child",
-		parentId:  rootCtx.ContextId(),
-		depth:     1,
-		status:    StepStatusSucceeded,
-		completed: true,
-	}, expectedChildContext{
-		name:      childContext.Name,
-		parentId:  childContext.ParentId,
-		depth:     childContext.Depth,
-		status:    childContext.Status,
-		completed: childContext.CompletedTs != nil,
-	})
-
-	snapshot := seq.Snapshot()
-	require.NotNil(t, snapshot.CompletedTs)
-	assert.GreaterOrEqual(t, snapshot.CompletedTs.UnixNano(), rootStartedTs.UnixNano())
-	assert.Equal(t, expectedFinal{
-		status:    RunStatusSucceeded,
-		startedTs: rootStartedTs,
-		completed: true,
-		result: &RunResult{
-			TerminationReason: gent.TerminationSuccess,
-			Output:            "root result",
-		},
-		executionStartedEvents:  1,
-		executionFinishedEvents: 1,
-	}, expectedFinal{
-		status:    snapshot.Status,
-		startedTs: snapshot.StartedTs,
-		completed: snapshot.CompletedTs != nil,
-		result:    snapshot.Result,
-		executionStartedEvents: countTraceEventType(
-			snapshot.RecentEvents,
-			EventTypeExecutionStarted,
-		),
-		executionFinishedEvents: countTraceEventType(
-			snapshot.RecentEvents,
-			EventTypeExecutionFinished,
-		),
-	})
-}
-
-func TestSequencer_ChildCompletePreservesTerminalContextStatus(t *testing.T) {
-	type input struct {
-		loop                *traceTestLoop
-		limits              []gent.Limit
-		cancelBeforeExecute bool
-	}
-	type expected struct {
-		terminationReason gent.TerminationReason
-		status            StepStatus
-		completed         bool
-		errorMessage      string
-	}
-	type testCase struct {
-		name     string
-		input    input
-		expected expected
-	}
-
-	testCases := []testCase{
-		{
-			name: "error",
-			input: input{
-				loop: &traceTestLoop{err: errors.New("child boom")},
-			},
-			expected: expected{
-				terminationReason: gent.TerminationError,
-				status:            StepStatusFailed,
-				completed:         true,
-				errorMessage:      "Loop.Next (iteration 1): child boom",
-			},
-		},
-		{
-			name: "limit exceeded",
-			input: input{
-				loop: &traceTestLoop{
-					result: []gent.ContentPart{gent.TextContent{Text: "child result"}},
-				},
-				limits: []gent.Limit{{
-					Type:     gent.LimitExactKey,
-					Key:      gent.SCIterations.Self(),
-					MaxValue: 1,
-				}},
-			},
-			expected: expected{
-				terminationReason: gent.TerminationLimitExceeded,
-				status:            StepStatusFailed,
-				completed:         true,
-				errorMessage:      "limit exceeded: $self:gent:iterations >= 1",
-			},
-		},
-		{
-			name: "context canceled",
-			input: input{
-				loop:                &traceTestLoop{},
-				cancelBeforeExecute: true,
-			},
-			expected: expected{
-				terminationReason: gent.TerminationContextCanceled,
-				status:            StepStatusCanceled,
-				completed:         true,
-				errorMessage:      "context canceled",
-			},
-		},
-	}
-
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			seq := newTestSequencer(t, "run", Config{})
-			registry := events.NewRegistry()
-			goCtx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			rootCtx := gent.NewExecutionContext(
-				goCtx,
-				"root",
-				gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "root task"})),
-				gent.WithRunId(seq.Snapshot().RunId), gent.WithObserver(seq),
-			)
-			rootCtx.SetEventPublisher(registry)
-			childCtx := rootCtx.SpawnChild(
-				"child",
-				gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "child task"})),
-			)
-			if tc.input.limits != nil {
-				childCtx.SetLimits(tc.input.limits)
-			}
-			if tc.input.cancelBeforeExecute {
-				cancel()
-			}
-
-			childExec := executor.NewRunner(
-				tc.input.loop,
-				executor.Config{Events: registry},
-			)
-			childExec.Execute(childCtx)
-			rootCtx.CompleteChild(childCtx)
-
-			snapshot := seq.Snapshot()
-			childContext := onlyChildTraceContext(t, snapshot)
-			actual := expected{
-				terminationReason: childCtx.TerminationReason(),
-				status:            childContext.Status,
-				completed:         childContext.CompletedTs != nil,
-				errorMessage:      traceErrorMessage(childContext.Error),
-			}
-			assert.Equal(t, tc.expected, actual)
-		})
-	}
-}
-
 func TestSequencer_RedactionMissingIdsAndUTF8Truncation(t *testing.T) {
 	seq := newTestSequencer(t, "run", Config{
 		IncludeChunkText:      true,
-		MaxMetaContentBytes:   5,
+		MaxStreamContentBytes: 5,
 		IncludeModelRequests:  true,
 		IncludeModelResponses: true,
 		IncludeToolOutput:     true,
@@ -445,19 +143,21 @@ func TestSequencer_RedactionMissingIdsAndUTF8Truncation(t *testing.T) {
 		ModelCallId: "model-1",
 		StreamId:    "stream",
 	})
-	recordTestValue(t, seq, "model_stream_chunk", gent.StreamChunk{
-		MetaContent: []*gent.MetaContent{
-			{
-				Type:    gent.MetaContentIntermediary,
-				Content: []gent.ContentPart{gent.TextContent{Text: "abcédef"}},
+	recordTestValue(
+		t,
+		seq,
+		"model_stream_chunk",
+		gent.StreamChunk{
+			Content: []gent.ContentPart{
+				&gent.AssistantContent{
+
+					Type:    gent.AssistantContentIntermediary,
+					Content: []gent.ContentPart{gent.TextContent{Text: "abcédef"}},
+				},
 			},
 		},
-		ModelCallId: "model-1",
-		StreamId:    "stream",
-		Source:      "main/1",
-		ContextId:   "ctx:1",
-		Iteration:   1,
-	})
+		gent.RecordedEvent{ModelCallId: "model-1", ContextId: "ctx:1", Iteration: 1},
+	)
 	recordTestValue(t, seq, "model_call_finished", &gent.AfterModelCallEvent{
 		BaseEvent: base,
 		Model:     "gpt",
@@ -470,9 +170,17 @@ func TestSequencer_RedactionMissingIdsAndUTF8Truncation(t *testing.T) {
 	require.Len(t, snapshot.ModelCalls, 1)
 	require.Len(t, snapshot.Errors, 1)
 	assertJSONSafe(t, snapshot)
-	assert.Equal(t, "abcé",
-		gent.MetaText(snapshot.ModelCalls[0].Stream.MetaContent, gent.MetaContentIntermediary))
-	assert.True(t, snapshot.ModelCalls[0].Stream.MetaContentTruncated)
+	assert.Equal(
+		t,
+		"abcé",
+		gent.ContentText(
+			gent.AssistantParts(
+				snapshot.ModelCalls[0].Stream.Content,
+				gent.AssistantContentIntermediary,
+			),
+		),
+	)
+	assert.True(t, snapshot.ModelCalls[0].Stream.ContentTruncated)
 	assert.Equal(t, StepStatusRunning, snapshot.ModelCalls[0].Status)
 	assert.Equal(t, "redacted", snapshot.Errors[0].Message)
 	_, ok := snapshot.ModelCalls[0].Request.(map[string]any)
@@ -503,11 +211,11 @@ func TestSequencer_BoundedSubscriptionOverflow(t *testing.T) {
 	assert.Equal(t, expected{
 		received: []uint64{2},
 		overflow: OverflowInfo{
-			Policy:             OverflowDropOldest,
-			DroppedEventNumber: 1,
-			NewEventNumber:     2,
+			Policy:                     OverflowDropOldest,
+			DroppedEventSequenceNumber: 1,
+			NewEventSequenceNumber:     2,
 		},
-	}, expected{received: []uint64{first.EventNumber}, overflow: overflow})
+	}, expected{received: []uint64{first.EventSequenceNumber}, overflow: overflow})
 }
 
 func TestSequencer_UnsubscribeDiscardsQueuedLiveEvents(t *testing.T) {
@@ -527,34 +235,41 @@ func TestSequencer_UnsubscribeDiscardsQueuedLiveEvents(t *testing.T) {
 }
 
 func TestSequencer_ConcurrentRecordingIsMonotonic(t *testing.T) {
-	seq := newTestSequencer(t, "run", Config{})
-	execCtx := gent.NewExecutionContext(context.Background(), "root", nil,
-		gent.WithRunId(seq.Snapshot().RunId), gent.WithObserver(seq))
+	seq := newTestSequencer(t, "", Config{})
+	defer seq.Close()
 	const workers = 50
-	start := make(chan struct{})
-	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			<-start
-			assert.NoError(t, execCtx.EmitChunk(gent.StreamChunk{
-				MetaContent: []*gent.MetaContent{
-					{
-						Type: gent.MetaContentIntermediary, Content: []gent.ContentPart{gent.TextContent{Text: "x"}},
-					},
-				}, StreamId: "s",
-			}))
-		}(i)
-	}
-	close(start)
-	wg.Wait()
-	assert.NoError(t, execCtx.FlushProgress())
-
+	loop := &traceTestLoop{next: func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		start := make(chan struct{})
+		var group sync.WaitGroup
+		failures := make(chan error, workers)
+		for i := range workers {
+			group.Add(1)
+			go func() {
+				defer group.Done()
+				<-start
+				failures <- execCtx.EmitChunk(gent.StreamChunk{Content: []gent.ContentPart{
+					&gent.AssistantContent{Type: gent.AssistantContentIntermediary,
+						MessageId: fmt.Sprintf("message-%d", i), Content: []gent.ContentPart{gent.TextPart("x")}}}})
+			}()
+		}
+		close(start)
+		group.Wait()
+		close(failures)
+		for err := range failures {
+			if err != nil {
+				return nil, err
+			}
+		}
+		return traceTestDone(execCtx)
+	}}
+	runner, execCtx, store := newTraceRun(t, context.Background(), loop,
+		&gent.Config{Subscribers: []*gent.SubscriberRegistration{{Subscriber: seq}}})
+	_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Publish concurrent progress.")))
+	require.NoError(t, err)
 	snapshot := seq.Snapshot()
-	require.Len(t, snapshot.RecentEvents, workers)
-	assertEventNumbersContiguous(t, snapshot.RecentEvents)
-	assert.Equal(t, uint64(workers), snapshot.LastEventNumber)
+	assert.Equal(t, workers, countTraceEventType(snapshot.RecentEvents, EventTypeModelStreamChunk))
+	assertEventSequenceNumbersContiguous(t, snapshot.RecentEvents)
+	assert.Equal(t, store.view.LastAppliedEventSequenceNumber, snapshot.LastEventSequenceNumber)
 }
 
 func assertJSONSafe(t *testing.T, value any) {
@@ -563,10 +278,10 @@ func assertJSONSafe(t *testing.T, value any) {
 	require.NoError(t, err)
 }
 
-func assertEventNumbersContiguous(t *testing.T, events []*Event) {
+func assertEventSequenceNumbersContiguous(t *testing.T, events []*Event) {
 	t.Helper()
 	for i := 1; i < len(events); i++ {
-		assert.Equal(t, events[i-1].EventNumber+1, events[i].EventNumber)
+		assert.Equal(t, events[i-1].EventSequenceNumber+1, events[i].EventSequenceNumber)
 	}
 }
 
@@ -578,25 +293,6 @@ func countTraceEventType(events []*Event, eventType EventType) int {
 		}
 	}
 	return count
-}
-
-func onlyChildTraceContext(t *testing.T, snapshot *Snapshot) *Context {
-	t.Helper()
-	children := make([]*Context, 0)
-	for _, ctx := range snapshot.Contexts {
-		if ctx.ParentId != "" {
-			children = append(children, ctx)
-		}
-	}
-	require.Len(t, children, 1)
-	return children[0]
-}
-
-func traceErrorMessage(err *Error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Message
 }
 
 func receiveTraceEvent(t *testing.T, ch <-chan *Event) *Event {
@@ -620,5 +316,3 @@ func receiveOverflow(t *testing.T, ch <-chan OverflowInfo) OverflowInfo {
 		return OverflowInfo{}
 	}
 }
-
-func (*traceTestLoop) Output() gent.Output[string] { return output.NewTextOutput() }

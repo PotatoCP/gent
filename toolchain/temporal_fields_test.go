@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/rickchristie/gent"
-	"github.com/rickchristie/gent/events"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -35,27 +34,39 @@ func TestNativeInputUsesJSONFieldNames(t *testing.T) {
 			&request{2 * time.Second, 3}}, expected{request{2 * time.Second, 3}, 1}},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			actual := expected{}
-			tool := gent.DefineTool("schedule", func(_ context.Context, value request) (
-				*gent.ToolExecutionResponse, error,
-			) {
-				actual.value, actual.calls = value, actual.calls+1
-				return &gent.ToolExecutionResponse{Status: gent.ToolExecuted}, nil
-			}).MustBuild()
-			ctx := newExecCtx()
-			defer ctx.Release()
-			if test.input.hook != nil {
-				ctx.SetEventPublisher(events.NewRegistry().Subscribe(&replaceInput{value: *test.input.hook}))
-			}
-			chain := New().RegisterTool(tool)
-			record := executeNativeTestCall(t, chain, ctx, nativeCall("schedule", test.input.arguments))
-			assert.Equal(t, test.expected, actual)
-			assert.Equal(t, &gent.ToolExecutionResponse{Status: gent.ToolExecuted}, record.Execution())
-			restored, err := ctx.Codecs().Decode(*record.Input())
-			assert.NoError(t, err)
-			assert.Equal(t, test.expected.value, restored)
-		})
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				actual := expected{}
+				tool := gent.DefineTool("schedule", func(_ context.Context, value request) (
+					*gent.ToolExecutionResponse, error,
+				) {
+					actual.value, actual.calls = value, actual.calls+1
+					return &gent.ToolExecutionResponse{Status: gent.ToolExecuted}, nil
+				}).MustBuild()
+				var hooks *gent.Hooks
+				if test.input.hook != nil {
+					hooks = replacementInputHooks(*test.input.hook)
+				}
+				chain := New().RegisterTool(tool)
+				record, execCtx := runNativeTestCall(
+					t,
+					chain,
+					&gent.Config{
+						Hooks: hooks,
+					},
+					nativeCall(
+						"schedule",
+						test.input.arguments,
+					),
+				)
+				assert.Equal(t, test.expected, actual)
+				assert.Equal(t, &gent.ToolExecutionResponse{Status: gent.ToolExecuted}, record.Execution())
+				restored, err := execCtx.Codecs().Decode(*record.Input())
+				assert.NoError(t, err)
+				assert.Equal(t, test.expected.value, restored)
+			},
+		)
 	}
 }
 
@@ -95,22 +106,19 @@ func TestNativeInputChecksRenamedHookField(t *testing.T) {
 				"default_delay": map[string]any{"type": "string"},
 				"delay":         map[string]any{"type": "string", "pattern": "^(ready|1s)$"},
 			}}).MustBuild()
-			ctx := newExecCtx()
-			defer ctx.Release()
+			var hooks *gent.Hooks
 			if test.input.hook != nil {
-				ctx.SetEventPublisher(events.NewRegistry().Subscribe(&replaceInput{value: *test.input.hook}))
+				hooks = replacementInputHooks(*test.input.hook)
 			}
 			chain := New().RegisterTool(tool)
-			record := executeNativeTestCall(t, chain, ctx,
-				nativeCall("schedule", `{"default_delay":"1s","delay":"ready"}`))
+			record, _ := runNativeTestCallWithHookError(t, chain, &gent.Config{Hooks: hooks},
+				nativeCall("schedule", `{"default_delay":"1s","delay":"ready"}`), test.expected.details)
 			assert.Equal(t, test.expected.calls, calls)
 			assert.Equal(t, test.expected.value, value)
-			want := &gent.ToolExecutionResponse{Status: gent.ToolExecuted}
 			if test.expected.details != "" {
-				want.Status = gent.ToolInvalidArguments
-				want.Instructions = chain.GetToolSchema("schedule").Correction(
-					"schedule", test.expected.details)
+				return
 			}
+			want := &gent.ToolExecutionResponse{Status: gent.ToolExecuted}
 			assert.Equal(t, want, record.Execution())
 			assert.Equal(t, gent.PrepareExecutionParts(want, gent.DefaultSteeringMessages()),
 				record.Response().Parts())
@@ -167,22 +175,19 @@ func TestNativeInputUsesEmbeddedJSONFields(t *testing.T) {
 					"timeout": map[string]any{"type": "string"},
 				},
 			}).MustBuild()
-			ctx := newExecCtx()
-			defer ctx.Release()
+			var hooks *gent.Hooks
 			if test.input.hook != nil {
-				ctx.SetEventPublisher(events.NewRegistry().Subscribe(&replaceInput{value: *test.input.hook}))
+				hooks = replacementInputHooks(*test.input.hook)
 			}
 			chain := New().RegisterTool(tool)
-			record := executeNativeTestCall(t, chain, ctx,
-				nativeCall("schedule", `{"delay":2,"timeout":"1s"}`))
+			record, _ := runNativeTestCallWithHookError(t, chain, &gent.Config{Hooks: hooks},
+				nativeCall("schedule", `{"delay":2,"timeout":"1s"}`), test.expected.details)
 			assert.Equal(t, test.expected.calls, calls)
 			assert.Equal(t, test.expected.value, received)
-			want := &gent.ToolExecutionResponse{Status: gent.ToolExecuted}
 			if test.expected.details != "" {
-				want.Status = gent.ToolInvalidArguments
-				want.Instructions = chain.GetToolSchema("schedule").Correction(
-					"schedule", test.expected.details)
+				return
 			}
+			want := &gent.ToolExecutionResponse{Status: gent.ToolExecuted}
 			assert.Equal(t, want, record.Execution())
 		})
 	}

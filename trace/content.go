@@ -12,6 +12,15 @@ func limitContent(parts []gent.ContentPart, remaining int) ([]gent.ContentPart, 
 	truncated := false
 	for _, part := range parts {
 		switch part := part.(type) {
+		case *gent.AssistantContent:
+			content, cut := limitContent(part.Content, remaining)
+			truncated = truncated || cut
+			if len(content) > 0 {
+				result = append(result, &gent.AssistantContent{Type: part.Type,
+					MessageId: part.MessageId, Content: content})
+				remaining -= contentSize(content)
+			}
+
 		case gent.TextContent:
 			text, cut := appendLimitedUTF8("", part.Text, remaining)
 			if text != "" {
@@ -43,6 +52,17 @@ func contentSize(parts []gent.ContentPart) int {
 	var size int
 	for _, part := range parts {
 		switch part := part.(type) {
+		case *gent.AssistantContent:
+			size += contentSize(part.Content)
+		case gent.CachedContent:
+			size += contentSize([]gent.ContentPart{part.ContentPart})
+		case *gent.CachedContent:
+			size += contentSize([]gent.ContentPart{part.ContentPart})
+		case gent.DataContent:
+			size += len(part.String())
+		case *gent.DataContent:
+			size += len(part.String())
+
 		case gent.TextContent:
 			size += len(part.Text)
 		case *gent.TextContent:

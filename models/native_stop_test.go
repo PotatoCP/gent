@@ -1,7 +1,5 @@
 package models_test
 
-import genttest "github.com/rickchristie/gent/internal/tt"
-
 import (
 	"context"
 	"io"
@@ -13,7 +11,9 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
+	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/models"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -27,38 +27,27 @@ func (transport nativeStopTransport) RoundTrip(request *http.Request) (*http.Res
 func TestNativeHTTP_AnthropicStopReasons(t *testing.T) {
 	type input struct{ fixture, originalReason, reason string }
 	type expected struct {
-		result *gent.AgentLoopResult
-		calls  int
-		err    error
+		requests int
+		calls    int
 	}
 	type testCase struct {
 		name     string
 		input    input
 		expected expected
 	}
-	retry := &gent.AgentLoopResult{Action: gent.LAContinue}
-	answer := &gent.AgentLoopResult{TerminationReason: gent.TerminationSuccess,
-		Action: gent.LATerminate,
-		Result: []gent.ContentPart{
-			gent.TextContent{Text: "Done."},
-		},
-		Value: genttest.Value(gent.ContentText([]gent.ContentPart{
-			gent.TextContent{Text: "Done."},
-		}))}
-	toolResult := &gent.AgentLoopResult{Action: gent.LAContinue}
 	cases := []testCase{
 		{"tool token limit", input{"native-anthropic-1.sse", "tool_use", "max_tokens"},
-			expected{retry, 0, nil}},
+			expected{2, 0}},
 		{"answer token limit", input{"native-anthropic-2.sse", "end_turn", "max_tokens"},
-			expected{retry, 0, nil}},
+			expected{2, 0}},
 		{"tool context limit", input{"native-anthropic-1.sse", "tool_use",
-			"model_context_window_exceeded"}, expected{retry, 0, nil}},
+			"model_context_window_exceeded"}, expected{2, 0}},
 		{"answer context limit", input{"native-anthropic-2.sse", "end_turn",
-			"model_context_window_exceeded"}, expected{retry, 0, nil}},
+			"model_context_window_exceeded"}, expected{2, 0}},
 		{"complete tools", input{"native-anthropic-1.sse", "tool_use", "tool_use"},
-			expected{toolResult, 2, nil}},
+			expected{2, 2}},
 		{"complete answer", input{"native-anthropic-2.sse", "end_turn", "end_turn"},
-			expected{answer, 0, nil}},
+			expected{1, 0}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -70,35 +59,48 @@ func TestNativeHTTP_AnthropicStopReasons(t *testing.T) {
 			if !assert.Equal(t, 1, strings.Count(string(fixture), original)) {
 				return
 			}
-			body := strings.Replace(string(fixture), original,
-				`"stop_reason": "`+test.input.reason+`"`, 1)
+			body := strings.Replace(string(fixture), original, `"stop_reason": "`+test.input.reason+`"`, 1)
+			requests := 0
+			final, err := os.ReadFile(filepath.Join("testdata", "native-anthropic-2.sse"))
+			if !assert.NoError(t, err) {
+				return
+			}
 			client := &http.Client{Transport: nativeStopTransport(func(*http.Request) (
 				*http.Response, error,
 			) {
+				requests++
+				data := body
+				if requests > 1 {
+					data = string(final)
+				}
 				return &http.Response{StatusCode: http.StatusOK,
 					Header: http.Header{"Content-Type": {"text/event-stream"}},
-					Body:   io.NopCloser(strings.NewReader(body))}, nil
+					Body:   io.NopCloser(strings.NewReader(data))}, nil
 			})}
 			provider := models.NewAnthropic(&models.Config{APIKey: "test-key",
 				Model: "wire-test", HTTPClient: client})
 			calls := 0
-			agent := react.NewAgent(provider).RegisterTool(
+			agent := react.NewAgent(provider)
+			chain := toolchain.New().RegisterTool(
 				gent.DefineTool("lookup", func(context.Context, map[string]any) (
 					*gent.ToolExecutionResponse, error,
 				) {
 					calls++
 					return capturedToolResponse("record", nil)
 				}).Description("Read").ParameterSchema(nil).MustBuild())
-			ctx := gent.NewExecutionContext(context.Background(), "http", gent.NewBasicLoopData(
-				gent.NewTask(gent.TextContent{Text: "Read two records."})))
-			result, err := agent.Next(ctx)
-			want := test.expected
-			if want.result.Action == gent.LATerminate {
-				copy := *want.result
-				copy.ContentSource = httpTestSource(ctx, 1)
-				want.result = &copy
+			runner := executor.NewRunner(agent, &gent.Config{ToolChain: chain})
+			execCtx, err := runner.NewExecutionContext(context.Background(), t.Name())
+			if !assert.NoError(t, err) {
+				return
 			}
-			assert.Equal(t, want, expected{result, calls, err})
+			defer execCtx.Release()
+			value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read two records.")))
+			assert.NoError(t, err)
+			assert.Equal(t, "Done.", value)
+			assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished,
+				TurnId: execCtx.TurnId(), TerminationReason: gent.TerminationSuccess,
+				Output: []gent.ContentPart{gent.TextPart("Done.")}}, result)
+			assert.Equal(t, test.expected, expected{requests, calls})
 		})
 	}
 }

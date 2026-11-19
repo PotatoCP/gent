@@ -101,7 +101,7 @@ tool.call({tool:"read",args:{id:first.parts.find(part => part.kind === "data").d
 				}
 				return sseResponse(string(payload)), nil
 			})
-			build := func() *react.Agent[string] {
+			build := func() (*react.Agent[string], *gent.Config) {
 				model := NewResponses(&ResponsesConfig{
 					Provider: test.input.provider, BaseURL: "https://fixture.test/v1",
 					APIKey: "fixture-key", Model: "fixture", HTTPClient: &http.Client{Transport: transport}})
@@ -116,39 +116,35 @@ tool.call({tool:"read",args:{id:first.parts.find(part => part.kind === "data").d
 							return capturedToolResponse("record", nil)
 						}).Description("Read the next record").ParameterSchema(responseInputSchema()).MustBuild())
 				chain := toolchain.NewJsToolChainWrapper(registry).WithDirectCallDisabled()
-				return react.NewAgent(model).WithToolChain(chain).WithRecoveryVersion("responses/v1")
+				return react.NewAgent(model), &gent.Config{ToolChain: chain}
 			}
-			agent := build()
-			loopData := gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Read a record."}))
-			ctx := gent.NewExecutionContext(context.Background(), "fixture", loopData)
-			assert.NoError(t, agent.ConfigureExecution(ctx))
-			_, err = agent.Next(ctx)
-			if !assert.NoError(t, err) {
-				return
-			}
-			// A fresh object graph must retain the opaque provider items before the next model call.
-			assert.NoError(t, ctx.CommitCheckpoint(gent.PhaseIterationCompleted))
-			bundle, err := ctx.Export()
-			assert.NoError(t, err)
-			data, err := ctx.Codecs().Marshal(bundle)
-			assert.NoError(t, err)
-			var saved gent.RunView
-			assert.NoError(t, ctx.Codecs().Unmarshal(data, &saved))
-			assert.NoError(t, gent.ValidateBundle(saved, ctx.Codecs()))
-			agent = build()
+			agent, config := build()
+			worker, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			codecs := gent.NewCodecRegistry()
-			assert.NoError(t, agent.RegisterCodecs(codecs))
-			ctx, err = gent.RestoreExecutionContext(context.Background(), saved,
-				gent.RestoreBindings{Codecs: codecs, Configure: agent.ConfigureExecution})
+			store := &modelTestStore{codecs: codecs, afterSave: func(batch *gent.SaveBatch) {
+				if batch.Checkpoint.Phase == gent.PhaseIterationCompleted {
+					cancel()
+				}
+			}}
+			config.Codecs, config.Recorder = codecs, store
+			runner, execCtx := newModelExecution(t, worker, agent, config)
+			_, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read a record.")))
+			if !assert.ErrorIs(t, err, context.Canceled) || !assert.Nil(t, result) {
+				return
+			}
+			// A fresh object graph must retain the opaque items and completed PTC effects.
+			agent, config = build()
+			runner, execCtx = restoreModelExecution(t, context.Background(), agent, config, store.saved)
+			answer, result, err := runner.Continue(execCtx)
 			if !assert.NoError(t, err) {
 				return
 			}
-			result, err := agent.Next(ctx)
-			if !assert.NoError(t, err) {
-				return
-			}
-			assert.Equal(t, test.expected, expected{calls, result.Result[0].(gent.TextContent).Text})
-			assert.Equal(t, int64(1), ctx.Stats().GetCounter(gent.SCCodeExecutions))
+			assert.Equal(t, test.expected, expected{calls, answer})
+			assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished, TurnId: execCtx.TurnId(),
+				TerminationReason: gent.TerminationSuccess,
+				Output:            []gent.ContentPart{gent.TextPart("Done.")}}, result)
+			assert.Equal(t, int64(1), execCtx.Stats().GetCounter(gent.SCCodeExecutions))
 			assert.Equal(t, []any{reasoning, commentary, call}, requests[1]["input"].([]any)[1:4])
 			assert.Equal(t, false, requests[0]["store"])
 			assert.Equal(t, true, requests[0]["stream"])

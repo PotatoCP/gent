@@ -654,7 +654,7 @@ name to keep this working document readable.
 [gent-trigger]: /home/ricky/Personal/gent/compaction/stat_threshold_trigger.go:9
 [gent-input]: /home/ricky/Personal/gent/compaction/summarization.go:626
 [gent-prompts]: /home/ricky/Personal/gent/compaction/summarization.go:530
-[gent-history]: /home/ricky/Personal/gent/docs/history.md:440
+[gent-history]: docs/content/storage/history.md
 [codex-provider]:
   https://github.com/openai/codex/blob/8703d32/codex-rs/model-provider/src/capabilities.rs
 [codex-model]:

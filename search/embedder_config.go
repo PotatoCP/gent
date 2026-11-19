@@ -20,8 +20,10 @@ func (e onnxUnavailableError) Is(target error) bool { return target == ErrOnnxUn
 type PoolingStrategy = common.PoolingStrategy
 
 const (
-	PoolingMean = common.PoolingMean
-	PoolingCLS  = common.PoolingCLS
+	// PoolingMean averages token embeddings and is the empty/default pooling strategy.
+	PoolingMean PoolingStrategy = common.PoolingMean
+	// PoolingCLS uses the first token embedding for models trained with CLS pooling.
+	PoolingCLS PoolingStrategy = common.PoolingCLS
 )
 
 // OnnxOptions contains runtime-specific settings for the ONNX embedder. These are independent

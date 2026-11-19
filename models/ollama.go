@@ -23,10 +23,6 @@ func NewOllama(config *Config) *Ollama {
 
 func (m *Ollama) ModelName() string { return m.config.Model }
 func (m *Ollama) Provider() string  { return "ollama" }
-func (m *Ollama) RecoveryConfig() any {
-	return map[string]any{"api": "chat", "provider": m.Provider(),
-		"baseURL": m.config.BaseURL, "model": m.config.Model}
-}
 
 func (m *Ollama) GenerateContentStream(ctx context.Context,
 	request *gent.ModelCallRequest,
@@ -185,7 +181,11 @@ func ollamaMessages(messages []*gent.ModelMessage) ([]any, error) {
 		var text strings.Builder
 		var images []string
 		var calls []any
-		for _, part := range message.Parts {
+		readable, err := readableAssistantParts(message.Parts)
+		if err != nil {
+			return nil, err
+		}
+		for _, part := range readable {
 			switch p := partValue(part).(type) {
 			case gent.DataContent:
 				text.WriteString(p.String())
@@ -303,11 +303,11 @@ func readOllama(ctx context.Context, response *http.Response,
 		text.WriteString(event.Message.Content)
 		thinking.WriteString(event.Message.Thinking)
 		calls = append(calls, event.Message.Calls...)
-		if err := sendProviderText(ctx, stream, options, gent.MetaContentReasoning,
+		if err := sendProviderText(ctx, stream, options, gent.AssistantContentReasoning,
 			"thinking", event.Message.Thinking); err != nil {
 			return nil, err
 		}
-		if err := sendProviderText(ctx, stream, options, gent.MetaContentIntermediary,
+		if err := sendProviderText(ctx, stream, options, gent.AssistantContentIntermediary,
 			"content", event.Message.Content); err != nil {
 			return nil, err
 		}
@@ -352,6 +352,17 @@ func convertOllama(response *ollamaEnvelope) (*gent.ModelCallResponse, error) {
 	default:
 		return nil, fmt.Errorf("unknown Ollama done reason %q", response.Reason)
 	}
+	if response.Message.Thinking != "" {
+		choice.Parts = append(choice.Parts, &gent.AssistantContent{
+			Type: gent.AssistantContentReasoning, MessageId: "thinking",
+			Content: []gent.ContentPart{gent.TextContent{Text: response.Message.Thinking}}})
+	}
+	if response.Message.Content != "" {
+		choice.CandidateSource = &gent.ContentSource{MessageIds: []string{"content"}}
+		choice.Parts = append(choice.Parts, &gent.AssistantContent{
+			Type: gent.AssistantContentIntermediary, MessageId: "content",
+			Content: []gent.ContentPart{gent.TextContent{Text: response.Message.Content}}})
+	}
 	for _, raw := range response.Message.Calls {
 		var call struct {
 			Function struct {
@@ -370,25 +381,14 @@ func convertOllama(response *ollamaEnvelope) (*gent.ModelCallResponse, error) {
 		}
 		// Ollama correlates results by tool_name. Gent supplies a local call ID when it prepares
 		// the execution plan; that ID is never inserted into these opaque provider items.
-		choice.ToolCalls = append(choice.ToolCalls, &gent.ModelToolCallRequest{Type: "function",
+		choice.Parts = append(choice.Parts, &gent.ModelToolCallRequest{Type: "function",
 			FunctionCall: &gent.FunctionCall{Name: call.Function.Name,
 				Arguments: string(call.Function.Arguments)}})
 	}
-	if len(choice.ToolCalls) > 0 && choice.Completion.Status == gent.ModelStatusAnswer {
+	if len(choice.ToolCalls()) > 0 && choice.Completion.Status == gent.ModelStatusAnswer {
 		choice.Completion.Status = gent.ModelStatusToolCalls
 	}
-	if response.Message.Content != "" {
-		choice.CandidateContent = []gent.ContentPart{gent.TextContent{Text: response.Message.Content}}
-		choice.CandidateSource = &gent.ContentSource{MessageIds: []string{"content"}}
-		choice.MetaContent = append(choice.MetaContent, &gent.MetaContent{
-			Type: gent.MetaContentIntermediary, MessageId: "content",
-			Content: gent.CloneContentParts(choice.CandidateContent)})
-	}
-	if response.Message.Thinking != "" {
-		choice.MetaContent = append(choice.MetaContent, &gent.MetaContent{
-			Type: gent.MetaContentReasoning, MessageId: "thinking",
-			Content: []gent.ContentPart{gent.TextContent{Text: response.Message.Thinking}}})
-	}
+	classifyAnswerItems(choice)
 	if err := choice.ValidateCompletion(); err != nil {
 		return nil, err
 	}

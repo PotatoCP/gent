@@ -1,0 +1,264 @@
+{
+  "groups": [
+    {
+      "title": "Start",
+      "pages": [
+        {
+          "path": "start/setup",
+          "title": "Setup",
+          "description": "Install Gent and run examples with matching source."
+        },
+        {
+          "path": "start/hello-world",
+          "title": "Hello World",
+          "description": "Create a model and run your first agent task."
+        }
+      ]
+    },
+    {
+      "title": "Build an agent",
+      "pages": [
+        {
+          "path": "agent/models",
+          "title": "Models",
+          "description": "Select an adapter and configure its endpoint and model."
+        },
+        {
+          "path": "agent/tasks",
+          "title": "Tasks and instructions",
+          "description": "Supply user messages and a separate system prefix."
+        },
+        {
+          "path": "agent/tools",
+          "title": "Tools",
+          "description": "Give the agent typed Go operations."
+        },
+        {
+          "path": "agent/schemas",
+          "title": "Schemas",
+          "description": "Describe tool arguments and output data with explicit rules."
+        },
+        {
+          "path": "agent/outputs",
+          "title": "Outputs",
+          "description": "Select and validate the answer type returned by the Runner."
+        },
+        {
+          "path": "agent/content",
+          "title": "Content and media",
+          "description": "Build ordered text, data, and media parts."
+        },
+        {
+          "path": "agent/react",
+          "title": "ReAct loop settings",
+          "description": "Configure the reference loop before execution."
+        }
+      ]
+    },
+    {
+      "title": "Run conversations",
+      "pages": [
+        {
+          "path": "run/conversations",
+          "title": "Conversations",
+          "description": "Keep one run across successive user tasks."
+        },
+        {
+          "path": "run/control",
+          "title": "Execution control and failures",
+          "description": "Handle completion, pause, interruption, and errors."
+        },
+        {
+          "path": "run/configuration",
+          "title": "Configuration, statistics, and limits",
+          "description": "Select shared services and execution allowances."
+        },
+        {
+          "path": "run/hooks",
+          "title": "Hooks",
+          "description": "Change effective input before Gent freezes it."
+        },
+        {
+          "path": "run/compaction",
+          "title": "Compaction",
+          "description": "Reduce active context while keeping the accepted archive."
+        }
+      ]
+    },
+    {
+      "title": "Save and recover",
+      "pages": [
+        {
+          "path": "storage/save-batches",
+          "title": "Save batches",
+          "description": "Store complete accepted savepoints through Recorder.Save."
+        },
+        {
+          "path": "storage/run-state-snapshots",
+          "title": "RunStateSnapshots",
+          "description": "Capture compact state to reduce replay work."
+        },
+        {
+          "path": "storage/restore",
+          "title": "Restore and Continue",
+          "description": "Restore the same accepted state through either replay path."
+        },
+        {
+          "path": "storage/tool-recovery",
+          "title": "Tool recovery",
+          "description": "Inspect interrupted operations without repeating their effects."
+        },
+        {
+          "path": "storage/history",
+          "title": "History and the archive",
+          "description": "Inspect complete accepted history without rerunning work."
+        },
+        {
+          "path": "storage/codecs",
+          "title": "Codecs and saved types",
+          "description": "Preserve typed values and validate saved representations."
+        }
+      ]
+    },
+    {
+      "title": "Observe execution",
+      "pages": [
+        {
+          "path": "observe/subscribers",
+          "title": "Subscribers and events",
+          "description": "Observe frozen execution evidence with bounded delivery."
+        },
+        {
+          "path": "observe/streaming",
+          "title": "Stream to a UI",
+          "description": "Reconcile live previews with accepted history."
+        },
+        {
+          "path": "observe/traces",
+          "title": "Traces",
+          "description": "Build a readable display from execution events."
+        }
+      ]
+    },
+    {
+      "title": "Use larger tool sets",
+      "pages": [
+        {
+          "path": "tools/discovery",
+          "title": "Tool discovery",
+          "description": "Find tools without advertising the whole catalog."
+        },
+        {
+          "path": "tools/programmatic-calls",
+          "title": "Programmatic tool calls",
+          "description": "Let a model use short scripts to coordinate tools."
+        }
+      ]
+    },
+    {
+      "title": "Search documents",
+      "pages": [
+        {
+          "path": "search/documents",
+          "title": "Document search",
+          "description": "Index application documents and return ranked matches."
+        },
+        {
+          "path": "search/policies",
+          "title": "Policies",
+          "description": "Let the agent find application guidance by subject."
+        },
+        {
+          "path": "search/embeddings",
+          "title": "Local embeddings",
+          "description": "Use optional local ONNX models for vector search."
+        }
+      ]
+    },
+    {
+      "title": "Extend Gent",
+      "pages": [
+        {
+          "path": "extend/loops",
+          "title": "Custom loops",
+          "description": "Use the managed runtime with your own execution policy."
+        },
+        {
+          "path": "extend/loop-data",
+          "title": "Custom LoopData",
+          "description": "Keep application progress in every accepted savepoint."
+        },
+        {
+          "path": "extend/models",
+          "title": "Custom models",
+          "description": "Implement request preparation and complete stream lifetime."
+        },
+        {
+          "path": "extend/tool-chains",
+          "title": "Custom tools and tool chains",
+          "description": "Change tool selection while retaining managed execution."
+        }
+      ]
+    },
+    {
+      "title": "Operate and test",
+      "pages": [
+        {
+          "path": "operate/ownership",
+          "title": "Ownership and concurrency",
+          "description": "Share configured services and keep state ownership clear."
+        },
+        {
+          "path": "operate/testing",
+          "title": "Test an agent",
+          "description": "Check real public flows with deterministic inputs."
+        }
+      ]
+    },
+    {
+      "title": "Reference",
+      "pages": [
+        {
+          "path": "reference/api",
+          "title": "API reference",
+          "description": "Read public declarations from the current source."
+        },
+        {
+          "path": "reference/events-and-results",
+          "title": "Events, statistics, and results",
+          "description": "Use named states and ordered evidence."
+        },
+        {
+          "path": "reference/providers",
+          "title": "Provider support",
+          "description": "Separate adapter mappings from remote model capability."
+        }
+      ]
+    },
+    {
+      "title": "Examples",
+      "pages": [
+        {
+          "path": "examples",
+          "title": "Runnable examples",
+          "description": "Run complete programs without expanding the teaching snippets."
+        }
+      ]
+    }
+  ],
+  "redirects": {
+    "quickstart/index.html": "start/hello-world/",
+    "quickstart/dist/gent-quick-start.html": "start/hello-world/",
+    "quickstart/dist/gent-policy-search-lessons.html": "search/policies/",
+    "interface-review/gent-interfaces.html": "reference/api/",
+    "interface-review/index.html": "reference/api/"
+  },
+  "sourceFiles": [
+    "models/provider_capability_test.go",
+    "models/provider_tool_json_test.go",
+    "models/provider_resume_history_test.go",
+    "models/provider_image_test.go",
+    "models/gemini_messages.go",
+    "models/chat_messages.go"
+  ]
+}

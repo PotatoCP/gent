@@ -1,69 +1,53 @@
 package gent
 
 import (
-	"time"
+	core "github.com/rickchristie/gent/internal/core"
 )
-
-// -----------------------------------------------------------------------------
-// Termination Reason
-// -----------------------------------------------------------------------------
 
 // TerminationReason indicates why execution terminated.
-type TerminationReason string
+type TerminationReason = core.TerminationReason
 
-const (
-	// TerminationSuccess means the Loop returned LATerminate.
-	TerminationSuccess TerminationReason = "success"
+// ExecutionStatus distinguishes accepted completion, recoverable pause, and inability to start.
+type ExecutionStatus = core.ExecutionStatus
 
-	// TerminationRefused means the provider explicitly refused the request.
-	TerminationRefused TerminationReason = "refused"
+// ExecutionFinished means a completed-turn result was accepted.
+const ExecutionFinished ExecutionStatus = core.ExecutionFinished
 
-	// TerminationError means an error occurred.
-	TerminationError TerminationReason = "error"
+// ExecutionPaused means execution stopped with the saved turn still unfinished.
+const ExecutionPaused ExecutionStatus = core.ExecutionPaused
 
-	// TerminationContextCanceled means the context was canceled.
-	TerminationContextCanceled TerminationReason = "context_canceled"
+// ExecutionBusy means another call owns execution of this context, including its cleanup.
+const ExecutionBusy ExecutionStatus = core.ExecutionBusy
 
-	// TerminationLimitExceeded means a configured limit was
-	// exceeded. Inspect ExecutionResult.ExceededLimit for
-	// details about which limit was hit.
-	TerminationLimitExceeded TerminationReason = "limit_exceeded"
+// ExecutionNoActiveTurn means Continue has no unfinished turn to execute.
+const ExecutionNoActiveTurn ExecutionStatus = core.ExecutionNoActiveTurn
 
-	// TerminationCompactionFailed means a CompactionStrategy
-	// returned an error. Inspect ExecutionResult.Error for
-	// details.
-	TerminationCompactionFailed TerminationReason = "compaction_failed"
-)
+// TerminationCanceled means NewTurn closed the previous unfinished turn.
+const TerminationCanceled TerminationReason = core.TerminationCanceled
 
-// -----------------------------------------------------------------------------
-// Execution Result
-// -----------------------------------------------------------------------------
+// TerminationStopped means Stop paused the turn without completing it.
+const TerminationStopped TerminationReason = core.TerminationStopped
 
-// ExecutionResult contains the final result of an execution run.
-// Access this via ExecutionContext.Result() after execution completes.
-type ExecutionResult struct {
-	// TerminationReason indicates how execution ended.
-	TerminationReason TerminationReason
+// LimitExceeded preserves the effective rule and measured value at a saved pause. Later Runner
+// configuration does not change this explanation. Scope selects counter measurement; gauges
+// always measure the current turn. Integer counter getters retain exact accounting.
+type LimitExceeded = core.LimitExceeded
 
-	// Output is the final output from the Loop (set when terminated successfully).
-	// This is a slice of ContentPart to support multimodal outputs.
-	// Nil if terminated due to error, limit, or cancellation.
-	Output []ContentPart
+// TerminationSuccess means the Loop returned LATerminate.
+const TerminationSuccess TerminationReason = core.TerminationSuccess
 
-	Refusal *ModelRefusal
+// TerminationRefused means the provider explicitly refused the request.
+const TerminationRefused TerminationReason = core.TerminationRefused
 
-	// Error is the error that caused termination, if any.
-	// Nil for successful termination.
-	Error error
+// TerminationLimitExceeded means a configured limit was
+// exceeded. Inspect ExecutionResult.ExceededLimit for
+// details about which limit was hit.
+const TerminationLimitExceeded TerminationReason = core.TerminationLimitExceeded
 
-	// ExceededLimit is non-nil if execution terminated due to a limit being exceeded.
-	// Inspect this to determine which limit was hit and its threshold.
-	ExceededLimit *Limit
-}
-
-// -----------------------------------------------------------------------------
-// Event Interface
-// -----------------------------------------------------------------------------
+// ExecutionResult is read-only, including every reachable value. Status determines the next
+// action. Busy and NoActiveTurn have no termination or output details. Unexpected operation
+// failures return an error with no result; they do not create a completed error turn.
+type ExecutionResult = core.ExecutionResult
 
 // Event is the marker interface for all events in the unified event system.
 //
@@ -95,9 +79,7 @@ type ExecutionResult struct {
 //	        log.Printf("Event %s: %s", e.EventName, e.Description)
 //	    }
 //	}
-type Event interface {
-	event() // marker method
-}
+type Event = core.Event
 
 // BaseEvent contains common fields for all events.
 // These fields are automatically populated by ExecutionContext when publishing.
@@ -106,294 +88,60 @@ type Event interface {
 //   - EventName: Set by the PublishXXX method (e.g., "gent:iteration:before")
 //   - Timestamp: Current time
 //   - Iteration: Current iteration number (1-indexed, 0 if before first iteration)
-//   - Depth: Current nesting depth (0 for root context)
 //   - Source: Hierarchical display path for the publishing context
 //   - ContextId: Opaque identity for the publishing context
-//   - ParentContextId: Opaque identity for the parent context, if any
-type BaseEvent struct {
-	// EventNumber is populated for accepted observation; mutable hooks see zero.
-	EventNumber uint64
-	AttemptId   string
-	// EventName identifies this event type.
-	// Framework events use "gent:" prefix (e.g., "gent:iteration:before").
-	// User events should use their own namespace (e.g., "myapp:cache_hit").
-	EventName string
-
-	// Timestamp is when this event was published.
-	Timestamp time.Time
-
-	// Iteration is the iteration number when this event occurred (1-indexed).
-	// 0 indicates the event occurred before the first iteration.
-	Iteration int
-
-	// Depth is the nesting depth when this event occurred.
-	// 0 for root context, 1 for first-level child, etc.
-	Depth int
-
-	// Source is the hierarchical execution path that published this event.
-	// It is display-only; use ContextId for correlation keys.
-	Source string
-
-	// ContextId is the opaque identity of the context that published this event.
-	ContextId string
-
-	// ParentContextId is the opaque identity of the parent context.
-	// Empty for root contexts.
-	ParentContextId string
-}
-
-func (BaseEvent) event() {}
-
-func (base *BaseEvent) EventBase() *BaseEvent { return base }
-
-// -----------------------------------------------------------------------------
-// Execution Lifecycle Events
-// -----------------------------------------------------------------------------
+type BaseEvent = core.BaseEvent
 
 // BeforeExecutionEvent is published once before the first iteration starts.
 // Subscribers can use this for initialization tasks.
-type BeforeExecutionEvent struct {
-	BaseEvent
-	Name string
-}
+type BeforeExecutionEvent = core.BeforeExecutionEvent
 
 // AfterExecutionEvent is published once after execution ends, regardless of how it ended.
 // Subscribers can use this for cleanup and final reporting.
-type AfterExecutionEvent struct {
-	BaseEvent
-	Output   []ContentPart
-	Refusal  *ModelRefusal
-	Duration time.Duration
-
-	// TerminationReason indicates how execution ended.
-	TerminationReason TerminationReason
-
-	// Error is the error that caused termination, if any.
-	// Nil for successful termination or limit exceeded.
-	Error error
-}
-
-// -----------------------------------------------------------------------------
-// Iteration Lifecycle Events
-// -----------------------------------------------------------------------------
+type AfterExecutionEvent = core.AfterExecutionEvent
 
 // BeforeIterationEvent is published before each iteration.
-// Subscribers can modify LoopData via execCtx.Data() for persistent context injection.
-type BeforeIterationEvent struct {
-	BaseEvent
-}
+// This event is read-only evidence. The Loop owns changes to its recoverable LoopData.
+type BeforeIterationEvent = core.BeforeIterationEvent
 
 // AfterIterationEvent is published after each iteration completes.
-type AfterIterationEvent struct {
-	BaseEvent
-	Error error
-
-	// Result is the AgentLoopResult returned by the iteration.
-	Result *AgentLoopResult
-
-	// Duration is how long this iteration took.
-	Duration time.Duration
-}
-
-// -----------------------------------------------------------------------------
-// Model Call Events
-// -----------------------------------------------------------------------------
+type AfterIterationEvent = core.AfterIterationEvent
 
 // BeforeModelCallEvent is published before each model API call.
-// Subscribers can modify Request.Messages for ephemeral context injection.
+// Hooks.BeforeModelCall can change Request.Messages before Gent freezes the effective request.
 // Appended messages are sent to the model but are not persisted in conversation history.
-type BeforeModelCallEvent struct {
-	// ToolSearches is private search evidence, never a model message.
-	ToolSearches []*ToolSearchTrace
-	BaseEvent
-
-	// Model is the model identifier being called.
-	Model string
-
-	// Provider is the optional model provider identifier, such as "openai" or "anthropic".
-	Provider string
-
-	// Request contains the messages and captured call options to be sent to the model.
-	// Subscribers can modify Request.Messages for ephemeral context injection.
-	Request *ModelCallRequest
-
-	// ModelCallId identifies this model call across before, stream, and after events.
-	ModelCallId string
-
-	// StreamId uniquely identifies the stream for this model call when available.
-	StreamId string
-
-	// StreamTopicId groups related model streams. It is not unique.
-	StreamTopicId string
-}
+type BeforeModelCallEvent = core.BeforeModelCallEvent
 
 // AfterModelCallEvent is published after each model API call completes.
 // Stats updated: InputTokens, OutputTokens (and per-model variants).
-type AfterModelCallEvent struct {
-	BaseEvent
-
-	// Model is the model identifier that was called.
-	Model string
-
-	// Provider is the optional model provider identifier, such as "openai" or "anthropic".
-	Provider string
-
-	// Request contains the messages and call options that were sent after subscriber changes.
-	Request *ModelCallRequest
-
-	// Response is the full response from the model.
-	Response *ModelCallResponse
-
-	// InputTokens is the number of input/prompt tokens used.
-	InputTokens int
-
-	// OutputTokens is the number of output/completion tokens generated.
-	OutputTokens int
-
-	// Duration is how long the call took.
-	Duration time.Duration
-
-	// Error is any error that occurred (nil if successful).
-	Error error
-
-	// ModelCallId identifies this model call across before, stream, and after events.
-	ModelCallId string
-
-	// StreamId uniquely identifies the stream for this model call when available.
-	StreamId string
-
-	// StreamTopicId groups related model streams. It is not unique.
-	StreamTopicId string
-}
-
-// -----------------------------------------------------------------------------
-// Tool Call Events
-// -----------------------------------------------------------------------------
+type AfterModelCallEvent = core.AfterModelCallEvent
 
 // BeforeToolCallEvent is published before each tool execution.
-// Subscribers can modify Args before the tool is called.
+// Hooks.BeforeToolCall can change Args before Gent freezes the effective input.
 // Stats updated: ToolCalls (and per-tool variants).
-type BeforeToolCallEvent struct {
-	BaseEvent
-
-	// ToolName is the name of the tool being called.
-	ToolName string
-
-	// Args contains the arguments for the tool.
-	// Subscribers can modify this for interception/transformation.
-	Args any
-
-	// ToolCallId identifies this tool call across before and after events.
-	ToolCallId string
-}
+type BeforeToolCallEvent = core.BeforeToolCallEvent
 
 // AfterToolCallEvent is published after each tool execution completes.
 // Stats updated: ToolCallsErrorTotal, ToolCallsErrorConsecutive (on error).
-type AfterToolCallEvent struct {
-	BaseEvent
-
-	// ToolName is the name of the tool that was called.
-	ToolName string
-
-	// Args contains the arguments that were passed to the tool.
-	Args any
-
-	// Output is the output from the tool.
-	Output any
-
-	// Duration is how long the call took.
-	Duration time.Duration
-
-	// Error is any error that occurred (nil if successful).
-	Error error
-
-	// ToolCallId identifies this tool call across before and after events.
-	ToolCallId string
-}
-
-// -----------------------------------------------------------------------------
-// Parse Error Event
-// -----------------------------------------------------------------------------
+type AfterToolCallEvent = core.AfterToolCallEvent
 
 // ParseErrorEvent is published when parsing fails.
 // Stats updated: Based on ErrorType - format, toolchain, termination, or section errors.
-type ParseErrorEvent struct {
-	BaseEvent
-
-	// ErrorType categorizes the parse error.
-	// See ParseErrorType constants for possible values.
-	ErrorType ParseErrorType
-
-	// RawContent is the content that failed to parse.
-	RawContent string
-
-	// Error is the parse error that occurred.
-	Error error
-}
-
-// -----------------------------------------------------------------------------
-// Error Event
-// -----------------------------------------------------------------------------
+type ParseErrorEvent = core.ParseErrorEvent
 
 // ErrorEvent is published when an error occurs during execution.
-type ErrorEvent struct {
-	BaseEvent
-
-	// Error is the error that occurred.
-	Error error
-}
-
-// -----------------------------------------------------------------------------
-// Limit Exceeded Event
-// -----------------------------------------------------------------------------
+type ErrorEvent = core.ErrorEvent
 
 // LimitExceededEvent is published when a configured limit is exceeded.
 // This event is published at the exact moment the limit is exceeded,
 // before context cancellation propagates.
 //
 // Stats updated: None (this is an observability event only).
-type LimitExceededEvent struct {
-	BaseEvent
-
-	// Limit is the limit configuration that was exceeded.
-	Limit Limit
-
-	// CurrentValue is the value that exceeded the limit.
-	// For counters, this is the int64 value cast to float64.
-	// For gauges, this is the float64 value directly.
-	CurrentValue float64
-
-	// MatchedKey is the actual key that exceeded the limit.
-	// For exact key limits, this equals Limit.Key.
-	// For prefix limits, this is the specific key that matched
-	// and exceeded.
-	MatchedKey StatKey
-}
-
-// -----------------------------------------------------------------------------
-// Compaction Event
-// -----------------------------------------------------------------------------
+type LimitExceededEvent = core.LimitExceededEvent
 
 // CompactionEvent is published after a successful compaction.
 // Stats updated: SCCompactions counter is incremented.
-type CompactionEvent struct {
-	BaseEvent
-
-	// ScratchpadLengthBefore is the number of selected entries
-	// before compaction.
-	ScratchpadLengthBefore int
-
-	// ScratchpadLengthAfter is the number of selected entries after
-	// compaction.
-	ScratchpadLengthAfter int
-
-	// Duration is how long the compaction took.
-	Duration time.Duration
-}
-
-// -----------------------------------------------------------------------------
-// Common Event (User-Defined)
-// -----------------------------------------------------------------------------
+type CompactionEvent = core.CompactionEvent
 
 // CommonEvent is for user-defined events.
 //
@@ -403,23 +151,8 @@ type CompactionEvent struct {
 //
 // The EventName field in BaseEvent is set from the first argument.
 // Use a namespaced format to avoid collisions (e.g., "myapp:event_name").
-type CommonEvent struct {
-	BaseEvent
-
-	// Description is a human-readable description of what happened.
-	Description string
-
-	// Data contains event-specific data. Can be any type.
-	Data any
-}
-
-// -----------------------------------------------------------------------------
-// Structured State Changes
-// -----------------------------------------------------------------------------
+type CommonEvent = core.CommonEvent
 
 // StateChangeEvent reports an accepted structured history transition. Context selections reference
 // immutable entries, so callers can reconstruct every context revision without text diffs.
-type StateChangeEvent struct {
-	BaseEvent
-	Change HistoryChange
-}
+type StateChangeEvent = core.StateChangeEvent

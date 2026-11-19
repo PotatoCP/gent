@@ -1,162 +1,39 @@
 package gent
 
-// LimitType specifies how to match keys for limit checking.
-type LimitType string
-
-const (
-	// LimitExactKey matches an exact key.
-	// Use for specific stats like SCIterations or SCInputTokens.
-	LimitExactKey LimitType = "exact"
-
-	// LimitKeyPrefix matches any key with the given prefix.
-	// Use for limits across all models/tools (e.g., SCToolCallsFor
-	// matches all tool calls).
-	LimitKeyPrefix LimitType = "prefix"
+import (
+	core "github.com/rickchristie/gent/internal/core"
 )
 
-// Limit defines a threshold that triggers execution termination.
-//
-// # How Limits Work
-//
-// Limits are checked automatically whenever stats are updated. Exact iteration limits
-// ([SCIterations] and [SCIterations.Self]) are the exception: the executor checks them
-// after each completed iteration with >= semantics so MaxValue is the maximum number of
-// loop iterations that may run. When any limit is exceeded, the ExecutionContext is
-// cancelled and execution terminates with [TerminationLimitExceeded].
-//
-// # Exact Key Limits
-//
-// Match a specific stat key:
-//
-//	// Stop after 50 iterations in this context
-//	{Type: LimitExactKey, Key: SCIterations.Self(), MaxValue: 50}
-//
-//	// Stop after 100k input tokens total (including children)
-//	{Type: LimitExactKey, Key: SCInputTokens, MaxValue: 100000}
-//
-//	// Stop after 10 errors for a specific tool
-//	{
-//	    Type: LimitExactKey,
-//	    Key: SCToolCallsErrorFor + "api_call",
-//	    MaxValue: 10,
-//	}
-//
-// # Prefix Limits
-//
-// Match any key starting with the prefix. Useful for aggregate
-// limits:
-//
-//	// Stop if ANY tool is called more than 20 times
-//	{Type: LimitKeyPrefix, Key: SCToolCallsFor, MaxValue: 20}
-//
-//	// Stop if ANY model uses more than 50k input tokens
-//	{Type: LimitKeyPrefix, Key: SCInputTokensFor, MaxValue: 50000}
-//
-//	// Stop if ANY tool has more than 5 errors
-//	{Type: LimitKeyPrefix, Key: SCToolCallsErrorFor, MaxValue: 5}
-//
-// # Hierarchical Limits
-//
-// Counter stats propagate from child to parent contexts. A limit on
-// the root context applies to the total across all nested agent
-// loops. Use [StatKey.Self] for per-context limits.
-//
-// Gauge stats are local to each context and never propagate.
-type Limit struct {
-	// Type specifies how to match keys (exact or prefix).
-	Type LimitType
+// LimitType specifies how to match keys for limit checking.
+type LimitType = core.LimitType
 
-	// Key is the exact key or prefix to match.
-	// For exact: use the full key (e.g., SCIterations.Self())
-	// For prefix: use the prefix (e.g., SCToolCallsFor)
-	Key StatKey
+// LimitExactKey matches an exact key.
+// Use for specific stats like SCIterations or SCInputTokens.
+const LimitExactKey LimitType = core.LimitExactKey
 
-	// MaxValue is the threshold. For most limits, execution terminates when currentValue >
-	// MaxValue (not >=). For exact iteration limits ([SCIterations] and [SCIterations.Self]),
-	// execution terminates after the completed iteration where currentValue >= MaxValue.
-	// For counters, the int64 value is compared as float64.
-	MaxValue float64
-}
+// LimitKeyPrefix matches any key with the given prefix.
+// Use for limits across all models/tools (e.g., SCToolCallsFor
+// matches all tool calls).
+const LimitKeyPrefix LimitType = core.LimitKeyPrefix
 
-// DefaultLimits returns a set of sensible default limits.
-//
-// These defaults prevent runaway execution:
-//   - 100 iterations max (per-context)
-//   - 3 consecutive parse errors (format, toolchain, section,
-//     termination)
-//   - 3 consecutive tool call errors
-//   - 3 consecutive code execution errors
-//   - 10 total answer rejections
-//
-// Override with ExecutionContext.SetLimits():
-//
-//	customLimits := []gent.Limit{
-//	    {
-//	        Type:     gent.LimitExactKey,
-//	        Key:      gent.SCIterations.Self(),
-//	        MaxValue: 20,
-//	    },
-//	    {
-//	        Type:     gent.LimitExactKey,
-//	        Key:      gent.SCInputTokens,
-//	        MaxValue: 50000,
-//	    },
-//	}
-//	execCtx.SetLimits(customLimits)
-//
-// To add limits without replacing defaults, append to
-// DefaultLimits():
-//
-//	limits := append(gent.DefaultLimits(),
-//	    gent.Limit{
-//	        Type:     gent.LimitExactKey,
-//	        Key:      gent.SCInputTokens,
-//	        MaxValue: 50000,
-//	    },
-//	)
-//	execCtx.SetLimits(limits)
+// LimitScope selects the counter lifetime used by a limit.
+type LimitScope = core.LimitScope
+
+// LimitTurn measures counters in the current turn across all continued attempts.
+const LimitTurn LimitScope = core.LimitTurn
+
+// LimitRun measures counters across all turns of the run.
+const LimitRun LimitScope = core.LimitRun
+
+// Limit defines a threshold that pauses execution. Exact iteration limits use >= at completed
+// iteration boundaries. Other counter and gauge limits use > on each statistics update.
+// A changed configuration cannot reset accepted usage. Continue checks saved usage before work.
+type Limit = core.Limit
+
+// DefaultLimits returns an independent standard preset for explicit caller configuration.
+// Gent applies no execution limits for nil or empty Config.Limits. A supplied slice replaces
+// the complete set; edit a preset rule to change it, or append a rule to add another condition.
+// Recording and Subscriber bounds remain active even when no execution limit is configured.
 func DefaultLimits() []Limit {
-	return []Limit{
-		// Stop after 100 iterations (per-context)
-		{
-			Type:     LimitExactKey,
-			Key:      SCIterations.Self(),
-			MaxValue: 100,
-		},
-
-		// Stop after 3 consecutive output rejections (gauge)
-		{
-			Type:     LimitExactKey,
-			Key:      SGOutputRejectedConsecutive,
-			MaxValue: 3,
-		},
-
-		// Stop after 3 consecutive toolchain parse errors (gauge)
-		{
-			Type:     LimitExactKey,
-			Key:      SGToolchainParseErrorConsecutive,
-			MaxValue: 3,
-		},
-
-		// Stop after 3 consecutive tool call errors (gauge)
-		{
-			Type:     LimitExactKey,
-			Key:      SGToolCallsErrorConsecutive,
-			MaxValue: 3,
-		},
-
-		// Stop after 3 consecutive code execution errors
-		{
-			Type:     LimitExactKey,
-			Key:      SGCodeExecutionsErrorConsecutive,
-			MaxValue: 3,
-		},
-
-		// Stop after 10 total output rejections
-		{
-			Type:     LimitExactKey,
-			Key:      SCOutputRejectedTotal,
-			MaxValue: 10,
-		},
-	}
+	return core.DefaultLimits()
 }

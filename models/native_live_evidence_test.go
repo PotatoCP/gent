@@ -9,7 +9,6 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -55,8 +54,7 @@ if (second.kind !== "execution") throw new Error("read unavailable");
 })();`
 	calls := []string{"lookup:start", "read:record-9"}
 	output := []gent.ContentPart{gent.TextContent{Text: "record-finished"}}
-	lookup := liveProgramCall{"lookup", &responseInput{ID: "start"},
-		`{"next_id":"record-9"}`, nil}
+	lookup := liveProgramCall{"lookup", &responseInput{ID: "start"}, `{"next_id":"record-9"}`, nil}
 	read := liveProgramCall{"read", &responseInput{ID: "record-9"}, "record-finished", nil}
 	programs := [][]liveProgramCall{{lookup, read}}
 	cases := []testCase{
@@ -77,58 +75,96 @@ if (second.kind !== "execution") throw new Error("read unavailable");
 			gent.TerminationSuccess, 2, 0, false, nil}},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			model := &liveEvidenceModel{}
-			addCall := func(name string, args map[string]any) {
-				data, err := json.Marshal(args)
-				if !assert.NoError(t, err) {
-					t.FailNow()
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				model := &liveEvidenceModel{}
+				addCall := func(name string, args map[string]any) {
+					data, err := json.Marshal(args)
+					if !assert.NoError(t, err) {
+						t.FailNow()
+					}
+					model.choices = append(
+						model.choices,
+						&gent.ContentChoice{
+							Completion: gent.ModelCompletion{
+
+								Status: gent.ModelStatusToolCalls,
+							},
+							Parts: []gent.ContentPart{
+								&gent.ModelToolCallRequest{
+									ID: fmt.Sprintf(
+										"call-%d",
+										len(
+											model.choices,
+										),
+									),
+									Type:         "function",
+									FunctionCall: &gent.FunctionCall{Name: name, Arguments: string(data)},
+								},
+							},
+						},
+					)
 				}
-				model.choices = append(model.choices, &gent.ContentChoice{Completion: gent.ModelCompletion{
-					Status: gent.ModelStatusToolCalls,
-				},
-					ToolCalls: []*gent.ModelToolCallRequest{{ID: fmt.Sprintf("call-%d", len(model.choices)),
-						Type: "function", FunctionCall: &gent.FunctionCall{Name: name, Arguments: string(data)}}},
-				})
-			}
-			addCall("tool_registry_search", map[string]any{"query": "lookup|read", "query_type": "regex"})
-			for _, code := range test.input.programs {
-				addCall("run_code", map[string]any{"code": code})
-			}
-			if test.input.direct {
-				addCall("lookup", map[string]any{"id": "start"})
-				addCall("read", map[string]any{"id": "record-9"})
-			}
-			model.choices = append(model.choices, &gent.ContentChoice{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: "record-finished"}},
-			})
-			actual := expected{}
-			chain, err := liveToolChain(&actual.calls, true)
-			if !assert.NoError(t, err) {
-				return
-			}
-			loop := react.NewAgent(model).WithToolChain(chain).WithRecoveryVersion("live-evidence/v1")
-			ctx := gent.NewExecutionContext(context.Background(), "live evidence",
-				gent.NewBasicLoopData(gent.NewTask(gent.TextContent{
-					Text: "Search, then use code to read the record.",
-				})))
-			ctx.SetLimits([]gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 6}})
-			_, result, err := executor.NewRunner(loop, executor.DefaultConfig()).Execute(ctx)
-			if !assert.NoError(t, err) {
-				return
-			}
-			actual.output, actual.reason = result.Output, result.TerminationReason
-			actual.programs, actual.err = liveProgramCalls(ctx)
-			actual.codeRuns = ctx.Stats().GetCounter(gent.SCCodeExecutions)
-			actual.codeErrors = ctx.Stats().GetCounter(gent.SCCodeExecutionsError)
-			actual.accepted = reflect.DeepEqual(programs, actual.programs)
-			assert.Equal(t, test.expected, actual)
-		})
+				addCall("tool_registry_search", map[string]any{"query": "lookup|read", "query_type": "regex"})
+				for _, code := range test.input.programs {
+					addCall("run_code", map[string]any{"code": code})
+				}
+				if test.input.direct {
+					addCall("lookup", map[string]any{"id": "start"})
+					addCall("read", map[string]any{"id": "record-9"})
+				}
+				model.choices = append(
+					model.choices,
+					&gent.ContentChoice{
+
+						Completion: gent.ModelCompletion{
+							Status: gent.ModelStatusAnswer,
+						},
+						CandidateSource: &gent.ContentSource{
+							MessageIds: []string{
+								"answer",
+							},
+						},
+						Parts: []gent.ContentPart{
+							&gent.AssistantContent{
+								Type:      gent.AssistantContentFinalAnswerCandidate,
+								MessageId: "answer",
+								Content: []gent.ContentPart{
+									gent.TextContent{
+										Text: "record-finished",
+									},
+								},
+							},
+						},
+					},
+				)
+				actual := expected{}
+				chain, err := liveToolChain(&actual.calls, true)
+				if !assert.NoError(t, err) {
+					return
+				}
+				loop := react.NewAgent(model)
+				runner, execCtx := newModelExecution(t, context.Background(), loop, &gent.Config{
+					ToolChain: chain, Limits: []gent.Limit{{Type: gent.LimitExactKey,
+						Key: gent.SCIterations, MaxValue: 6}}})
+				_, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart(
+					"Search, then use code to read the record.")))
+				if !assert.NoError(t, err) {
+					return
+				}
+				actual.output, actual.reason = result.Output, result.TerminationReason
+				actual.programs, actual.err = liveProgramCalls(execCtx)
+				actual.codeRuns = execCtx.Stats().GetCounter(gent.SCCodeExecutions)
+				actual.codeErrors = execCtx.Stats().GetCounter(gent.SCCodeExecutionsError)
+				actual.accepted = reflect.DeepEqual(programs, actual.programs)
+				assert.Equal(t, test.expected, actual)
+			},
+		)
 	}
 }
-func (m *liveEvidenceModel) PrepareRequest(ctx *gent.ExecutionContext,
+func (m *liveEvidenceModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

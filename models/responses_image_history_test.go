@@ -75,7 +75,7 @@ func TestResponsesImageAnswerParts(t *testing.T) {
 				return
 			}
 			choice := response.Choices[0]
-			assert.Equal(t, test.expected, expected{choice.CandidateContent, choice.CandidateSource, err})
+			assert.Equal(t, test.expected, expected{choice.CandidateContent(), choice.CandidateSource, err})
 			assert.Equal(t, gent.ModelCompletion{Status: gent.ModelStatusAnswer,
 				ProviderReason: "completed"}, choice.Completion)
 			original, err := json.Marshal(items)

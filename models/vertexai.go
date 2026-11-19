@@ -85,13 +85,6 @@ func NewVertexAI(config *VertexAIConfig) (*VertexAI, error) {
 			authorize: authentication.authorize}}, nil
 }
 
-// Recovery records include the target project but exclude credential files, tokens, and keys.
-func (m *VertexAI) RecoveryConfig() any {
-	return map[string]any{"api": "generateContent", "provider": m.Provider(),
-		"baseURL": m.config.BaseURL, "model": m.config.Model,
-		"project": m.project, "location": m.location}
-}
-
 type vertexAuth struct {
 	tokens       auth.TokenProvider
 	credentials  *auth.Credentials

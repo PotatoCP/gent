@@ -119,12 +119,12 @@ func (state *anthropicStream) consume(data []byte) (bool, error) {
 			return false, err
 		}
 		block.append(field, value)
-		meta := ""
+		meta := gent.AssistantContentUnspecified
 		if field == "text" {
-			meta = gent.MetaContentIntermediary
+			meta = gent.AssistantContentIntermediary
 		}
 		if field == "thinking" {
-			meta = gent.MetaContentReasoning
+			meta = gent.AssistantContentReasoning
 		}
 		if meta != "" {
 			return false, sendProviderText(state.ctx, state.stream, state.options, meta,

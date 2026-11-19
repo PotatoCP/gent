@@ -1,12 +1,11 @@
 package react
 
-import genttest "github.com/rickchristie/gent/internal/tt"
-
 import (
 	"context"
 	"testing"
 
 	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -16,7 +15,8 @@ func TestNativeAgent_CompletionStates(t *testing.T) {
 		tools  bool
 	}
 	type expected struct {
-		result *gent.AgentLoopResult
+		value  string
+		result *gent.ExecutionResult
 		calls  int
 		err    error
 	}
@@ -25,54 +25,55 @@ func TestNativeAgent_CompletionStates(t *testing.T) {
 		input    input
 		expected expected
 	}
-	retry := &gent.AgentLoopResult{Action: gent.LAContinue}
-	answer := &gent.AgentLoopResult{TerminationReason: gent.TerminationSuccess,
-		Action: gent.LATerminate,
-		Result: []gent.ContentPart{
-			gent.TextContent{Text: "Done."},
-		},
-		Value: genttest.Value(gent.ContentText([]gent.ContentPart{
-			gent.TextContent{Text: "Done."},
-		}))}
-	toolResult := &gent.AgentLoopResult{Action: gent.LAContinue}
+	limit := &gent.Limit{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 1}
+	paused := func(calls int) expected {
+		return expected{calls: calls, result: &gent.ExecutionResult{
+			Status: gent.ExecutionPaused, TerminationReason: gent.TerminationLimitExceeded,
+			ExceededLimit: &gent.LimitExceeded{Limit: limit, MatchedKey: gent.SCIterations, CurrentValue: 1},
+		}}
+	}
 	cases := []testCase{
-		{"incomplete tools", input{gent.ModelStatusIncomplete, true}, expected{retry, 0, nil}},
-		{"incomplete answer", input{gent.ModelStatusIncomplete, false}, expected{retry, 0, nil}},
-		{"completed tools", input{gent.ModelStatusToolCalls, true}, expected{toolResult, 1, nil}},
-		{"completed answer", input{gent.ModelStatusAnswer, false}, expected{answer, 0, nil}},
+		{"incomplete tools", input{gent.ModelStatusIncomplete, true}, paused(0)},
+		{"incomplete answer", input{gent.ModelStatusIncomplete, false}, paused(0)},
+		{"completed tools", input{gent.ModelStatusToolCalls, true}, paused(1)},
+		{"completed answer", input{gent.ModelStatusAnswer, false}, expected{value: "Done.",
+			result: &gent.ExecutionResult{Status: gent.ExecutionFinished,
+				TerminationReason: gent.TerminationSuccess,
+				Output:            []gent.ContentPart{gent.TextPart("Done.")}}}},
 		{"refused with calls", input{gent.ModelStatusRefused, true}, expected{
-			&gent.AgentLoopResult{Action: gent.LATerminate, TerminationReason: gent.TerminationRefused,
-				Refusal: &gent.ModelRefusal{Code: "blocked"}}, 0, nil}},
+			result: &gent.ExecutionResult{Status: gent.ExecutionFinished,
+				TerminationReason: gent.TerminationRefused,
+				Refusal:           &gent.ModelRefusal{Code: "blocked"}}}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			choice := &gent.ContentChoice{
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Done."}},
-				Completion:       gent.ModelCompletion{Status: test.input.status},
-			}
+			choice := answerChoice("Done.")
+			choice.Completion.Status = test.input.status
 			if test.input.status == gent.ModelStatusRefused {
 				choice.Completion.Refusal = &gent.ModelRefusal{Code: "blocked"}
 			}
 			if test.input.tools {
-				choice.ToolCalls = []*gent.ModelToolCallRequest{nativeTestCall("call-a", "lookup", "{}")}
+				choice.Parts = []gent.ContentPart{nativeTestCall("call-a", "lookup", "{}")}
+				choice.CandidateSource = nil
 			}
 			model := newMockModel(nativeTestResponse(choice))
 			calls := 0
-			agent := NewAgent(model).RegisterTool(gent.DefineTool("lookup",
+			chain := toolchain.New().RegisterTool(gent.DefineTool("lookup",
 				func(context.Context, map[string]any) (*gent.ToolExecutionResponse, error) {
 					calls++
 					return capturedToolResponse("record", nil)
 				}).Description("Read").ParameterSchema(nil).MustBuild())
-			ctx := newTestExecCtx(gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Read."})))
-			result, err := agent.Next(ctx)
-			want := test.expected
-			if want.result.TerminationReason == gent.TerminationSuccess {
-				copy := *want.result
-				copy.ContentSource = nativeTestSource(ctx, 1)
-				want.result = &copy
+			var limits []gent.Limit
+			if test.expected.result.Status == gent.ExecutionPaused {
+				limits = []gent.Limit{*limit}
 			}
-			assert.Equal(t, want, expected{result, calls, err})
-			assert.Equal(t, int64(test.expected.calls), ctx.Stats().GetCounter(gent.SCToolCalls))
+			runner, execCtx := newTestExecution(t, NewAgent(model), &gent.Config{
+				ToolChain: chain, Limits: limits,
+			})
+			value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read.")))
+			test.expected.result.TurnId = execCtx.TurnId()
+			assert.Equal(t, test.expected, expected{value, result, calls, err})
+			assert.Equal(t, int64(test.expected.calls), execCtx.Stats().GetCounter(gent.SCToolCalls))
 		})
 	}
 }

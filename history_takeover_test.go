@@ -10,7 +10,6 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
@@ -18,10 +17,11 @@ import (
 var errExpiredLease = errors.New("worker lease expired")
 
 type takeoverStore struct {
-	mu     sync.Mutex
-	lease  int
-	view   gent.RunView
-	codecs *gent.CodecRegistry
+	mu               sync.Mutex
+	lease            int
+	view             gent.RunView
+	codecs           *gent.CodecRegistry
+	runStateSnapshot []byte
 }
 
 type takeoverRecorder struct {
@@ -29,33 +29,34 @@ type takeoverRecorder struct {
 	lease int
 }
 
-func (r *takeoverRecorder) Save(_ context.Context, batch *gent.SaveBatch) error {
+func (r *takeoverRecorder) Save(
+	_ context.Context, batch *gent.SaveBatch,
+	captureRunStateSnapshot func() (*gent.RunState, error),
+) error {
 	r.store.mu.Lock()
 	defer r.store.mu.Unlock()
 	if r.lease != r.store.lease {
 		return errExpiredLease
 	}
-	next, err := gent.ApplyBatch(r.store.view, batch, r.store.codecs)
+	if r.store.view.RunId == "" {
+		r.store.view = *gent.NewRunView(batch.RunId)
+	}
+	if err := applyTestBatch(&r.store.view, batch, r.store.codecs); err != nil {
+		return err
+	}
+	state, err := captureRunStateSnapshot()
 	if err != nil {
 		return err
 	}
-	r.store.view = next
-	return nil
+	r.store.runStateSnapshot, err = r.store.codecs.MarshalRunState(state)
+	return err
 }
 
-func (s *takeoverStore) takeover() (gent.RunView, *takeoverRecorder, error) {
+func (s *takeoverStore) takeover() ([]byte, *takeoverRecorder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.lease++
-	data, err := s.codecs.Marshal(s.view)
-	if err != nil {
-		return gent.RunView{}, nil, err
-	}
-	var saved gent.RunView
-	if err := s.codecs.Unmarshal(data, &saved); err != nil {
-		return saved, nil, err
-	}
-	return saved, &takeoverRecorder{store: s, lease: s.lease}, nil
+	return s.runStateSnapshot, &takeoverRecorder{store: s, lease: s.lease}
 }
 
 func TestNativeTakeoverStopsOldWorker(t *testing.T) {
@@ -77,7 +78,7 @@ func TestNativeTakeoverStopsOldWorker(t *testing.T) {
 			unblock := func() { releaseOnce.Do(func() { close(release) }) }
 			defer unblock()
 			var effects atomic.Int64
-			build := func(finish bool) *react.Agent[string] {
+			build := func(finish bool) (*react.Agent[string], *gent.Config) {
 				chain := toolchain.New()
 				for _, name := range []string{"lookup", "book", "later"} {
 					chain.RegisterTool(gent.DefineTool(name,
@@ -98,20 +99,19 @@ func TestNativeTakeoverStopsOldWorker(t *testing.T) {
 				if test.input.program {
 					selected = toolchain.NewJsToolChainWrapper(chain)
 				}
-				return react.NewAgent(&guidanceModel{program: test.input.program, finish: finish}).
-					WithToolChain(selected).WithRecoveryVersion("takeover/v1")
+				return react.NewAgent(&guidanceModel{program: test.input.program, finish: finish}),
+					&gent.Config{ToolChain: selected}
 			}
-			store := &takeoverStore{lease: 1, codecs: gent.NewCodecRegistry(),
-				view: gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "takeover"}}
+			store := &takeoverStore{lease: 1, codecs: gent.NewCodecRegistry()}
 			worker, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			ctx := gent.NewExecutionContext(worker, "takeover",
-				gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Run the operations."})),
-				gent.WithRunId("takeover"), gent.WithCodecs(store.codecs),
-				gent.WithRecorder(&takeoverRecorder{store: store, lease: 1}))
+			agent, config := build(false)
+			config.Codecs = store.codecs
+			config.Recorder = &takeoverRecorder{store: store, lease: 1}
+			runner, execCtx := newTestExecution(t, worker, agent, config)
 			oldDone := make(chan error, 1)
 			go func() {
-				_, _, err := executor.NewRunner(build(false), executor.DefaultConfig()).Execute(ctx)
+				_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Run the operations.")))
 				oldDone <- err
 			}()
 			select {
@@ -121,14 +121,10 @@ func TestNativeTakeoverStopsOldWorker(t *testing.T) {
 			case <-worker.Done():
 				t.Fatal("old worker did not start the tool")
 			}
-			saved, recorder, err := store.takeover()
-			if !assert.NoError(t, err) {
-				return
-			}
-			fresh := build(true)
-			bindings := recoveryBindings(t, fresh)
-			bindings.Recorder = recorder
-			_, result, err := resumeRecovery(fresh, saved, bindings)
+			saved, recorder := store.takeover()
+			fresh, freshConfig := build(true)
+			freshConfig.Recorder = recorder
+			_, result, err := resumeRecovery(t, fresh, saved, freshConfig)
 			if !assert.NoError(t, err) {
 				return
 			}

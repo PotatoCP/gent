@@ -1,7 +1,6 @@
 package react
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -22,14 +21,12 @@ import (
 type Agent[T any] struct {
 	model                  gent.Model
 	format                 gent.TextFormat
-	toolChain              gent.ToolChain
 	output                 gent.Output[T]
 	callOptions            []gent.CallOption
 	userSampling           gent.CallOptions
 	repetitionConfig       agentutil.RepetitionConfig
 	maxResponseChars       int
 	responseTooLongMessage string
-	recoveryVersion        string
 }
 
 // NewAgent creates a text-output agent. The caller supplies the complete starting Task.
@@ -38,7 +35,7 @@ func NewAgent(model gent.Model) *Agent[string] {
 }
 
 func NewWithOutput[T any](model gent.Model, out gent.Output[T]) *Agent[T] {
-	return &Agent[T]{model: model, output: out, format: format.NewXML(), toolChain: toolchain.New(),
+	return &Agent[T]{model: model, output: out, format: format.NewXML(),
 		repetitionConfig:       agentutil.DefaultRepetitionConfig(),
 		maxResponseChars:       agentutil.DefaultMaxResponseChars,
 		responseTooLongMessage: agentutil.DefaultResponseTooLongMessage}
@@ -46,15 +43,18 @@ func NewWithOutput[T any](model gent.Model, out gent.Output[T]) *Agent[T] {
 
 func (r *Agent[T]) Output() gent.Output[T] { return r.output }
 
+var noTools gent.ToolChain = toolchain.New()
+
+func (r *Agent[T]) tools(execCtx *gent.ExecutionContext) gent.ToolChain {
+	if execCtx.Config().ToolChain == nil {
+		return noTools
+	}
+	return execCtx.Config().ToolChain
+}
+
 // WithToolResultFormat selects the renderer for tool results and loop recovery messages.
 func (r *Agent[T]) WithToolResultFormat(f gent.TextFormat) *Agent[T] {
 	r.format = f
-	return r
-}
-
-// WithToolChain sets the tool chain.
-func (r *Agent[T]) WithToolChain(tc gent.ToolChain) *Agent[T] {
-	r.toolChain = tc
 	return r
 }
 
@@ -88,7 +88,7 @@ func (r *Agent[T]) WithResponseTooLongMessage(msg string) *Agent[T] {
 }
 
 // WithCallOptions resolves the supplied functions once into reusable configuration. The saved
-// compatibility manifest and every request therefore use the same option values.
+// effective request therefore uses the same option values.
 func (r *Agent[T]) WithCallOptions(options ...gent.CallOption) *Agent[T] {
 	resolved := gent.NewModelCallRequest(nil).Options
 	for _, option := range options {
@@ -107,12 +107,6 @@ func (r *Agent[T]) WithCallOptions(options ...gent.CallOption) *Agent[T] {
 		}
 	}
 	r.callOptions = []gent.CallOption{gent.WithOptions(&resolved)}
-	return r
-}
-
-// RegisterTool adds a tool to the tool chain.
-func (r *Agent[T]) RegisterTool(tool any) *Agent[T] {
-	r.toolChain.RegisterTool(tool)
 	return r
 }
 
@@ -149,7 +143,7 @@ func (r *Agent[T]) handleResponseTooLong(
 ) (*gent.AgentLoopResult, error) {
 	responseContent := ""
 	if response != nil && len(response.Choices) > 0 {
-		responseContent = gent.ContentText(response.Choices[0].CandidateContent)
+		responseContent = gent.ContentText(response.Choices[0].CandidateContent())
 	}
 
 	// Expired record with truncated response (debugging only).
@@ -215,7 +209,7 @@ func (r *Agent[T]) handleRepetition(
 	// Extract raw response content for the expired iteration.
 	responseContent := ""
 	if response != nil && len(response.Choices) > 0 {
-		responseContent = gent.ContentText(response.Choices[0].CandidateContent)
+		responseContent = gent.ContentText(response.Choices[0].CandidateContent())
 	}
 
 	// 1. Expired record with the truncated response (debugging only).
@@ -368,7 +362,7 @@ func (r *Agent[T]) callModelStreaming(
 	stream, err := execCtx.GenerateContentStream(
 		r.model,
 		gent.ModelCall{StreamId: streamId, StreamTopicId: streamTopicId},
-		request, r.toolChain,
+		request, r.tools(execCtx),
 	)
 	if err != nil {
 		return nil, nil, err
@@ -379,20 +373,9 @@ func (r *Agent[T]) callModelStreaming(
 	totalChars := 0
 
 	for chunk := range stream.Chunks() {
-		if chunk.Err != nil {
-			// Completion accepts final model evidence before the executor can end the run.
-			stream.Close()
-			_, completionErr := stream.Response()
-			if completionErr != nil {
-				if errors.Is(completionErr, chunk.Err) {
-					return nil, nil, completionErr
-				}
-				return nil, nil, errors.Join(chunk.Err, completionErr)
-			}
-			return nil, nil, chunk.Err
-		}
 		acc.Add(chunk)
-		text := gent.MetaText(chunk.MetaContent, gent.MetaContentIntermediary)
+		text := gent.ContentText(gent.AssistantParts(chunk.Content, gent.AssistantContentIntermediary)) +
+			gent.ContentText(gent.AssistantParts(chunk.Content, gent.AssistantContentFinalAnswerCandidate))
 		totalChars += len(text)
 
 		// Real-time repetition detection.
@@ -426,8 +409,8 @@ func (r *Agent[T]) callModelStreaming(
 			choice.Completion.Status == gent.ModelStatusFailed {
 			return streamResponse, nil, nil
 		}
-		content := gent.ContentText(choice.CandidateContent)
-		for _, call := range choice.ToolCalls {
+		content := gent.ContentText(choice.CandidateContent())
+		for _, call := range choice.ToolCalls() {
 			if call.FunctionCall != nil {
 				content += call.FunctionCall.Arguments
 			}

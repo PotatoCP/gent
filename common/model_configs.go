@@ -29,10 +29,10 @@ func init() {
 		{
 			Model: model("multilingual-e5-small"), ConfigName: "multilingual-e5-small",
 			Description: "Default. Best quality/size for multilingual.",
-			Dimensions: 384, Pooling: PoolingMean, OptimalChunkTokens: 384,
+			Dimensions:  384, Pooling: PoolingMean, OptimalChunkTokens: 384,
 			QueryPrefix: "query: ", PassagePrefix: "passage: ",
-			InputNames: []string{"input_ids", "attention_mask", "token_type_ids"},
-			OutputName: "last_hidden_state",
+			InputNames:      []string{"input_ids", "attention_mask", "token_type_ids"},
+			OutputName:      "last_hidden_state",
 			ModelOverheadMB: 378, BestFor: "All use cases", // measured
 		},
 		// --- multilingual-e5-base ---
@@ -40,20 +40,20 @@ func init() {
 		{
 			Model: model("multilingual-e5-base"), ConfigName: "multilingual-e5-base",
 			Description: "Higher quality multilingual. 2x memory vs e5-small.",
-			Dimensions: 768, Pooling: PoolingMean, OptimalChunkTokens: 512,
+			Dimensions:  768, Pooling: PoolingMean, OptimalChunkTokens: 512,
 			QueryPrefix: "query: ", PassagePrefix: "passage: ",
-			InputNames: []string{"input_ids", "attention_mask"},
-			OutputName: "last_hidden_state",
+			InputNames:      []string{"input_ids", "attention_mask"},
+			OutputName:      "last_hidden_state",
 			ModelOverheadMB: 930, BestFor: "Quality-critical multilingual", // estimated
 		},
 		// --- e5-small-v2 ---
 		{
 			Model: model("e5-small-v2"), ConfigName: "e5-small-v2",
 			Description: "Lightweight English with e5 quality.",
-			Dimensions: 384, Pooling: PoolingMean, OptimalChunkTokens: 256,
+			Dimensions:  384, Pooling: PoolingMean, OptimalChunkTokens: 256,
 			QueryPrefix: "query: ", PassagePrefix: "passage: ",
-			InputNames: []string{"input_ids", "attention_mask", "token_type_ids"},
-			OutputName: "last_hidden_state",
+			InputNames:      []string{"input_ids", "attention_mask", "token_type_ids"},
+			OutputName:      "last_hidden_state",
 			ModelOverheadMB: 120, BestFor: "Lightweight English", // estimated
 		},
 		// --- all-MiniLM-L6-v2 ---
@@ -64,32 +64,32 @@ func init() {
 		{
 			Model: model("all-MiniLM-L6-v2"), ConfigName: "all-MiniLM-L6-v2",
 			Description: "Most widely used small model. No prefixes needed.",
-			Dimensions: 384, Pooling: PoolingMean, OptimalChunkTokens: 200,
+			Dimensions:  384, Pooling: PoolingMean, OptimalChunkTokens: 200,
 			QueryPrefix: "", PassagePrefix: "",
-			InputNames: []string{"input_ids", "attention_mask", "token_type_ids"},
-			OutputName: "last_hidden_state",
+			InputNames:      []string{"input_ids", "attention_mask", "token_type_ids"},
+			OutputName:      "last_hidden_state",
 			ModelOverheadMB: 96, BestFor: "Smallest with broad validation", // measured
 		},
 		// --- bge-small-en-v1.5 ---
 		{
 			Model: model("bge-small-en-v1.5"), ConfigName: "bge-small-en-v1.5",
 			Description: "Strong small English retrieval. CLS pooling.",
-			Dimensions: 384, Pooling: PoolingCLS, OptimalChunkTokens: 256,
-			QueryPrefix:   "Represent this sentence for searching relevant passages: ",
-			PassagePrefix: "",
-			InputNames: []string{"input_ids", "attention_mask"},
-			OutputName: "token_embeddings",
+			Dimensions:  384, Pooling: PoolingCLS, OptimalChunkTokens: 256,
+			QueryPrefix:     "Represent this sentence for searching relevant passages: ",
+			PassagePrefix:   "",
+			InputNames:      []string{"input_ids", "attention_mask"},
+			OutputName:      "token_embeddings",
 			ModelOverheadMB: 120, BestFor: "English retrieval, CLS pooling", // estimated
 		},
 		// --- bge-base-en-v1.5 ---
 		{
 			Model: model("bge-base-en-v1.5"), ConfigName: "bge-base-en-v1.5",
 			Description: "Strong base English retrieval. CLS pooling.",
-			Dimensions: 768, Pooling: PoolingCLS, OptimalChunkTokens: 512,
-			QueryPrefix:   "Represent this sentence for searching relevant passages: ",
-			PassagePrefix: "",
-			InputNames: []string{"input_ids", "attention_mask"},
-			OutputName: "token_embeddings",
+			Dimensions:  768, Pooling: PoolingCLS, OptimalChunkTokens: 512,
+			QueryPrefix:     "Represent this sentence for searching relevant passages: ",
+			PassagePrefix:   "",
+			InputNames:      []string{"input_ids", "attention_mask"},
+			OutputName:      "token_embeddings",
 			ModelOverheadMB: 385, BestFor: "English retrieval, CLS pooling", // estimated
 		},
 		// --- nomic-embed-text-v1.5 (full 768d) ---
@@ -101,10 +101,10 @@ func init() {
 		{
 			Model: model("nomic-embed-text-v1.5"), ConfigName: "nomic-embed-text-v1.5-768d",
 			Description: "Full 768 dimensions. Best for long documents (8192 seq len).",
-			Dimensions: 768, Pooling: PoolingMean, OptimalChunkTokens: 512,
+			Dimensions:  768, Pooling: PoolingMean, OptimalChunkTokens: 512,
 			QueryPrefix: "search_query: ", PassagePrefix: "search_document: ",
-			InputNames: []string{"input_ids", "token_type_ids", "attention_mask"},
-			OutputName: "last_hidden_state",
+			InputNames:      []string{"input_ids", "token_type_ids", "attention_mask"},
+			OutputName:      "last_hidden_state",
 			PostProcess:     func(v []float32) []float32 { return LayerNorm(v) },
 			ModelOverheadMB: 480, BestFor: "Long documents, max quality", // estimated
 		},
@@ -112,9 +112,9 @@ func init() {
 		{
 			Model: model("nomic-embed-text-v1.5"), ConfigName: "nomic-embed-text-v1.5-384d",
 			Description: "Matryoshka 384d truncation. Same model, half the vector storage.",
-			Dimensions: 384, ModelDimensions: 768, Pooling: PoolingMean,
+			Dimensions:  384, ModelDimensions: 768, Pooling: PoolingMean,
 			OptimalChunkTokens: 384,
-			QueryPrefix: "search_query: ", PassagePrefix: "search_document: ",
+			QueryPrefix:        "search_query: ", PassagePrefix: "search_document: ",
 			InputNames: []string{"input_ids", "token_type_ids", "attention_mask"},
 			OutputName: "last_hidden_state",
 			PostProcess: func(v []float32) []float32 {
@@ -127,32 +127,32 @@ func init() {
 		{
 			Model: model("snowflake-arctic-embed-s"), ConfigName: "snowflake-arctic-embed-s",
 			Description: "Top small retrieval score. CLS pooling.",
-			Dimensions: 384, Pooling: PoolingCLS, OptimalChunkTokens: 256,
-			QueryPrefix:   "Represent this sentence for searching relevant passages: ",
-			PassagePrefix: "",
-			InputNames: []string{"input_ids", "attention_mask", "token_type_ids"},
-			OutputName: "last_hidden_state",
+			Dimensions:  384, Pooling: PoolingCLS, OptimalChunkTokens: 256,
+			QueryPrefix:     "Represent this sentence for searching relevant passages: ",
+			PassagePrefix:   "",
+			InputNames:      []string{"input_ids", "attention_mask", "token_type_ids"},
+			OutputName:      "last_hidden_state",
 			ModelOverheadMB: 120, BestFor: "Top small retrieval score", // estimated
 		},
 		// --- snowflake-arctic-embed-m ---
 		{
 			Model: model("snowflake-arctic-embed-m"), ConfigName: "snowflake-arctic-embed-m",
 			Description: "Top base retrieval score. CLS pooling.",
-			Dimensions: 768, Pooling: PoolingCLS, OptimalChunkTokens: 512,
-			QueryPrefix:   "Represent this sentence for searching relevant passages: ",
-			PassagePrefix: "",
-			InputNames: []string{"input_ids", "attention_mask", "token_type_ids"},
-			OutputName: "last_hidden_state",
+			Dimensions:  768, Pooling: PoolingCLS, OptimalChunkTokens: 512,
+			QueryPrefix:     "Represent this sentence for searching relevant passages: ",
+			PassagePrefix:   "",
+			InputNames:      []string{"input_ids", "attention_mask", "token_type_ids"},
+			OutputName:      "last_hidden_state",
 			ModelOverheadMB: 385, BestFor: "Top base retrieval score", // estimated
 		},
 		// --- bge-micro-v2 ---
 		{
 			Model: model("bge-micro-v2"), ConfigName: "bge-micro-v2",
 			Description: "Absolute smallest model. No prefixes.",
-			Dimensions: 384, Pooling: PoolingMean, OptimalChunkTokens: 200,
+			Dimensions:  384, Pooling: PoolingMean, OptimalChunkTokens: 200,
 			QueryPrefix: "", PassagePrefix: "",
-			InputNames: []string{"input_ids", "attention_mask", "token_type_ids"},
-			OutputName: "last_hidden_state",
+			InputNames:      []string{"input_ids", "attention_mask", "token_type_ids"},
+			OutputName:      "last_hidden_state",
 			ModelOverheadMB: 66, BestFor: "Absolute smallest", // measured
 		},
 	}

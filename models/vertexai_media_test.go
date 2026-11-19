@@ -46,7 +46,7 @@ func TestVertexAIImageControlsAndCredentialIsolation(t *testing.T) {
 	if !assert.NoError(t, err) || !assert.Len(t, response.Choices, 1) {
 		return
 	}
-	assert.Equal(t, []gent.ContentPart{image}, response.Choices[0].CandidateContent)
+	assert.Equal(t, []gent.ContentPart{image}, response.Choices[0].CandidateContent())
 	assert.Equal(t, []string{"GET", "POST", "GET"}, methods)
 	assert.Equal(t, []string{"", "Bearer fixture-key", ""}, authorizations)
 	assert.Equal(t, map[string]any{"aspectRatio": "1:1"}, config)
@@ -83,7 +83,6 @@ func TestVertexAIHTTPFailureDoesNotRepeatPaidCall(t *testing.T) {
 	}
 	response, err := stream.Response()
 	assert.Nil(t, response)
-	assert.EqualError(t, err,
-		`model HTTP 429: {"error":{"code":429,"message":"quota exceeded"}}`)
+	assert.EqualError(t, err, `model HTTP 429: {"error":{"code":429,"message":"quota exceeded"}}`)
 	assert.Equal(t, 1, calls)
 }

@@ -22,10 +22,6 @@ func NewAnthropic(config *Config) *Anthropic {
 
 func (m *Anthropic) ModelName() string { return m.config.Model }
 func (m *Anthropic) Provider() string  { return "anthropic" }
-func (m *Anthropic) RecoveryConfig() any {
-	return map[string]any{"api": "messages", "provider": m.Provider(),
-		"baseURL": m.config.BaseURL, "model": m.config.Model}
-}
 
 func (m *Anthropic) GenerateContentStream(ctx context.Context,
 	request *gent.ModelCallRequest,
@@ -265,7 +261,11 @@ func anthropicMessages(messages []*gent.ModelMessage) ([]any, []any, error) {
 				content = append(content, item)
 			}
 		} else {
-			for _, part := range message.Parts {
+			readable, err := readableAssistantParts(message.Parts)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, part := range readable {
 				block, err := anthropicPart(partValue(part))
 				if err != nil {
 					return nil, nil, err
@@ -316,8 +316,7 @@ func anthropicPart(part gent.ContentPart) (map[string]any, error) {
 		if p.Detail != "" {
 			return nil, errors.New("Anthropic does not support image detail")
 		}
-		return map[string]any{"type": "image",
-			"source": map[string]any{"type": "url", "url": p.URL}}, nil
+		return map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": p.URL}}, nil
 	case gent.BinaryContent:
 		kind := "image"
 		switch p.MIMEType {
@@ -428,16 +427,26 @@ func convertAnthropic(response *anthropicEnvelope) (*gent.ModelCallResponse, err
 		switch block.Type {
 		case "text":
 			part := gent.TextContent{Text: block.Text}
-			choice.CandidateContent = append(choice.CandidateContent, part)
 			if choice.CandidateSource == nil {
 				choice.CandidateSource = &gent.ContentSource{}
 			}
 			choice.CandidateSource.MessageIds = append(choice.CandidateSource.MessageIds, id)
-			choice.MetaContent = append(choice.MetaContent, &gent.MetaContent{
-				Type: gent.MetaContentIntermediary, MessageId: id, Content: []gent.ContentPart{part}})
+			choice.Parts = append(
+				choice.Parts,
+				&gent.AssistantContent{
+
+					Type: candidateKind(
+						choice.Completion.Status,
+					),
+					MessageId: id,
+					Content: []gent.ContentPart{
+						part,
+					},
+				},
+			)
 		case "thinking":
-			choice.MetaContent = append(choice.MetaContent, &gent.MetaContent{
-				Type: gent.MetaContentReasoning, MessageId: id,
+			choice.Parts = append(choice.Parts, &gent.AssistantContent{
+				Type: gent.AssistantContentReasoning, MessageId: id,
 				Content: []gent.ContentPart{gent.TextContent{Text: block.Thinking}}})
 		case "tool_use":
 			if block.ID == "" || block.Name == "" {
@@ -446,7 +455,7 @@ func convertAnthropic(response *anthropicEnvelope) (*gent.ModelCallResponse, err
 				}
 				return nil, errors.New("Anthropic tool use requires id and name")
 			}
-			choice.ToolCalls = append(choice.ToolCalls, &gent.ModelToolCallRequest{ID: block.ID,
+			choice.Parts = append(choice.Parts, &gent.ModelToolCallRequest{ID: block.ID,
 				Type: "function", FunctionCall: &gent.FunctionCall{
 					Name: block.Name, Arguments: string(block.Input)}})
 		case "redacted_thinking", "server_tool_use", "web_search_tool_result", "web_fetch_tool_result":
@@ -456,8 +465,14 @@ func convertAnthropic(response *anthropicEnvelope) (*gent.ModelCallResponse, err
 		}
 	}
 	if choice.Completion.Refusal != nil {
-		choice.Completion.Refusal.Content = gent.CloneContentParts(choice.CandidateContent)
-		choice.CandidateContent, choice.CandidateSource = nil, nil
+		choice.Completion.Refusal.Content = gent.AssistantParts(
+			choice.Parts,
+			gent.AssistantContentIntermediary,
+		)
+		choice.CandidateSource = nil
+	}
+	if choice.Completion.Status != gent.ModelStatusAnswer {
+		choice.CandidateSource = nil
 	}
 	if err := choice.ValidateCompletion(); err != nil {
 		return nil, err

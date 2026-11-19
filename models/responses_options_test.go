@@ -1,13 +1,13 @@
 package models
 
 import (
-	"context"
 	"encoding/json"
 	"maps"
 	"net/http"
 	"testing"
 
 	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/internal/tt"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -93,8 +93,8 @@ func TestResponsesManagedOptions(t *testing.T) {
 			request := gent.NewModelCallRequest(nil, gent.WithOptions(test.input.options))
 			for attempt := range test.input.repeats {
 				body = nil
-				ctx := gent.NewExecutionContext(context.Background(), "fixture", nil)
-				stream, err := ctx.GenerateContentStream(model, gent.ModelCall{}, request)
+				execCtx := tt.NewContext(t, &gent.Config{})
+				stream, err := execCtx.GenerateContentStream(model, gent.ModelCall{}, request)
 				if err == nil {
 					for range stream.Chunks() {
 					}

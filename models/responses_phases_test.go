@@ -11,6 +11,7 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -53,42 +54,76 @@ func TestResponsesAgentMessagePhases(t *testing.T) {
 		{"answer and tool", input{answer + "," + call}, expected{result: tools, calls: 1}},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			model := NewResponses(&ResponsesConfig{
-				Provider: "openai", BaseURL: "https://fixture.test/v1", Model: "fixture",
-				HTTPClient: &http.Client{Transport: responseTransport(func(
-					*http.Request,
-				) (*http.Response, error) {
-					body := `{"status":"completed","output":[` + test.input.output + `]}`
-					return &http.Response{StatusCode: 200,
-						Header: http.Header{"Content-Type": {"application/json"}},
-						Body:   io.NopCloser(strings.NewReader(body))}, nil
-				})},
-			})
-			calls := 0
-			agent := react.NewAgent(model).RegisterTool(gent.DefineTool("lookup",
-				func(context.Context, map[string]any) (*gent.ToolExecutionResponse, error) {
-					calls++
-					return capturedToolResponse("record", nil)
-				}).Description("Read").ParameterSchema(nil).MustBuild())
-			ctx := gent.NewExecutionContext(context.Background(), "phases",
-				gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Read the record."})))
-			result, err := agent.Next(ctx)
-			want := test.expected
-			if want.result.Action == gent.LATerminate {
-				copy := *want.result
-				id := ctx.ContextId() + ":model:1"
-				var ids []string
-				for _, event := range ctx.Events() {
-					if after, ok := event.(*gent.AfterModelCallEvent); ok {
-						ids = after.Response.Choices[0].CandidateSource.MessageIds
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				requests := 0
+				model := NewResponses(&ResponsesConfig{
+					Provider: "openai", BaseURL: "https://fixture.test/v1", Model: "fixture",
+					HTTPClient: &http.Client{Transport: responseTransport(func(
+						*http.Request,
+					) (*http.Response, error) {
+						requests++
+						item := test.input.output
+						if requests > 1 {
+							item = answer
+						}
+						body := `{"status":"completed","output":[` + item + `]}`
+						return &http.Response{StatusCode: 200,
+							Header: http.Header{"Content-Type": {"application/json"}},
+							Body:   io.NopCloser(strings.NewReader(body))}, nil
+					})},
+				})
+				calls := 0
+				agent := react.NewAgent(model)
+				chain := toolchain.New().RegisterTool(gent.DefineTool("lookup",
+					func(context.Context, map[string]any) (*gent.ToolExecutionResponse, error) {
+						calls++
+						return capturedToolResponse("record", nil)
+					}).Description("Read").ParameterSchema(nil).MustBuild())
+				runner, execCtx := newModelExecution(
+					t,
+					context.Background(),
+					agent,
+					&gent.Config{
+						ToolChain: chain,
+					},
+				)
+				value, completed, err := runner.NewTurn(
+					execCtx,
+					gent.NewTask(
+						gent.TextPart(
+							"Read the record.",
+						),
+					),
+				)
+				if !assert.NoError(t, err) {
+					return
+				}
+				assert.Equal(t, "Done.", value)
+				assert.Equal(t, gent.ExecutionFinished, completed.Status)
+				var result *gent.AgentLoopResult
+				var source *gent.ContentSource
+				for _, event := range providerEvents(execCtx) {
+					switch event := event.(type) {
+					case *gent.AfterModelCallEvent:
+						if event.Iteration == 1 {
+							source = event.Response.Choices[0].CandidateSource
+						}
+					case *gent.AfterIterationEvent:
+						if event.Iteration == 1 {
+							result = event.Result
+						}
 					}
 				}
-				copy.ContentSource = &gent.ContentSource{ModelCallId: id, StreamId: "iter-0",
-					StreamTopicId: "llm-response", MessageIds: ids}
-				want.result = &copy
-			}
-			assert.Equal(t, want, expected{result, calls, err})
-		})
+				want := test.expected
+				if want.result.Action == gent.LATerminate {
+					copy := *want.result
+					copy.ContentSource = source
+					want.result = &copy
+				}
+				assert.Equal(t, want, expected{result, calls, err})
+			},
+		)
 	}
 }

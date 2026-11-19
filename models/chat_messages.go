@@ -33,7 +33,11 @@ func (m *Chat) messages(messages []*gent.ModelMessage) ([]any, error) {
 		var calls []*gent.ModelToolCallRequest
 		var text strings.Builder
 		textOnly := true
-		for _, part := range message.Parts {
+		readable, err := readableAssistantParts(message.Parts)
+		if err != nil {
+			return nil, err
+		}
+		for _, part := range readable {
 			switch p := partValue(part).(type) {
 			case gent.DataContent:
 				text.WriteString(p.String())

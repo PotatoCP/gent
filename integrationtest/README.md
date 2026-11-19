@@ -36,7 +36,7 @@ GPT-6 Astra uses the Responses API for tool calls and omits temperature and top-
 The native Anthropic adapter omits forbidden sampling values and preserves signed thinking blocks
 across tool calls. It currently sends API version `2023-06-01`. The Gemini adapter uses the native
 GenerateContent endpoint and preserves thought signatures. The CLI request tests check these
-request mappings. See [native model adapters](../docs/models.md) for continuation behavior.
+request mappings. See [native model adapters](../docs/content/agent/models.md) for continuation behavior.
 
 The local request tests check model IDs, endpoints, credentials, and complete request bodies.
 They do not make paid API calls. Live scenario tests need provider credentials and the ONNX setup

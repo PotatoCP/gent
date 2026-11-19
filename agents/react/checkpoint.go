@@ -1,37 +1,29 @@
 package react
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 
 	"github.com/rickchristie/gent"
 	agentutil "github.com/rickchristie/gent/agents"
+	core "github.com/rickchristie/gent/internal/core"
 )
 
 type iterationFrame struct {
-	Iteration      int
-	Response       *gent.ModelCallResponse
-	Repetition     *agentutil.RepetitionResult
-	ToolPlanActive bool
+	Iteration           int
+	Response            *gent.ModelCallResponse
+	Repetition          *agentutil.RepetitionResult
+	ToolPlanActive      bool
+	ToolResultsPrepared bool
 }
 
-func (r *Agent[T]) Next(ctx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
-	result, err := r.next(ctx)
+func (r *Agent[T]) Next(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+	result, err := r.next(execCtx)
 	if err == nil {
-		ctx.ClearCheckpointState("gent:react_frame", "gent:tool_plan", "gent:search_seen")
+		execCtx.ClearCheckpointState("gent:react_frame", "gent:tool_plan", "gent:search_seen")
 	}
 	return result, err
-}
-
-// WithRecoveryVersion identifies application behavior that cannot be derived from declarative
-// configuration, including custom hooks, validators, and tool implementations.
-func (r *Agent[T]) WithRecoveryVersion(version string) *Agent[T] {
-	r.recoveryVersion = version
-	return r
 }
 
 func (r *Agent[T]) RegisterCodecs(registry *gent.CodecRegistry) error {
@@ -41,108 +33,79 @@ func (r *Agent[T]) RegisterCodecs(registry *gent.CodecRegistry) error {
 	if err := registry.RegisterValueType(reflect.TypeOf(iterationFrame{})); err != nil {
 		return err
 	}
-	return r.toolChain.RegisterCodecs(registry)
+	return nil
 }
 
-func (r *Agent[T]) ConfigureExecution(ctx *gent.ExecutionContext) error {
-	if err := gent.PrepareOutput(ctx, r.output); err != nil {
-		return err
-	}
-	if err := r.RegisterCodecs(ctx.Codecs()); err != nil {
-		return err
-	}
-	if ctx.Parent() != nil {
-		return nil
-	}
-	request := gent.NewModelCallRequest(nil, r.callOptions...)
-	options, err := ctx.Codecs().Encode(request.Options)
-	if err != nil {
-		return err
-	}
-	configuration := map[string]any{
-		"version": 3, "application": r.recoveryVersion,
-		"formatType": fmt.Sprintf("%T", r.format), "tools": r.toolChain.RecoveryConfig(),
-		"toolchainType": fmt.Sprintf("%T", r.toolChain), "output": fmt.Sprintf("%T", r.output),
-		"modelType": fmt.Sprintf(
-			"%T",
-			r.model,
-		),
-		"options": options, "maxResponseChars": r.maxResponseChars,
-		"tooLongMessage": r.responseTooLongMessage,
-		"repetition":     r.repetitionConfiguration(),
-	}
-
-	if configured, ok := r.model.(gent.RecoveryConfig); ok {
-		configuration["modelConfig"] = configured.RecoveryConfig()
-	}
-	if named, ok := r.model.(interface{ ModelName() string }); ok {
-		configuration["model"] = named.ModelName()
-	}
-	if provider, ok := r.model.(interface{ Provider() string }); ok {
-		configuration["provider"] = provider.Provider()
-	}
-	data, err := json.Marshal(configuration)
-	if err != nil {
-		return err
-	}
-	digest := sha256.Sum256(data)
-	manifest := ctx.Compatibility()
-	manifest.Version = 1
-	if manifest.Components == nil {
-		manifest.Components = map[string]string{}
-	}
-	manifest.Components["gent:react"] = hex.EncodeToString(digest[:])
-	manifest.Components["gent:recovery"] = "supported"
-	if r.recoveryVersion == "" {
-		// Prompt/schema hashes cannot identify changes inside application tool or validator code.
-		manifest.Components["gent:recovery"] = "unsupported"
-	}
-	return ctx.SetCompatibility(manifest)
+func (r *Agent[T]) ConfigureExecution(execCtx *gent.ExecutionContext) error {
+	core.BindManagedRecovery(execCtx, r.prepareRecovery)
+	return r.RegisterCodecs(execCtx.Codecs())
 }
 
-func (r *Agent[T]) repetitionConfiguration() map[string]any {
-	configuration := map[string]any{}
-	value := reflect.ValueOf(r.repetitionConfig)
-	for i := 0; i < value.NumField(); i++ {
-		// The filter implementation is covered by WithRecoveryVersion, like other application code.
-		if value.Field(i).Kind() != reflect.Func {
-			configuration[value.Type().Field(i).Name] = value.Field(i).Interface()
+// prepareRecovery builds the complete native call/reply group before Gent accepts After Recovery.
+// The saved frame prevents a later Next call from appending those prepared messages a second time.
+func (r *Agent[T]) prepareRecovery(execCtx *gent.ExecutionContext) (bool, error) {
+	frame, err := r.loadFrame(execCtx)
+	if err != nil || !frame.ToolPlanActive || frame.ToolResultsPrepared {
+		return false, err
+	}
+	plan, found, err := execCtx.SavedToolPlan()
+	if err != nil {
+		return false, err
+	}
+	if !found || frame.Response == nil || len(frame.Response.Choices) == 0 {
+		return false, errors.New("gent: saved ReAct tool frame has no plan or model choice")
+	}
+	for plan.NextCall < len(plan.Calls) {
+		if _, err := r.tools(execCtx).ExecuteNext(execCtx, plan, r.format); err != nil {
+			return false, err
 		}
 	}
-	return configuration
+	if err := execCtx.AppendRecord(
+		nativeToolEntry(
+			frame.Response.Choices[0],
+			plan.Results,
+		),
+		true,
+	); err != nil {
+		return false, err
+	}
+	frame.ToolResultsPrepared = true
+	if err := execCtx.SetCheckpointState("gent:react_frame", frame); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-func (r *Agent[T]) loadFrame(ctx *gent.ExecutionContext) (*iterationFrame, error) {
-	if err := r.RegisterCodecs(ctx.Codecs()); err != nil {
+func (r *Agent[T]) loadFrame(execCtx *gent.ExecutionContext) (*iterationFrame, error) {
+	if err := r.RegisterCodecs(execCtx.Codecs()); err != nil {
 		return nil, err
 	}
-	value, ok, err := ctx.CheckpointState("gent:react_frame")
+	value, ok, err := execCtx.CheckpointState("gent:react_frame")
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
-		return &iterationFrame{Iteration: ctx.Iteration()}, nil
+		return &iterationFrame{Iteration: execCtx.Iteration()}, nil
 	}
 	frame, ok := value.(*iterationFrame)
 	if !ok || frame == nil {
 		return nil, errors.New("gent: invalid ReAct frame")
 	}
-	if frame.Iteration != ctx.Iteration() {
+	if frame.Iteration != execCtx.Iteration() {
 		return nil, fmt.Errorf("%w: ReAct iteration frame", gent.ErrIncompatibleCheckpoint)
 	}
 	return frame, nil
 }
 
-func saveFrame(ctx *gent.ExecutionContext, frame *iterationFrame) error {
-	if err := ctx.SetCheckpointState("gent:react_frame", frame); err != nil {
-		return err
-	}
-	return ctx.CommitCheckpoint(gent.PhaseDecisionReady)
+func saveFrame(execCtx *gent.ExecutionContext, frame *iterationFrame) error {
+	// The next approved tool, iteration, or terminal boundary accepts this frame. A model
+	// response or a locally prepared plan does not need a separate storage roundtrip.
+	return execCtx.SetCheckpointState("gent:react_frame", frame)
 }
 
 // executeToolPlan keeps the saved execution path for native calls.
 func (r *Agent[T]) executeToolPlan(
-	ctx *gent.ExecutionContext, frame *iterationFrame,
+	execCtx *gent.ExecutionContext, frame *iterationFrame,
 	prepare func() (*gent.ToolPlan, error),
 	execute func(
 		*gent.ExecutionContext, *gent.ToolPlan, gent.TextFormat,
@@ -152,7 +115,7 @@ func (r *Agent[T]) executeToolPlan(
 	var err error
 	if frame.ToolPlanActive {
 		var found bool
-		plan, found, err = ctx.SavedToolPlan()
+		plan, found, err = execCtx.SavedToolPlan()
 		if err != nil {
 			return nil, err
 		}
@@ -162,19 +125,21 @@ func (r *Agent[T]) executeToolPlan(
 	} else {
 		plan, err = prepare()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("gent: ToolChain.PrepareCalls: %w", err)
 		}
 		frame.ToolPlanActive = true
-		if err := ctx.SetToolPlan(plan); err != nil {
+		if err := execCtx.SetToolPlan(plan); err != nil {
 			return nil, err
 		}
-		if err := saveFrame(ctx, frame); err != nil {
+		if err := saveFrame(execCtx, frame); err != nil {
 			return nil, err
 		}
 	}
 	for plan.NextCall < len(plan.Calls) {
-		if _, err := execute(ctx, plan, r.format); err != nil {
-			return nil, err
+		call := plan.Calls[plan.NextCall]
+		if _, err := execute(execCtx, plan, r.format); err != nil {
+			return nil, fmt.Errorf("gent: ToolChain.ExecuteNext for tool %q call %q: %w",
+				call.Name, call.Id, err)
 		}
 	}
 	return plan.Results, nil

@@ -57,7 +57,7 @@ func writeTraceEvents(w io.Writer, events <-chan *genttrace.Event) {
 }
 
 func writeTraceEvent(w io.Writer, event *genttrace.Event) {
-	fmt.Fprintf(w, "\n>>> TraceEvent %d %s\n", event.EventNumber, event.Type)
+	fmt.Fprintf(w, "\n>>> TraceEvent %d %s\n", event.EventSequenceNumber, event.Type)
 	writeJSONBlock(w, event)
 }
 
@@ -78,7 +78,7 @@ func writeJSONBlock(w io.Writer, value any) {
 
 func printTraceEvents(w io.Writer, events []*genttrace.Event) {
 	for i, event := range events {
-		fmt.Fprintf(w, "\n[%d] #%d %s", i+1, event.EventNumber, event.Type)
+		fmt.Fprintf(w, "\n[%d] #%d %s", i+1, event.EventSequenceNumber, event.Type)
 		if event.Iteration > 0 {
 			fmt.Fprintf(w, " iteration=%d", event.Iteration)
 		}
@@ -149,14 +149,7 @@ func (r *traceStreamRenderer) writeModelChunk(event *genttrace.Event) {
 	}
 	payload := tracePayload(event)
 	content := traceContentParts(payload["content"])
-	if items, ok := payload["metaContent"].([]any); ok {
-		for _, value := range items {
-			item, ok := value.(map[string]any)
-			if ok {
-				content += traceContentParts(item["content"])
-			}
-		}
-	}
+
 	if content != "" {
 		if !r.hasContent {
 			fmt.Fprint(r.w, "  LLM: ")
@@ -178,6 +171,8 @@ func traceContentParts(value any) string {
 	for _, value := range parts {
 		part := tracePayloadFromAny(value)
 		switch {
+		case part["Content"] != nil:
+			text.WriteString(traceContentParts(part["Content"]))
 		case part["Text"] != nil:
 			text.WriteString(traceString(part, "Text"))
 		case part["ContentPart"] != nil:

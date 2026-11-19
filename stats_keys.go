@@ -1,6 +1,8 @@
 package gent
 
-import "strings"
+import (
+	core "github.com/rickchristie/gent/internal/core"
+)
 
 // StatKey is a typed key for stats (counters and gauges).
 //
@@ -11,159 +13,85 @@ import "strings"
 //
 // Internal standard stats use a prefix convention to distinguish type:
 //   - SC prefix = Stat Counter (e.g., SCInputTokens)
-//   - SG prefix = Stat Gauge (e.g., SGFormatParseErrorConsecutive)
+//   - SG prefix = Stat Gauge (e.g., SGToolCallsErrorConsecutive)
 //
 // # Counter Keys vs Gauge Keys
 //
-// Counter keys (SC*) are monotonically increasing and always propagate
-// to parent contexts. Each counter key automatically has a $self:-prefixed
-// counterpart that tracks only the local context's value.
-//
-// Gauge keys (SG*) can go up and down and never propagate to parent
-// contexts. Calling Self() on a gauge key is a no-op since gauges are
-// already local-only.
+// Counter keys (SC*) increase across the complete run. GetTurnCounter subtracts the baseline
+// accepted with NewTurn. Continue and Restore preserve both cumulative values and that baseline.
+// Gauge keys (SG*) can increase or decrease. NewTurn clears all gauges before its admission save.
+// These keys form an extensible metric namespace, not a finite enum.
 //
 // Example custom key:
 //
 //	myKey := gent.StatKey("myapp:api_calls")
 //	execCtx.Stats().IncrCounter(myKey, 1)
-type StatKey string
+type StatKey = core.StatKey
 
-const selfPrefix = "$self:"
+// KeyPrefix identifies standard Gent metrics; custom metrics must use a different prefix.
+const KeyPrefix = core.KeyPrefix
 
-// Self returns the local-only variant of this key. When used in limits,
-// matches only the current context's value, excluding children.
-//
-// Only meaningful for counter keys. Gauge keys are already local-only,
-// so calling Self() on them is unnecessary (the $self: key will never
-// be written to).
-//
-// Self is idempotent: calling Self() on an already-$self: key returns
-// the same key.
-func (k StatKey) Self() StatKey {
-	if strings.HasPrefix(string(k), selfPrefix) {
-		return k
-	}
-	return StatKey(selfPrefix) + k
-}
-
-// IsSelf returns true if this is a $self:-prefixed local-only key.
-// Useful for filtering when iterating over Counters().
-func (k StatKey) IsSelf() bool {
-	return strings.HasPrefix(string(k), selfPrefix)
-}
-
-// Standard key prefix for all gent library keys.
-const KeyPrefix = "gent:"
-
-// Iteration tracking (Counter).
+// SCIterations counts entered Loop.Next iterations across all turns.
 //
 // This key is PROTECTED - attempts to modify it via IncrCounter from
 // user code will be silently ignored. Only the Executor can increment
 // this counter internally.
 //
-// Propagates to parent: the parent's SCIterations reflects total
-// iterations across the entire agent tree. Use SCIterations.Self()
-// for per-context iteration limits.
+// Use LimitTurn for a per-turn allowance or LimitRun for a cumulative allowance.
+// A restored unfinished iteration keeps its accepted count; entering it again does not add one.
 //
 // Read-only access:
 //
 //	iterations := execCtx.Stats().GetIterations()
-const SCIterations StatKey = "gent:iterations"
+const SCIterations StatKey = core.SCIterations
 
-// Token tracking keys (Counter).
-//
-// Auto-updated when AfterModelCallEvent is published:
-//
-//	execCtx.PublishAfterModelCall(
-//	    "gpt-4", request, response, duration, nil,
-//	)
-//	// Auto-increments: SCInputTokens, SCInputTokensFor+"gpt-4",
-//	//                  SCOutputTokens, SCOutputTokensFor+"gpt-4",
-//	//                  SCTotalTokens, SCTotalTokensFor+"gpt-4"
-//
-// Use SCInputTokensFor/SCOutputTokensFor + model name for per-model
-// limits:
-//
-//	{Type: LimitExactKey, Key: SCInputTokensFor + "gpt-4", MaxValue: 10000}
-const (
-	SCInputTokens     StatKey = "gent:input_tokens"
-	SCInputTokensFor  StatKey = "gent:input_tokens:" // + model name
-	SCOutputTokens    StatKey = "gent:output_tokens"
-	SCOutputTokensFor StatKey = "gent:output_tokens:" // + model name
-)
+// SCInputTokens counts reported input tokens across model calls and turns.
+const SCInputTokens StatKey = core.SCInputTokens
 
-// Total token tracking keys (Counter).
-//
-// Sum of input + output tokens. Auto-updated when
-// AfterModelCallEvent is published alongside the individual
-// input/output token counters.
-//
-// Use SCTotalTokensFor + model name for per-model limits:
-//
-//	{Type: LimitExactKey, Key: SCTotalTokensFor + "gpt-4", MaxValue: 20000}
-const (
-	SCTotalTokens    StatKey = "gent:total_tokens"
-	SCTotalTokensFor StatKey = "gent:total_tokens:" // + model name
-)
+// SCInputTokensFor prefixes a cumulative input-token counter with its model name.
+const SCInputTokensFor StatKey = core.SCInputTokensFor
 
-// Tool call tracking keys (Counter).
-//
-// Auto-updated when BeforeToolCallEvent is published:
-//
-//	execCtx.PublishBeforeToolCall("search", args)
-//	// Auto-increments: SCToolCalls, SCToolCallsFor+"search"
-//
-// Use for per-tool limits:
-//
-//	// Limit specific tool to 10 calls
-//	{
-//	    Type: LimitExactKey,
-//	    Key: SCToolCallsFor + "expensive_api",
-//	    MaxValue: 10,
-//	}
-//
-//	// Limit ANY tool to 50 calls
-//	{Type: LimitKeyPrefix, Key: SCToolCallsFor, MaxValue: 50}
-const (
-	SCToolCalls    StatKey = "gent:tool_calls"
-	SCToolCallsFor StatKey = "gent:tool_calls:" // + tool name
-)
+// SCOutputTokens counts reported output tokens across model calls and turns.
+const SCOutputTokens StatKey = core.SCOutputTokens
 
-// Tool call error tracking keys.
-//
-// Auto-updated when AfterToolCallEvent with Error is published.
-//
-// Total/per-tool error keys are Counters (only go up, propagate).
-// Consecutive error keys are Gauges (reset on success, local-only).
-//
-// Default limit: 3 consecutive errors (see DefaultLimits).
-const (
-	// Counters (monotonically increasing, propagated)
-	SCToolCallsErrorTotal StatKey = "gent:tool_calls_error_total"
-	SCToolCallsErrorFor   StatKey = "gent:tool_calls_error:" // + tool
+// SCOutputTokensFor prefixes a cumulative output-token counter with its model name.
+const SCOutputTokensFor StatKey = core.SCOutputTokensFor
 
-	// Gauges (reset on success, local-only)
-	SGToolCallsErrorConsecutive    StatKey = "gent:tool_calls_error_consecutive"
-	SGToolCallsErrorConsecutiveFor StatKey = "gent:tool_calls_error_consecutive:" // + tool
-)
+// SCTotalTokens counts reported input and output tokens across the complete run.
+const SCTotalTokens StatKey = core.SCTotalTokens
 
-// Toolchain parse error tracking keys.
-//
-// Auto-updated when ParseErrorEvent with ErrorType="toolchain" is
-// published. These track errors when the ToolChain fails to parse
-// native tool calls and their JSON arguments.
-//
-// Default limit: 3 consecutive errors (see DefaultLimits).
-const (
-	// Counters
-	SCToolchainParseErrorTotal StatKey = "gent:toolchain_parse_error_total"
+// SCTotalTokensFor prefixes a cumulative total-token counter with its model name.
+const SCTotalTokensFor StatKey = core.SCTotalTokensFor
 
-	// Gauges
-	SGToolchainParseErrorConsecutive StatKey = "gent:toolchain_parse_error_consecutive"
-)
+// SCToolCalls counts fresh managed tool-call attempts.
+const SCToolCalls StatKey = core.SCToolCalls
 
-// Scratchpad length tracking key (Gauge).
+// SCToolCallsFor prefixes a fresh call-attempt counter with its tool name.
+const SCToolCallsFor StatKey = core.SCToolCallsFor
+
+// SCToolCallsErrorTotal counts unexpected managed tool operation failures.
+// Counters increase across the run.
+const SCToolCallsErrorTotal StatKey = core.SCToolCallsErrorTotal
+
+// SCToolCallsErrorFor prefixes an unexpected operation failure counter with its tool name.
+const SCToolCallsErrorFor StatKey = core.SCToolCallsErrorFor
+
+// SGToolCallsErrorConsecutive measures consecutive fresh tool failures; fresh success resets it.
+// Gauges reset on success and at a new turn.
+const SGToolCallsErrorConsecutive StatKey = core.SGToolCallsErrorConsecutive
+
+// SGToolCallsErrorConsecutiveFor prefixes the consecutive-failure gauge with its tool name.
+const SGToolCallsErrorConsecutiveFor StatKey = core.SGToolCallsErrorConsecutiveFor
+
+// SCToolchainParseErrorTotal counts native call and argument parsing failures.
+// Counters
+const SCToolchainParseErrorTotal StatKey = core.SCToolchainParseErrorTotal
+
+// SGToolchainParseErrorConsecutive measures parsing failures since the last valid call.
+// Gauges
+const SGToolchainParseErrorConsecutive StatKey = core.SGToolchainParseErrorConsecutive
+
+// SGScratchpadLength measures the current selected history entry count.
 //
 // Auto-updated when ExecutionContext.UpdateHistory changes the selected context.
 // Reflects the current number of selected history entries in the scratchpad.
@@ -172,119 +100,64 @@ const (
 // Example limit:
 //
 //	{Type: LimitExactKey, Key: SGScratchpadLength, MaxValue: 50}
-const SGScratchpadLength StatKey = "gent:scratchpad_length"
+const SGScratchpadLength StatKey = core.SGScratchpadLength
 
-// Last-iteration token tracking keys (Gauge).
-//
-// These gauges track token usage for the current/last iteration
-// only. Unlike cumulative counters (SCInputTokens etc.), these
-// gauges reset to 0 at each iteration start via
-// BeforeIterationEvent.
-//
-// As gauges, they never propagate to parent contexts — each
-// context tracks its own per-iteration usage independently.
-//
-// Auto-updated when AfterModelCallEvent is published. Within a
-// single iteration, multiple model calls accumulate (e.g., main
-// agent + tool that calls a model). Reset to 0 on the next
-// BeforeIterationEvent.
-//
-// Example limits:
-//
-//	// No single iteration should use more than 50000 total tokens
-//	{
-//	    Type: LimitExactKey,
-//	    Key: SGTotalTokensLastIteration,
-//	    MaxValue: 50000,
-//	}
-//
-//	// No single iteration should use more than 10000 tokens on
-//	// a specific model
-//	{
-//	    Type: LimitExactKey,
-//	    Key: SGTotalTokensLastIterationFor + "gpt-4",
-//	    MaxValue: 10000,
-//	}
-//
-//	// Prefix limit on per-model last-iteration tokens
-//	{
-//	    Type: LimitKeyPrefix,
-//	    Key: SGTotalTokensLastIterationFor,
-//	    MaxValue: 10000,
-//	}
-const (
-	// Aggregate keys (all models combined)
-	SGInputTokensLastIteration  StatKey = "gent:input_tokens_last_iteration"
-	SGOutputTokensLastIteration StatKey = "gent:output_tokens_last_iteration"
-	SGTotalTokensLastIteration  StatKey = "gent:total_tokens_last_iteration"
+// SGInputTokensLastIteration measures reported input tokens in the current iteration.
+// Aggregate keys (all models combined)
+const SGInputTokensLastIteration StatKey = core.SGInputTokensLastIteration
 
-	// Per-model keys (append model name as suffix)
-	SGInputTokensLastIterationFor  StatKey = "gent:input_tokens_last_iteration:"  // + model
-	SGOutputTokensLastIterationFor StatKey = "gent:output_tokens_last_iteration:" // + model
-	SGTotalTokensLastIterationFor  StatKey = "gent:total_tokens_last_iteration:"  // + model
-)
+// SGOutputTokensLastIteration measures reported output tokens in the current iteration.
+const SGOutputTokensLastIteration StatKey = core.SGOutputTokensLastIteration
 
-// Code execution tracking keys (Programmatic Tool Calling).
-//
-// Auto-updated by JsToolChainWrapper when code blocks
-// are executed.
-//
-// Default limit: 3 consecutive code execution errors
-// (see DefaultLimits).
-const (
-	// Counter: total code blocks executed
-	SCCodeExecutions StatKey = "gent:code_executions"
+// SGTotalTokensLastIteration measures reported total tokens in the current iteration.
+const SGTotalTokensLastIteration StatKey = core.SGTotalTokensLastIteration
 
-	// Counter: code blocks that failed
-	SCCodeExecutionsError StatKey = "gent:code_executions_error"
+// SGInputTokensLastIterationFor prefixes the iteration input-token gauge with its model name.
+// Per-model keys (append model name as suffix)
+const SGInputTokensLastIterationFor StatKey = core.SGInputTokensLastIterationFor
 
-	// Gauge: consecutive code execution errors
-	// (reset on success)
-	SGCodeExecutionsErrorConsecutive StatKey = "gent:code_executions_error_consecutive"
-)
+// SGOutputTokensLastIterationFor prefixes the iteration output-token gauge with its model name.
+const SGOutputTokensLastIterationFor StatKey = core.SGOutputTokensLastIterationFor
 
-// Compaction tracking key (Counter).
+// SGTotalTokensLastIterationFor prefixes the iteration total-token gauge with its model name.
+const SGTotalTokensLastIterationFor StatKey = core.SGTotalTokensLastIterationFor
+
+// SCCodeExecutions counts programmatic tool-call scripts entered during the run.
+// Counter: total code blocks executed
+const SCCodeExecutions StatKey = core.SCCodeExecutions
+
+// SCCodeExecutionsError counts programmatic tool-call scripts that failed.
+// Counter: code blocks that failed
+const SCCodeExecutionsError StatKey = core.SCCodeExecutionsError
+
+// SGCodeExecutionsErrorConsecutive measures script failures since the last successful script.
+// Gauge: consecutive code execution errors
+// (reset on success)
+const SGCodeExecutionsErrorConsecutive StatKey = core.SGCodeExecutionsErrorConsecutive
+
+// SCCompactions counts accepted compactions across all turns.
 //
 // Auto-updated when CompactionEvent is published. Tracks the
 // total number of successful compactions performed.
-//
-// Propagates to parent: the parent's SCCompactions reflects
-// total compactions across the entire agent tree.
-const SCCompactions StatKey = "gent:compactions"
+const SCCompactions StatKey = core.SCCompactions
 
-// Repetition loop detection tracking keys.
-//
-// Updated by the Loop when streaming repetition detection triggers.
-// These are separate from format parse errors — a loop is a distinct failure
-// mode where the model repeats the same reasoning/action.
-//
-// Default limit: 3 consecutive loops (see DefaultLimits in executor).
-const (
-	// Counter: total loops detected across all iterations.
-	SCRepetitionLoopTotal StatKey = "gent:repetition_loop_total"
+// SCRepetitionLoopTotal counts detected model repetition failures across iterations and turns.
+// Counter: total loops detected across all iterations.
+const SCRepetitionLoopTotal StatKey = core.SCRepetitionLoopTotal
 
-	// Gauge: consecutive loops without a successful iteration in between.
-	// Reset when the agent successfully executes a tool call or terminates.
-	SGRepetitionLoopConsecutive StatKey = "gent:repetition_loop_consecutive"
-)
+// SGRepetitionLoopConsecutive measures repetition failures since a successful tool call or answer.
+// Gauge: consecutive loops without a successful iteration in between.
+// Reset when the agent successfully executes a tool call or terminates.
+const SGRepetitionLoopConsecutive StatKey = core.SGRepetitionLoopConsecutive
 
-// protectedKeys contains keys that cannot be modified by user code
-// via IncrCounter. Protected keys can still be incremented internally
-// by the framework (e.g., the executor increments SCIterations).
-var protectedKeys = map[StatKey]bool{
-	SCIterations: true,
-}
+// SCToolCallsInvalidArgumentsTotal counts calls rejected for invalid arguments.
+const SCToolCallsInvalidArgumentsTotal StatKey = core.SCToolCallsInvalidArgumentsTotal
 
-// isProtectedKey returns true if the key is protected from user
-// modification.
-func isProtectedKey(key StatKey) bool {
-	return protectedKeys[key]
-}
+// SCToolCallsInvalidArgumentsFor prefixes the invalid-argument counter with its tool name.
+const SCToolCallsInvalidArgumentsFor StatKey = core.SCToolCallsInvalidArgumentsFor
 
-// Input rejection is expected control flow, separate from unexpected operation failures.
-const (
-	SCToolCallsInvalidArgumentsTotal StatKey = "gent:tool_calls_invalid_arguments_total"
-	SCToolCallsInvalidArgumentsFor   StatKey = "gent:tool_calls_invalid_arguments:"
-	SCToolRecoveryErrorTotal         StatKey = "gent:tool_recovery_error_total"
-	SCToolRecoveryErrorFor           StatKey = "gent:tool_recovery_error:"
-)
+// SCToolRecoveryErrorTotal counts failed recovery checks, separately from original tool calls.
+const SCToolRecoveryErrorTotal StatKey = core.SCToolRecoveryErrorTotal
+
+// SCToolRecoveryErrorFor prefixes the failed-recovery counter with its tool name.
+const SCToolRecoveryErrorFor StatKey = core.SCToolRecoveryErrorFor

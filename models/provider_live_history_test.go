@@ -48,13 +48,12 @@ func checkLiveAssistantHistory(t *testing.T, ctx context.Context, model gent.Mod
 		return
 	}
 	defer stream.Close()
-	for chunk := range stream.Chunks() {
-		assert.NoError(t, chunk.Err)
+	for range stream.Chunks() {
 	}
 	response, err := stream.Response()
 	if !assert.NoError(t, err) || !assert.Len(t, response.Choices, 1) {
 		return
 	}
 	assert.Equal(t, gent.ModelStatusAnswer, response.Choices[0].Completion.Status)
-	assert.Equal(t, "Tebet", gent.ContentText(response.Choices[0].CandidateContent))
+	assert.Equal(t, "Tebet", gent.ContentText(response.Choices[0].CandidateContent()))
 }

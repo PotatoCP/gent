@@ -7,7 +7,7 @@ const (
 	DefaultMaxRecentLifecycleEvents = 500
 	DefaultMaxRecentChunkEvents     = 500
 	DefaultMaxContentBytes          = 64 * 1024
-	DefaultMaxMetaContentBytes      = 64 * 1024
+	DefaultMaxStreamContentBytes    = 64 * 1024
 
 	NoRecentEvents = -1
 	NoContentLimit = -1
@@ -29,7 +29,7 @@ type Config struct {
 	MaxRecentLifecycleEvents int
 	MaxRecentChunkEvents     int
 	MaxContentBytes          int
-	MaxMetaContentBytes      int
+	MaxStreamContentBytes    int
 
 	Redactor Redactor
 }
@@ -40,11 +40,14 @@ type config struct {
 	maxRecentLifecycleEvents int
 	maxRecentChunkEvents     int
 	maxContentBytes          int
-	maxMetaContentBytes      int
+	maxStreamContentBytes    int
 	redactor                 Redactor
 }
 
 func normalizeConfig(cfg Config) config {
+	if cfg.Codecs == nil {
+		cfg.Codecs = gent.NewCodecRegistry()
+	}
 	result := config{Config: cfg}
 	result.maxRecentEvents = normalizeDefaultedLimit(
 		cfg.MaxRecentEvents, DefaultMaxRecentEvents,
@@ -58,8 +61,8 @@ func normalizeConfig(cfg Config) config {
 	result.maxContentBytes = normalizeDefaultedLimit(
 		cfg.MaxContentBytes, DefaultMaxContentBytes,
 	)
-	result.maxMetaContentBytes = normalizeDefaultedLimit(
-		cfg.MaxMetaContentBytes, DefaultMaxMetaContentBytes,
+	result.maxStreamContentBytes = normalizeDefaultedLimit(
+		cfg.MaxStreamContentBytes, DefaultMaxStreamContentBytes,
 	)
 	result.redactor = cfg.Redactor
 	if result.redactor == nil {

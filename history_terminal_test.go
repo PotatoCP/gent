@@ -5,92 +5,104 @@ import (
 	"errors"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/rickchristie/gent"
-	"github.com/rickchristie/gent/executor"
-	"github.com/rickchristie/gent/output"
 	"github.com/stretchr/testify/assert"
 )
 
-type terminalTestLoop struct {
-	calls int
-	err   error
-}
-
-func (l *terminalTestLoop) Next(*gent.ExecutionContext) (*gent.AgentLoopResult, error) {
-	l.calls++
-	return nil, l.err
-}
-
-func TestHistoryRecovery_TerminalFailuresAndCancellation(t *testing.T) {
+func TestHistoryRecovery_UnexpectedFailureKeepsAcceptedTurn(t *testing.T) {
 	lookupErr := fmt.Errorf("lookup failed: %w", gent.ErrHistoryConflict)
-	stopErr := errors.New("operator requested stop")
-	type input struct {
-		loopErr error
-		cancel  bool
-		cause   error
-	}
-	type expected struct {
-		calls  int
-		reason gent.TerminationReason
-		err    error
-		is     error
-	}
+	stopErr := errors.New("worker lease ended")
+	type input struct{ loopErr, ownerCause error }
+	type expected struct{ cause error }
 	type testCase struct {
 		name     string
 		input    input
 		expected expected
 	}
-	cases := []testCase{
-		{"failure", input{loopErr: lookupErr}, expected{
-			calls: 1, reason: gent.TerminationError,
-			err: fmt.Errorf("Loop.Next (iteration 1): %w", lookupErr),
-			is:  gent.ErrHistoryConflict,
-		}},
-		{"intentional cancellation", input{cancel: true}, expected{
-			reason: gent.TerminationContextCanceled, err: context.Canceled, is: context.Canceled,
-		}},
-		{"intentional cancellation with cause", input{cancel: true, cause: stopErr}, expected{
-			reason: gent.TerminationContextCanceled,
-			err:    errors.Join(context.Canceled, stopErr), is: context.Canceled,
-		}},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			started := time.Now()
-			ctx := gent.NewExecutionContext(context.Background(), "root", nil)
-			loop := &terminalTestLoop{err: tt.input.loopErr}
-			if tt.input.cancel {
-				ctx.CancelRun(tt.input.cause)
-			}
-			exec := executor.NewRunner(loop, executor.DefaultConfig())
-			_, result, err := exec.Execute(ctx)
-			assert.EqualError(t, err, tt.expected.err.Error())
-			assert.ErrorIs(t, err, tt.expected.is)
-			assert.Equal(t, tt.expected.calls, loop.calls)
-			bundle, err := ctx.Export()
-			assert.NoError(t, err)
-			assert.Equal(t, gent.PhaseTerminal, bundle.Checkpoint.Phase)
-			assert.GreaterOrEqual(t, bundle.Checkpoint.Outcome.CompletedAt, started)
-			fresh, err := gent.RestoreExecutionContext(context.Background(), bundle,
-				gent.RestoreBindings{})
-			if !assert.NoError(t, err) {
-				return
-			}
-			// Metadata reads do not require a loop. Typed Runner.Resume also checks its output contract.
-			restored, err := fresh.Result(), fresh.Error()
-			assert.EqualError(t, err, tt.expected.err.Error())
-			assert.ErrorIs(t, err, tt.expected.is)
-			assert.Equal(t, &gent.ExecutionResult{
-				TerminationReason: tt.expected.reason, Error: gent.SaveError(tt.expected.err),
-			}, restored)
-			assert.Equal(t, result.Output, restored.Output)
-			unchanged, err := fresh.Export()
-			assert.NoError(t, err)
-			assert.Equal(t, bundle, unchanged)
-		})
+	for _, test := range []testCase{
+		{"loop failure", input{loopErr: lookupErr}, expected{gent.ErrHistoryConflict}},
+		{"owner cancellation", input{ownerCause: context.Canceled}, expected{context.Canceled}},
+		{"owner cause", input{ownerCause: stopErr}, expected{stopErr}},
+	} {
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				owner, cancel := context.WithCancelCause(context.Background())
+				defer cancel(nil)
+				calls := 0
+				loop := contentLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+					calls++
+					if calls == 1 {
+						return acceptRootOutput(execCtx, "Earlier answer.")
+					}
+					if test.input.ownerCause != nil {
+						cancel(test.input.ownerCause)
+						return nil, execCtx.Context().Err()
+					}
+					return nil, test.input.loopErr
+				})
+				store := newCheckpointStore()
+				runner, execCtx := newTestExecution(
+					t,
+					owner,
+					loop,
+					&gent.Config{
+						Codecs:   store.codecs,
+						Recorder: store,
+					},
+				)
+				_, prior, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("First task.")))
+				if !assert.NoError(t, err) {
+					return
+				}
+				value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Second task.")))
+				assert.ErrorIs(t, err, test.expected.cause)
+				assert.Empty(t, value)
+				assert.Nil(t, result)
+				assert.Equal(t, gent.PhaseIterationReady, store.view.Checkpoint.Phase)
+				assert.Nil(t, store.view.Checkpoint.Outcome)
+				assert.Equal(t, prior, store.view.Checkpoint.LastOutcome.Result)
+				savedResult, saved, err := runner.GetLastTurnResult(execCtx)
+				assert.NoError(t, err)
+				assert.Equal(t, "Earlier answer.", savedResult)
+				assert.Equal(t, prior, saved)
+				fixed := contentLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+					return acceptRootOutput(execCtx, "Fixed answer.")
+				})
+				freshRunner, fresh := restoreTestExecution(t, fixed, nil, store.runStateSnapshot)
+				assert.Equal(t, execCtx.TurnId(), fresh.TurnId())
+				value, result, err = freshRunner.Continue(fresh)
+				assert.NoError(t, err)
+				assert.Equal(t, "Fixed answer.", value)
+				assert.Equal(t, gent.ExecutionFinished, result.Status)
+				assert.Equal(t, 2, calls)
+			},
+		)
 	}
 }
 
-func (*terminalTestLoop) Output() gent.Output[string] { return output.NewTextOutput() }
+func TestHistoryRecovery_PanicRequiresRestoration(t *testing.T) {
+	loop := contentLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		execCtx.Stats().IncrCounter("app:provisional", 1)
+		panic("unexpected application panic")
+	})
+	store := newCheckpointStore()
+	runner, execCtx := newTestExecution(t, context.Background(), loop,
+		&gent.Config{Codecs: store.codecs, Recorder: store})
+	assert.PanicsWithValue(t, "unexpected application panic", func() {
+		_, _, _ = runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Run a task.")))
+	})
+	_, result, err := runner.Continue(execCtx)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+	fixed := contentLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		assert.Equal(t, int64(0), execCtx.Stats().GetCounter("app:provisional"))
+		return acceptRootOutput(execCtx, "Recovered.")
+	})
+	freshRunner, fresh := restoreTestExecution(t, fixed, nil, store.runStateSnapshot)
+	value, result, err := freshRunner.Continue(fresh)
+	assert.NoError(t, err)
+	assert.Equal(t, "Recovered.", value)
+	assert.Equal(t, gent.ExecutionFinished, result.Status)
+}

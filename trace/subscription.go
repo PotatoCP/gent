@@ -12,8 +12,11 @@ import (
 type OverflowPolicy string
 
 const (
-	OverflowDropOldest      OverflowPolicy = "drop_oldest"
-	OverflowDropNewest      OverflowPolicy = "drop_newest"
+	// OverflowDropOldest removes the oldest queued trace event when the queue is full.
+	OverflowDropOldest OverflowPolicy = "drop_oldest"
+	// OverflowDropNewest omits the incoming trace event when the queue is full.
+	OverflowDropNewest OverflowPolicy = "drop_newest"
+	// OverflowCloseSubscriber disconnects a trace consumer whose bounded queue is full.
 	OverflowCloseSubscriber OverflowPolicy = "close_subscriber"
 )
 
@@ -29,14 +32,14 @@ type SubscribeConfig struct {
 
 // OverflowInfo describes a bounded subscriber overflow.
 type OverflowInfo struct {
-	Policy             OverflowPolicy
-	DroppedEventNumber uint64
-	NewEventNumber     uint64
-	SubscriberClosed   bool
+	Policy                     OverflowPolicy
+	DroppedEventSequenceNumber uint64
+	NewEventSequenceNumber     uint64
+	SubscriberClosed           bool
 }
 
 // Subscribe uses bounded default limits. Use SubscribeWithLimits to read delivery errors.
-func (s *Sequencer) Subscribe() (<-chan *Event, gent.UnsubscribeFunc) {
+func (s *Sequencer) Subscribe() (<-chan *Event, func()) {
 	sub, err := s.SubscribeWithLimits(gent.DeliveryConfig{})
 	if err != nil {
 		panic(err)
@@ -99,7 +102,7 @@ func (s *Sequencer) SubscribeWithLimits(cfg gent.DeliveryConfig) (*Subscription,
 // SubscribeWithConfig returns a future-event subscription.
 // This legacy API supports count-based drop policies. Use SubscribeWithLimits for byte limits,
 // delivery timeouts, and a readable error. Zero BufferSize uses a finite default of 4096 events.
-func (s *Sequencer) SubscribeWithConfig(cfg SubscribeConfig) (<-chan *Event, gent.UnsubscribeFunc) {
+func (s *Sequencer) SubscribeWithConfig(cfg SubscribeConfig) (<-chan *Event, func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

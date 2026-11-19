@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#faf9f6">
+  <title>Gent — Agent Chat</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/explorer/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="app-header">
+    <a class="brand" href="/" aria-label="Gent, new conversation">gent<span> / chat</span></a>
+    <span class="header-divider"></span>
+    <span class="header-title">Agent workspace</span>
+    <div class="header-actions">
+      <a class="quiet-button" href="/" id="new-chat">＋ New chat</a>
+      <button id="inspector-toggle" aria-controls="inspector" aria-expanded="true">
+        <span aria-hidden="true">⌘</span> Inspector
+      </button>
+    </div>
+  </header>
+  <main class="workspace">
+    <section class="conversation" aria-label="Agent conversation">
+      <div class="conversation-heading">
+        <div><h1 id="agent-name">Gent assistant</h1>
+          <span class="subtle">Tools, context, and a conversation that continues</span>
+        </div>
+        <span id="status" role="status">Ready</span>
+      </div>
+      <div class="chat-scroll" id="chat-scroll" tabindex="0" aria-label="Conversation messages">
+        <div id="empty" class="welcome">
+          <h2>What are we working on?</h2>
+          <p>Give the agent a task. Follow its work, then pick up where you left off.</p>
+          <div id="scenario-picker" class="scenario-picker">
+            <label for="scenario">Scenario</label>
+            <select id="scenario" aria-describedby="scenario-note"></select>
+          </div>
+          <p id="scenario-note" class="scenario-note">
+            Test a flight change or a billing dispute with sample customer data.</p>
+          <button id="suggestion" class="suggestion">
+            <span class="suggestion-icon" aria-hidden="true">↗</span>
+            <span><strong id="suggestion-title">Choose a scenario</strong>
+              <small id="suggestion-detail">Use the integration test task.</small></span>
+            <span aria-hidden="true">→</span>
+          </button>
+        </div>
+        <div id="messages" aria-label="Messages"></div>
+        <div id="working" class="working" hidden><span class="pulse" aria-hidden="true"></span>
+          <span>Agent is working…</span></div>
+      </div>
+      <div class="composer-area">
+        <button id="jump-latest" class="jump-latest" hidden>↓ Latest message</button>
+        <div class="pause-bar" id="pause-bar" hidden>
+          <span>Task paused. Continue from the last savepoint.</span>
+          <button id="resume">Continue task →</button>
+        </div>
+        <form id="composer">
+          <label for="prompt" class="sr-only">Message the agent</label>
+          <textarea id="prompt" rows="2" required
+            placeholder="Ask the agent to do something…"></textarea>
+          <div class="compose-actions">
+            <span class="provider-label"><span class="provider-dot"></span>
+              <span id="provider">Connecting</span>
+            </span>
+            <span class="keyboard-hint">↵ Send <span>·</span> Shift ↵ New line</span>
+            <button class="stop-button" id="stop" type="button" hidden>■ Stop</button>
+            <button class="send-button" id="send" type="submit" aria-label="Send message">↑</button>
+          </div>
+        </form>
+        <p class="notice" id="notice" role="status" aria-live="polite"></p>
+        <p class="composer-note" id="task-note">
+          One conversation. Your next prompt keeps its context.</p>
+      </div>
+    </section>
+    <aside id="inspector" aria-label="Run inspector">
+      <div id="inspector-resize" role="separator" tabindex="0" aria-orientation="vertical"
+        aria-label="Resize inspector" aria-controls="inspector"
+        title="Drag to resize. Use the left and right arrow keys for small changes."></div>
+      <div class="inspector-heading">
+        <div><span class="eyebrow">DEVELOPER VIEW</span><h2>Run inspector</h2></div>
+        <div class="inspector-actions">
+          <button id="inspector-fullscreen" class="text-button" aria-pressed="false"
+            aria-label="Open inspector full screen">⛶ Full screen</button>
+          <button id="inspector-close" class="icon-button" aria-label="Close inspector">×</button>
+        </div>
+      </div>
+      <dl class="metrics">
+        <div><dt>Accepted head</dt><dd id="head">0</dd></div>
+        <div><dt>Saved batches</dt><dd id="batches">0</dd></div>
+        <div><dt>Replay tail</dt><dd id="tail">—</dd></div>
+      </dl>
+      <div class="tabs" role="tablist" aria-label="Inspect run data">
+        <button id="tab-events" role="tab" aria-selected="true" aria-controls="panel-events">
+          Events <span id="event-count">0</span>
+        </button>
+        <button id="tab-view" role="tab" aria-selected="false" aria-controls="panel-data"
+          tabindex="-1">RunView</button>
+        <button id="tab-state" role="tab" aria-selected="false" aria-controls="panel-data"
+          tabindex="-1">RunState</button>
+      </div>
+      <div class="inspector-body">
+        <section id="panel-events" role="tabpanel" aria-labelledby="tab-events">
+          <div class="event-filters">
+            <label class="sr-only" for="event-search">Find events</label>
+            <input id="event-search" type="search" placeholder="Find event, number, or attempt…">
+            <label class="sr-only" for="event-delivery">Event delivery</label>
+            <select id="event-delivery"><option value="">All</option>
+              <option value="accepted">Accepted</option><option value="live">Live</option></select>
+          </div>
+          <div class="event-list-heading"><span>SEQUENCE / EVENT</span><span>DELIVERY</span></div>
+          <ol id="events" aria-label="Event deliveries"></ol>
+          <p id="events-empty" class="empty-note">Events appear here when the agent starts.</p>
+          <nav class="pagination" aria-label="Event pages">
+            <button id="events-prev" aria-label="Previous event page">←</button>
+            <span id="events-page">0 events</span>
+            <button id="events-next" aria-label="Next event page">→</button>
+          </nav>
+          <section id="event-detail" class="event-detail" aria-label="Selected event" hidden>
+            <div class="detail-heading"><h3 id="event-title"></h3>
+              <button id="event-copy" class="text-button">Copy JSON</button></div>
+            <p id="event-meta" class="data-note"></p>
+            <p class="data-note">Full RecordedEvent, encoded by Gent's CodecRegistry.</p>
+            <div id="event-json" class="json-tree"></div>
+          </section>
+        </section>
+        <section id="panel-data" role="tabpanel" aria-labelledby="tab-view" hidden>
+          <div class="detail-heading"><h3 id="data-title">RunView</h3>
+            <button id="data-refresh" class="text-button">↻ Refresh</button></div>
+          <p id="data-description" class="data-note"></p>
+          <p id="data-meta" class="data-meta" role="status">
+            Start a conversation to inspect saved data.</p>
+          <div id="run-explorer"></div>
+        </section>
+        <details class="recovery" open>
+          <summary>Recovery controls</summary>
+          <p>Load saved bytes into a fresh worker. The run keeps its identity.</p>
+          <label for="path">Replay source</label>
+          <select id="path"><option value="capture">RunStateSnapshot + tail</option>
+            <option value="batches">All saved batches</option></select>
+          <div class="recovery-buttons"><button id="restore" disabled>↻ Restore</button>
+            <button id="continue" disabled>Continue saved task →</button></div>
+        </details>
+        <details class="identity"><summary>Run identity</summary>
+          <code id="run-id">—</code></details>
+      </div>
+      <div class="inspector-footer"><span class="memory-dot"></span>Memory only
+        <span>Server restart clears all runs.</span></div>
+    </aside>
+  </main>
+</body>
+</html>

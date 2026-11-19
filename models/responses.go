@@ -44,10 +44,6 @@ func NewXAI(apiKey, model string) *Responses {
 
 func (m *Responses) ModelName() string { return m.config.Model }
 func (m *Responses) Provider() string  { return m.config.Provider }
-func (m *Responses) RecoveryConfig() any {
-	return map[string]any{"api": "responses", "provider": m.config.Provider,
-		"baseURL": m.config.BaseURL, "model": m.config.Model}
-}
 
 func (m *Responses) GenerateContentStream(base context.Context,
 	request *gent.ModelCallRequest,
@@ -301,6 +297,33 @@ func (m *Responses) inputItems(messages []*gent.ModelMessage) ([]any, error) {
 		}
 		for _, part := range message.Parts {
 			switch p := partValue(part).(type) {
+			case *gent.AssistantContent:
+				flush()
+				inner, err := readableAssistantParts([]gent.ContentPart{p})
+				if err != nil {
+					return nil, err
+				}
+				grouped, err := m.inputItems([]*gent.ModelMessage{{Role: message.Role, Parts: inner}})
+				if err != nil {
+					return nil, err
+				}
+				// Gent classifications are not wire labels. These are the native Responses
+				// phases this endpoint supports; reasoning remains native only in Continuation.
+				phase := ""
+				switch p.Type {
+				case gent.AssistantContentCommentary:
+					phase = "commentary"
+				case gent.AssistantContentFinalAnswerCandidate, gent.AssistantContentFinalAnswer:
+					phase = "final_answer"
+				}
+				for _, value := range grouped {
+					item, ok := value.(map[string]any)
+					if ok && role == "assistant" && phase != "" {
+						item["phase"] = phase
+					}
+					items = append(items, value)
+				}
+
 			case gent.DataContent:
 				content = append(content, map[string]any{"type": textType, "text": p.String()})
 			case gent.TextContent:
@@ -384,7 +407,7 @@ func (m *Responses) readResponse(ctx context.Context, response *http.Response,
 	}
 	var result *gent.ModelCallResponse
 	// An output item's phase applies to all its text deltas, including interleaved items.
-	itemTypes := make(map[int]string)
+	itemTypes := make(map[int]gent.AssistantContentType)
 	size := 0
 	err := readSSE(response.Body, func(data []byte) (bool, error) {
 		size += len(data)
@@ -420,12 +443,12 @@ func (m *Responses) readResponse(ctx context.Context, response *http.Response,
 		case "response.output_text.delta", "response.refusal.delta":
 			kind := itemTypes[event.OutputIndex]
 			if kind == "" {
-				kind = gent.MetaContentIntermediary
+				kind = gent.AssistantContentIntermediary
 			}
 			return false, sendProviderText(ctx, stream, options, kind,
 				fmt.Sprintf("output:%d", event.OutputIndex), event.Delta)
 		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-			return false, sendProviderText(ctx, stream, options, gent.MetaContentReasoning,
+			return false, sendProviderText(ctx, stream, options, gent.AssistantContentReasoning,
 				fmt.Sprintf("output:%d", event.OutputIndex), event.Delta)
 		case "response.completed", "response.incomplete", "response.failed":
 			var err error
@@ -453,12 +476,12 @@ func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCall
 		Status:         gent.ModelStatusAnswer,
 		ProviderReason: response.Status,
 	},
-		Continuation: &gent.ProviderContinuation{
-			Provider: m.config.Provider, Items: response.Output}}
+		Continuation: &gent.ProviderContinuation{Provider: m.config.Provider, Items: response.Output}}
 	if response.Status == "incomplete" {
 		choice.Completion.Status = gent.ModelStatusIncomplete
 		choice.Completion.ProviderReason = response.IncompleteDetails.Reason
 	}
+	var imageIDs []string
 	for index, raw := range response.Output {
 		var item struct {
 			Type      string `json:"type"`
@@ -502,13 +525,22 @@ func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCall
 				return nil, err
 			}
 			id := fmt.Sprintf("output:%d", index)
-			choice.CandidateContent = append(choice.CandidateContent, part)
+			imageIDs = append(imageIDs, id)
 			if choice.CandidateSource == nil {
 				choice.CandidateSource = &gent.ContentSource{}
 			}
 			choice.CandidateSource.MessageIds = append(choice.CandidateSource.MessageIds, id)
-			choice.MetaContent = append(choice.MetaContent, &gent.MetaContent{
-				Type: gent.MetaContentIntermediary, MessageId: id, Content: []gent.ContentPart{part}})
+			choice.Parts = append(
+				choice.Parts,
+				&gent.AssistantContent{
+
+					Type:      gent.AssistantContentFinalAnswerCandidate,
+					MessageId: id,
+					Content: []gent.ContentPart{
+						part,
+					},
+				},
+			)
 		case "function_call":
 			// The raw item is replayed without changes. A generated ID would disagree with it.
 			if item.CallID == "" || item.Name == "" {
@@ -517,24 +549,20 @@ func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCall
 				}
 				return nil, errors.New("Responses function call requires call_id and name")
 			}
-			choice.ToolCalls = append(choice.ToolCalls, &gent.ModelToolCallRequest{
+			choice.Parts = append(choice.Parts, &gent.ModelToolCallRequest{
 				ID: item.CallID, Type: "function",
 				FunctionCall: &gent.FunctionCall{Name: item.Name, Arguments: item.Arguments}})
 		case "message":
 			kind := responseMetaType(item.Phase)
+			if item.Phase == "" {
+				kind = gent.AssistantContentFinalAnswerCandidate
+			}
 			// A new message supersedes earlier text candidates. Generated images remain ordered
 			// answer parts even when the provider also emits an assistant message.
-			var images []gent.ContentPart
-			var imageIDs []string
-			for i, part := range choice.CandidateContent {
-				if _, ok := part.(gent.BinaryContent); ok {
-					images = append(images, part)
-					imageIDs = append(imageIDs, choice.CandidateSource.MessageIds[i])
-				}
-			}
-			choice.CandidateContent, choice.CandidateSource = images, nil
+			choice.CandidateSource = nil
 			if len(imageIDs) > 0 {
-				choice.CandidateSource = &gent.ContentSource{MessageIds: imageIDs}
+				choice.CandidateSource = &gent.ContentSource{
+					MessageIds: append([]string(nil), imageIDs...)}
 			}
 			var text strings.Builder
 			for _, part := range item.Content {
@@ -554,8 +582,8 @@ func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCall
 				text.WriteString(part.Text)
 			}
 			id := fmt.Sprintf("output:%d", index)
-			choice.MetaContent = append(choice.MetaContent,
-				&gent.MetaContent{
+			choice.Parts = append(choice.Parts,
+				&gent.AssistantContent{
 					Type:      kind,
 					Content:   []gent.ContentPart{gent.TextContent{Text: text.String()}},
 					MessageId: id,
@@ -568,44 +596,42 @@ func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCall
 			if item.Phase == "" || item.Phase == "final_answer" {
 				// A Responses output can contain multiple assistant messages. Only the last
 				// message can be the answer candidate; earlier messages remain previews.
-				choice.CandidateContent = append(choice.CandidateContent,
-					gent.TextContent{Text: text.String()})
 				if choice.CandidateSource == nil {
 					choice.CandidateSource = &gent.ContentSource{}
 				}
 				choice.CandidateSource.MessageIds = append(choice.CandidateSource.MessageIds, id)
 			}
 		case "reasoning":
-			// Opaque data stays in the raw continuation. Display only explicit visible text.
+			// One native reasoning item can contain several visible summary and text parts.
+			// Keep their order inside one group; opaque data stays in native continuation.
+			var parts []gent.ContentPart
 			for _, part := range item.Summary {
 				if part.Type == "summary_text" {
-					choice.MetaContent = append(choice.MetaContent, &gent.MetaContent{
-						Type: gent.MetaContentReasoning,
-						Content: []gent.ContentPart{
-							gent.TextContent{Text: part.Text},
-						},
-						MessageId: fmt.Sprintf("output:%d", index)})
+					parts = append(parts, gent.TextContent{Text: part.Text})
 				}
 			}
 			for _, part := range item.Content {
 				if part.Type == "reasoning_text" {
-					choice.MetaContent = append(choice.MetaContent, &gent.MetaContent{
-						Type: gent.MetaContentReasoning,
-						Content: []gent.ContentPart{
-							gent.TextContent{Text: part.Text},
-						},
-						MessageId: fmt.Sprintf("output:%d", index)})
+					parts = append(parts, gent.TextContent{Text: part.Text})
 				}
 			}
+			if len(parts) > 0 {
+				choice.Parts = append(choice.Parts, &gent.AssistantContent{
+					Type: gent.AssistantContentReasoning, MessageId: fmt.Sprintf("output:%d", index),
+					Content: parts})
+			}
+
 		default:
 			return nil, fmt.Errorf("unsupported Responses output item %q", item.Type)
 		}
 	}
 	if choice.Completion.Refusal != nil {
 		choice.Completion.Status = gent.ModelStatusRefused
-	} else if choice.Completion.Status == gent.ModelStatusAnswer && len(choice.ToolCalls) > 0 {
+	} else if choice.Completion.Status == gent.ModelStatusAnswer && len(choice.ToolCalls()) > 0 {
 		choice.Completion.Status = gent.ModelStatusToolCalls
-	} else if choice.Completion.Status == gent.ModelStatusAnswer && len(choice.CandidateContent) == 0 {
+	} else if choice.Completion.Status == gent.ModelStatusAnswer && len(
+		choice.CandidateContent(),
+	) == 0 {
 		choice.Completion.Status = gent.ModelStatusContinue
 	}
 	if err := choice.ValidateCompletion(); err != nil {
@@ -619,11 +645,14 @@ func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCall
 }
 
 // Keep unknown labels as metadata. They must not become answer candidates by default.
-func responseMetaType(phase string) string {
-	if phase == "" || phase == "final_answer" {
-		return gent.MetaContentIntermediary
+func responseMetaType(phase string) gent.AssistantContentType {
+	if phase == "final_answer" {
+		return gent.AssistantContentFinalAnswerCandidate
 	}
-	return phase
+	if phase == "" {
+		return gent.AssistantContentIntermediary
+	}
+	return gent.AssistantContentType(phase)
 }
 
 func (m *Responses) outputControls(body map[string]any, options *gent.CallOptions) error {

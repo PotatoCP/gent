@@ -11,15 +11,14 @@ package common
 //
 // Mean pooling models: e5 family, MiniLM, paraphrase-multilingual, nomic, GTE.
 // CLS pooling models: BGE (small/base/M3), Snowflake Arctic (s/m).
-type PoolingStrategy int
+type PoolingStrategy string
 
 const (
 	// PoolingMean averages all token embeddings weighted by the attention mask. Used by
 	// e5, MiniLM, GTE, and nomic models. This is the default.
-	PoolingMean PoolingStrategy = iota
-
+	PoolingMean PoolingStrategy = ""
 	// PoolingCLS takes the first token's ([CLS]) embedding. Used by BGE and Arctic models.
 	// The model concentrates semantic signal in the CLS token during training — averaging
 	// across all tokens (mean pooling) dilutes that signal, causing 5-15% nDCG@10 loss.
-	PoolingCLS
+	PoolingCLS PoolingStrategy = "cls"
 )

@@ -33,8 +33,8 @@ func TestLiveDeliveryCapacityAfterReceive(t *testing.T) {
 				return
 			}
 			defer sub.Close()
-			chunk := gent.StreamChunk{MetaContent: []*gent.MetaContent{{
-				Type: gent.MetaContentIntermediary, Content: []gent.ContentPart{
+			chunk := gent.StreamChunk{Content: []gent.ContentPart{&gent.AssistantContent{
+				Type: gent.AssistantContentIntermediary, Content: []gent.ContentPart{
 					gent.TextContent{Text: "Provisional text."}},
 			}}}
 			recordTestValue(t, seq, "model_stream_chunk", chunk)
@@ -42,9 +42,9 @@ func TestLiveDeliveryCapacityAfterReceive(t *testing.T) {
 			first := receiveLive(t, sub.Events())
 			recordTestValue(t, seq, "model_stream_chunk", chunk)
 			seq.Close()
-			numbers := []uint64{first.EventNumber}
+			numbers := []uint64{first.EventSequenceNumber}
 			for event := range sub.Events() {
-				numbers = append(numbers, event.EventNumber)
+				numbers = append(numbers, event.EventSequenceNumber)
 			}
 			<-sub.Done()
 			assert.Equal(t, test.expected, expected{numbers, sub.Err()})

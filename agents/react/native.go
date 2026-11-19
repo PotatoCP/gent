@@ -8,36 +8,31 @@ import (
 	agentutil "github.com/rickchristie/gent/agents"
 )
 
-func (r *Agent[T]) buildMessages(ctx *gent.ExecutionContext) ([]*gent.ModelMessage, error) {
-	task, err := ctx.Task()
+func (r *Agent[T]) buildMessages(execCtx *gent.ExecutionContext) ([]*gent.ModelMessage, error) {
+	// Only the current prefix and selected conversation belong in a request. Prepending Task
+	// again would duplicate user input and restore content that compaction intentionally omitted.
+	messages := append([]*gent.ModelMessage(nil), execCtx.Instructions()...)
+	records, err := execCtx.Scratchpad()
 	if err != nil {
 		return nil, err
 	}
-	if task == nil || len(task.Messages) == 0 {
-		return nil, errors.New("task must contain messages")
-	}
-	messages := task.Messages
-	records, err := ctx.Scratchpad()
-	if err != nil {
-		return nil, err
-	}
-	history, _ := agentutil.ScratchpadToMessages(records, ctx.Iteration())
+	history, _ := agentutil.ScratchpadToMessages(records, execCtx.Iteration())
 	messages = append(messages, history...)
-	return messages, ctx.RecordingError()
+	return messages, execCtx.RecordingError()
 }
 
 func (r *Agent[T]) nextNative(
-	ctx *gent.ExecutionContext, frame *iterationFrame,
+	execCtx *gent.ExecutionContext, frame *iterationFrame,
 ) (*gent.AgentLoopResult, error) {
 	if len(frame.Response.Choices) == 0 || frame.Response.Choices[0] == nil {
-		return r.nativeRetry(ctx, nil, "The model returned no response. Please try again.")
+		return r.nativeRetry(execCtx, nil, "The model returned no response. Please try again.")
 	}
 	choice := frame.Response.Choices[0]
 	if err := choice.ValidateCompletion(); err != nil {
 		return nil, err
 	}
 	if choice.Completion.Status == gent.ModelStatusRefused {
-		if err := ctx.AppendRecord(r.answerEntry(choice, nil), false); err != nil {
+		if err := execCtx.AppendRecord(r.answerEntry(choice, nil), true); err != nil {
 			return nil, err
 		}
 		return &gent.AgentLoopResult{Action: gent.LATerminate,
@@ -51,12 +46,12 @@ func (r *Agent[T]) nextNative(
 	// into a request to try again because its retained evidence is long or repetitive.
 	if repetition := frame.Repetition; repetition != nil {
 		if errors.Is(repetition.Err, agentutil.ErrMaxResponseSize) {
-			return r.handleResponseTooLong(ctx, frame.Response)
+			return r.handleResponseTooLong(execCtx, frame.Response)
 		}
-		return r.handleRepetition(ctx, frame.Response, repetition)
+		return r.handleRepetition(execCtx, frame.Response, repetition)
 	}
 	if choice.Completion.Status == gent.ModelStatusIncomplete {
-		return r.nativeRetry(ctx, choice,
+		return r.nativeRetry(execCtx, choice,
 			"The response was incomplete. Use a shorter answer or fewer tool calls.")
 	}
 	if choice.Completion.Status == gent.ModelStatusContinue {
@@ -64,81 +59,112 @@ func (r *Agent[T]) nextNative(
 			return nil, fmt.Errorf(
 				"model continuation %q requires a lossless adapter", choice.Completion.ProviderReason)
 		}
-		if err := ctx.AppendRecord(r.answerEntry(choice, nil), true); err != nil {
+		if err := execCtx.AppendRecord(r.answerEntry(choice, nil), true); err != nil {
 			return nil, err
 		}
 		return &gent.AgentLoopResult{Action: gent.LAContinue}, nil
 	}
-	if len(choice.ToolCalls) > 0 {
-		return r.nextNativeTools(ctx, frame, choice)
+	if len(choice.ToolCalls()) > 0 {
+		return r.nextNativeTools(execCtx, frame, choice)
 	}
 
-	return r.nextNativeAnswer(ctx, choice)
+	return r.nextNativeAnswer(execCtx, choice)
 }
 
 func (r *Agent[T]) nextNativeTools(
-	ctx *gent.ExecutionContext, frame *iterationFrame, choice *gent.ContentChoice,
+	execCtx *gent.ExecutionContext, frame *iterationFrame, choice *gent.ContentChoice,
 ) (*gent.AgentLoopResult, error) {
-	chain := r.toolChain
+	if frame.ToolResultsPrepared {
+		return &gent.AgentLoopResult{Action: gent.LAContinue}, nil
+	}
+	chain := r.tools(execCtx)
 	if !frame.ToolPlanActive {
-		if err := normalizeCallIDs(ctx, choice.ToolCalls); err != nil {
-			ctx.PublishParseError(
-				gent.ParseErrorTypeToolchain, gent.ContentText(choice.CandidateContent), err)
-			return r.nativeRetry(ctx, choice, err.Error())
+		normalized, err := normalizeCallIDs(execCtx, choice)
+		if err != nil {
+			execCtx.PublishParseError(gent.ParseErrorTypeToolchain,
+				gent.ContentText(choice.CandidateContent()), err)
+			return r.nativeRetry(execCtx, choice, err.Error())
+		}
+		if normalized != choice {
+			response := *frame.Response
+			response.Choices = append([]*gent.ContentChoice(nil), response.Choices...)
+			response.Choices[0] = normalized
+			frame.Response, choice = &response, normalized
 		}
 	}
-	result, err := r.executeToolPlan(ctx, frame, func() (*gent.ToolPlan, error) {
-		return chain.PrepareCalls(ctx, choice.ToolCalls)
+	result, err := r.executeToolPlan(execCtx, frame, func() (*gent.ToolPlan, error) {
+		return chain.PrepareCalls(execCtx, choice.ToolCalls())
 	}, chain.ExecuteNext)
-	if recordErr := ctx.RecordingError(); recordErr != nil {
+	// Chain errors are execution failures, including before a plan exists. Preserve the cause
+	// before checking cancellation so Stop cannot turn a failed operation into an accepted pause.
+	if err != nil {
+		return nil, errors.Join(err, execCtx.RecordingError())
+	}
+	if recordErr := execCtx.RecordingError(); recordErr != nil {
 		return nil, recordErr
 	}
-	if ctx.Context().Err() != nil {
-		return nil, ctx.Context().Err()
-	}
-	if errors.Is(err, gent.ErrUnsupportedRecovery) {
-		return nil, err
-	}
-	if err != nil {
-		if frame.ToolPlanActive {
-			// A failed saved plan can contain effects. Keep it for explicit recovery.
-			return nil, err
-		}
-		return r.nativeRetry(ctx, choice, err.Error())
+	if execCtx.Context().Err() != nil {
+		return nil, execCtx.Context().Err()
 	}
 	entry := nativeToolEntry(choice, result)
-	if err := ctx.AppendRecord(entry, true); err != nil {
+	if err := execCtx.AppendRecord(entry, true); err != nil {
 		return nil, err
 	}
-	ctx.Stats().ResetGauge(gent.SGRepetitionLoopConsecutive)
+	execCtx.Stats().ResetGauge(gent.SGRepetitionLoopConsecutive)
 	return &gent.AgentLoopResult{Action: gent.LAContinue}, nil
 }
 
-func normalizeCallIDs(ctx *gent.ExecutionContext, calls []*gent.ModelToolCallRequest) error {
+// Some endpoints omit tool IDs. The plan needs stable local IDs, but the original response and
+// its borrowed derived views must stay unchanged. Copy only call wrappers that need normalization.
+func normalizeCallIDs(execCtx *gent.ExecutionContext, choice *gent.ContentChoice) (
+	*gent.ContentChoice, error,
+) {
+	result := choice
 	seen := map[string]bool{}
-	for i := range calls {
-		if calls[i].ID == "" {
-			calls[i].ID = "native-" + ctx.NewToolCallId()
+	for i, part := range choice.Parts {
+		var call *gent.ModelToolCallRequest
+		switch part := part.(type) {
+		case *gent.ModelToolCallRequest:
+			call = part
+		case gent.ModelToolCallRequest:
+			copy := part
+			call = &copy
+		default:
+			continue
 		}
-		if seen[calls[i].ID] {
-			return fmt.Errorf("duplicate model tool call ID %q", calls[i].ID)
+		if call.ID == "" || call.Type == "" {
+			if result == choice {
+				copy := *choice
+				copy.Parts = append([]gent.ContentPart(nil), choice.Parts...)
+				result = &copy
+			}
+			copy := *call
+			if copy.ID == "" {
+				id, err := execCtx.NewToolCallId()
+				if err != nil {
+					return nil, err
+				}
+				copy.ID = "native-" + id
+			}
+			if copy.Type == "" {
+				copy.Type = "function"
+			}
+			call = &copy
+			result.Parts[i] = call
 		}
-		seen[calls[i].ID] = true
-		if calls[i].Type == "" {
-			calls[i].Type = "function"
+		if seen[call.ID] {
+			return nil, fmt.Errorf("duplicate model tool call ID %q", call.ID)
 		}
+		seen[call.ID] = true
 	}
-	return nil
+	return result, nil
 }
 
 func nativeToolEntry(
 	choice *gent.ContentChoice, result []*gent.ToolCallRecord,
 ) *gent.HistoryEntry {
 	ai := &gent.MessageContent{Role: gent.ChatMessageTypeAI, Continuation: choice.Continuation}
-	ai.Parts = choice.CandidateContent
-	for _, call := range choice.ToolCalls {
-		ai.Parts = append(ai.Parts, call)
-	}
+	ai.Parts = choice.Parts
 	entry := &gent.HistoryEntry{Messages: []*gent.MessageContent{ai}}
 	for _, record := range result {
 		message := &gent.MessageContent{Role: gent.ChatMessageTypeTool,
@@ -150,38 +176,38 @@ func nativeToolEntry(
 }
 
 func (r *Agent[T]) nextNativeAnswer(
-	ctx *gent.ExecutionContext, choice *gent.ContentChoice,
+	execCtx *gent.ExecutionContext, choice *gent.ContentChoice,
 ) (*gent.AgentLoopResult, error) {
-	result, err := r.output.Process(ctx, choice.CandidateContent)
+	result, err := r.output.Process(execCtx, choice.CandidateContent())
 	if err == nil {
 		err = result.Validate()
 	}
 	if err != nil {
-		ctx.PublishOutputValidation(gent.OutputValidationProcess, "", false, nil, err)
+		execCtx.PublishOutputValidation(gent.OutputValidationProcess, "", false, nil, err)
 		return nil, err
 	}
 	if !result.Accepted {
 		// Save the candidate and steering even if a stage limit has just canceled this run.
-		next, err := r.nativeFeedback(ctx, choice, result.Steering)
+		next, err := r.nativeFeedback(execCtx, choice, result.Steering)
 		if err != nil {
 			return nil, err
 		}
-		ctx.PublishOutputValidation(gent.OutputValidationProcess, "", false, result.Steering, nil)
+		execCtx.PublishOutputValidation(gent.OutputValidationProcess, "", false, result.Steering, nil)
 		return next, nil
 	}
-	ctx.Stats().ResetGauge(gent.SGRepetitionLoopConsecutive)
-	if err := ctx.AppendRecord(r.answerEntry(choice, nil), false); err != nil {
+	execCtx.Stats().ResetGauge(gent.SGRepetitionLoopConsecutive)
+	if err := execCtx.AppendRecord(r.answerEntry(choice, nil), true); err != nil {
 		return nil, err
 	}
-	accepted, err := gent.AcceptOutput(ctx, result, choice.CandidateSource)
-	ctx.PublishOutputValidation(gent.OutputValidationProcess, "", err == nil, nil, err)
+	accepted, err := gent.AcceptOutput(execCtx, result, choice.CandidateSource)
+	execCtx.PublishOutputValidation(gent.OutputValidationProcess, "", err == nil, nil, err)
 	return accepted, err
 }
 
 func (r *Agent[T]) nativeFeedback(
-	ctx *gent.ExecutionContext, choice *gent.ContentChoice, feedback []gent.ContentPart,
+	execCtx *gent.ExecutionContext, choice *gent.ContentChoice, feedback []gent.ContentPart,
 ) (*gent.AgentLoopResult, error) {
-	if err := ctx.AppendRequiredRecord(r.answerEntry(choice, feedback)); err != nil {
+	if err := execCtx.AppendRequiredRecord(r.answerEntry(choice, feedback)); err != nil {
 		return nil, err
 	}
 	return &gent.AgentLoopResult{Action: gent.LAContinue}, nil
@@ -192,14 +218,10 @@ func (r *Agent[T]) answerEntry(
 	choice *gent.ContentChoice, feedback []gent.ContentPart,
 ) *gent.HistoryEntry {
 	message := &gent.MessageContent{Role: gent.ChatMessageTypeAI,
-		Parts: choice.CandidateContent, Continuation: choice.Continuation}
-	for _, call := range choice.ToolCalls {
-		message.Parts = append(message.Parts, call)
-	}
+		Parts: choice.Parts, Continuation: choice.Continuation}
 	entry := &gent.HistoryEntry{Messages: []*gent.MessageContent{message}}
 	if len(feedback) > 0 {
-		steering := &gent.MessageContent{Role: gent.ChatMessageTypeHuman,
-			Parts: feedback}
+		steering := &gent.MessageContent{Role: gent.ChatMessageTypeHuman, Parts: feedback}
 		steering.SetMetadata("gent:output_steering", true)
 		entry.Messages = append(entry.Messages, steering)
 	}
@@ -207,21 +229,21 @@ func (r *Agent[T]) answerEntry(
 }
 
 func (r *Agent[T]) nativeRetry(
-	ctx *gent.ExecutionContext, choice *gent.ContentChoice, feedback string,
+	execCtx *gent.ExecutionContext, choice *gent.ContentChoice, feedback string,
 ) (*gent.AgentLoopResult, error) {
 	// Keep the rejected response for inspection. Do not send incomplete call groups to the model.
 	entry := &gent.HistoryEntry{}
 	if choice != nil {
 		entry = r.answerEntry(choice, nil)
 	}
-	entry.ExpireAfterIteration = max(ctx.Iteration(), 1)
-	if err := ctx.AppendRecord(entry, true); err != nil {
+	entry.ExpireAfterIteration = max(execCtx.Iteration(), 1)
+	if err := execCtx.AppendRecord(entry, true); err != nil {
 		return nil, err
 	}
 	reminder := &gent.HistoryEntry{Origin: gent.RecordSystemInjected,
 		Messages: []*gent.MessageContent{{Role: gent.ChatMessageTypeHuman,
 			Parts: []gent.ContentPart{gent.TextContent{Text: feedback}}}}}
-	if err := ctx.AppendRequiredRecord(reminder); err != nil {
+	if err := execCtx.AppendRequiredRecord(reminder); err != nil {
 		return nil, err
 	}
 	return &gent.AgentLoopResult{Action: gent.LAContinue}, nil

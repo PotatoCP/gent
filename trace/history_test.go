@@ -2,285 +2,202 @@ package trace
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/executor"
+	"github.com/rickchristie/gent/internal/tt"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-type batchCollector struct{ batches []*gent.SaveBatch }
-
-func (c *batchCollector) Save(_ context.Context, batch *gent.SaveBatch) error {
-	c.batches = append(c.batches, batch)
-	return nil
-}
-
-func TestHistoryReplay_ChildInterruptionIsScoped(t *testing.T) {
-	seq := newTestSequencer(t, "child-interruption", Config{})
-	root := gent.NewExecutionContext(context.Background(), "root", nil,
-		gent.WithRunId(seq.Snapshot().RunId), gent.WithObserver(seq))
-	root.PublishBeforeExecution()
-	child := root.SpawnChild("interrupted child", nil)
-	sibling := root.SpawnChild("running sibling", nil)
-	for _, ctx := range []*gent.ExecutionContext{root, child, sibling} {
-		if ctx != root {
-			ctx.PublishBeforeExecution()
-		}
-		ctx.IncrementIteration()
-		ctx.PublishBeforeIteration()
-		ctx.PublishBeforeModelCall("fixture", gent.NewModelCallRequest(nil))
-		ctx.PublishBeforeToolCall("lookup", "P10")
-	}
-	assert.NoError(t, root.FlushProgress())
-	assert.NoError(t, child.RecordInterruption(context.Canceled))
-	type expected struct {
-		modelCalls []StepStatus
-		toolCalls  []StepStatus
-		iterations []StepStatus
-	}
-	var actual expected
-	snapshot := seq.Snapshot()
-	for _, call := range snapshot.ModelCalls {
-		actual.modelCalls = append(actual.modelCalls, call.Status)
-	}
-	for _, call := range snapshot.ToolCalls {
-		actual.toolCalls = append(actual.toolCalls, call.Status)
-	}
-	for _, iteration := range snapshot.Iterations {
-		actual.iterations = append(actual.iterations, iteration.Status)
-	}
-	assert.Equal(t, expected{
-		modelCalls: []StepStatus{StepStatusRunning, StepStatusInterrupted, StepStatusRunning},
-		toolCalls:  []StepStatus{StepStatusRunning, StepStatusInterrupted, StepStatusRunning},
-		iterations: []StepStatus{StepStatusRunning, StepStatusInterrupted, StepStatusRunning},
-	}, actual)
-	bundle, err := root.Export()
-	assert.NoError(t, err)
-	loaded, err := RestoreSequencer(bundle, Config{})
-	if assert.NoError(t, err) {
-		assert.Equal(t, snapshot, loaded.Snapshot())
-	}
-}
-
-func TestHistoryReplay_CursorsAndLostCompletion(t *testing.T) {
-	collector := &batchCollector{}
+func TestHistoryReplayCursorsAndLostCompletion(t *testing.T) {
 	config := Config{MaxRecentEvents: 2, IncludeRunOutput: true,
 		IncludeChunkText: true, IncludeStateChanges: true}
-	seq := newTestSequencer(t, "cursor", config)
-	ctx := gent.NewExecutionContext(context.Background(), "root", nil,
-		gent.WithRunId(seq.Snapshot().RunId), gent.WithObserver(seq), gent.WithRecorder(collector))
-	ctx.PublishBeforeExecution()
-	for i := 1; i < 120; i++ {
-		ctx.PublishCommonEvent("fixture:progress", "accepted progress", i)
+	seq := newTestSequencer(t, "", config)
+	defer seq.Close()
+	loop := &traceTestLoop{next: func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		for i := range 120 {
+			execCtx.PublishCommonEvent("fixture:progress", "accepted progress", i)
+		}
+		for range 8 {
+			if err := execCtx.EmitChunk(gent.StreamChunk{Content: []gent.ContentPart{&gent.AssistantContent{
+				Type: gent.AssistantContentIntermediary, MessageId: "partial",
+				Content: []gent.ContentPart{gent.TextPart("x")}}}}); err != nil {
+				return nil, err
+			}
+		}
+		execCtx.Stop()
+		return nil, execCtx.Context().Err()
+	}}
+	runner, execCtx, store := newTraceRun(t, context.Background(), loop,
+		&gent.Config{Subscribers: []*gent.SubscriberRegistration{{Subscriber: seq}}})
+	_, paused, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Work.")))
+	require.NoError(t, err)
+	require.Equal(t, gent.ExecutionPaused, paused.Status)
+	assert.Equal(t, RunStatusPaused, seq.Snapshot().Status)
+	savedCursor := store.view.LastAppliedEventSequenceNumber
+	assert.Greater(t, savedCursor, uint64(128))
+	assert.Equal(t, savedCursor, store.view.Checkpoint.EventSequenceNumber)
+	archive := gent.NewRunView(execCtx.RunId())
+	codecs := gent.NewCodecRegistry()
+	for _, data := range store.batches {
+		var batch gent.SaveBatch
+		require.NoError(t, codecs.Unmarshal(data, &batch))
+		applied, err := archive.Apply(&batch, codecs)
+		require.NoError(t, err)
+		require.Equal(t, gent.ApplyApplied, applied.Status)
 	}
-	assert.NoError(t, ctx.CommitCheckpoint(gent.PhaseInitial))
-	for i := 0; i < 8; i++ {
-		assert.NoError(t, ctx.EmitChunk(gent.StreamChunk{
-			StreamId: "partial", MetaContent: []*gent.MetaContent{
-				{
-					Type: gent.MetaContentIntermediary, Content: []gent.ContentPart{gent.TextContent{Text: "x"}},
-				},
-			},
-		}))
-	}
-	assert.NoError(t, ctx.FlushProgress())
-	bundle, err := ctx.Export()
-	assert.NoError(t, err)
-	assert.Equal(t, uint64(120), bundle.Checkpoint.EventNumber)
-	assert.Equal(t, uint64(128), bundle.LastAppliedEventNumber)
-	view := gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "cursor"}
-	for _, batch := range collector.batches {
-		view, err = gent.ApplyBatch(view, batch)
-		assert.NoError(t, err)
-	}
-	assert.Equal(t, bundle, view)
-	bytes, err := ctx.Codecs().Marshal(bundle)
-	assert.NoError(t, err)
-	var saved gent.RunView
-	assert.NoError(t, ctx.Codecs().Unmarshal(bytes, &saved))
-	fresh, err := RestoreSequencer(saved, config)
-	if !assert.NoError(t, err) {
-		return
-	}
+	assert.Equal(t, store.view, archive)
+	fresh, err := RestoreSequencer(*archive, config)
+	require.NoError(t, err)
+	defer fresh.Close()
 	assert.Equal(t, seq.Snapshot(), fresh.Snapshot())
-	restored, err := gent.RestoreExecutionContext(context.Background(), saved,
-		gent.RestoreBindings{Recorder: collector, Observers: []gent.RecordedEventObserver{fresh}})
-	if !assert.NoError(t, err) {
-		return
-	}
-	assert.NoError(t, restored.FlushProgress())
-	assert.Equal(t, uint64(129), fresh.Snapshot().LastEventNumber)
-	assert.NoError(t, restored.EmitChunk(gent.StreamChunk{
-		StreamId: "partial", MetaContent: []*gent.MetaContent{
-			{
-				Type: gent.MetaContentIntermediary, Content: []gent.ContentPart{gent.TextContent{Text: "y"}},
-			},
-		},
-	}))
-	assert.NoError(t, restored.FlushProgress())
-	events, err := fresh.EventsAfter(129)
-	assert.NoError(t, err)
-	assert.Equal(t, StitchStatusGap, ValidateStitch(128, events).Status)
-	reloaded, err := restored.Export()
-	assert.NoError(t, err)
-	assert.Equal(t, uint64(130), reloaded.LastAppliedEventNumber)
-	assert.Equal(t, uint64(129), reloaded.Activity[128].EventNumber)
-	assert.NoError(t, restored.EmitChunk(gent.StreamChunk{
-		StreamId: "partial", MetaContent: []*gent.MetaContent{
-			{
-				Type: gent.MetaContentIntermediary, Content: []gent.ContentPart{gent.TextContent{Text: "z"}},
-			},
-		},
-	}))
-	assert.NoError(t, restored.FlushProgress())
-	events, err = fresh.EventsAfter(reloaded.LastAppliedEventNumber)
-	assert.NoError(t, err)
-	assert.Equal(t, StitchStatusOK, ValidateStitch(130, events).Status)
-	assert.Equal(t, uint64(131), events[0].EventNumber)
-	// Simulate a lost final publication: a periodic full read discovers completion without
-	// requiring another event to expose a gap.
-	output := []gent.ContentPart{gent.TextContent{Text: "saved answer"}}
-	restored.SetTermination(gent.TerminationSuccess, output, nil)
-	restored.PublishAfterExecution(gent.TerminationSuccess, nil)
-	assert.NoError(t, restored.CommitCheckpoint(gent.PhaseTerminal))
-	terminal, err := restored.Export()
-	assert.NoError(t, err)
-	assert.Equal(t, gent.PhaseTerminal, terminal.Checkpoint.Phase)
-	assert.Equal(t, uint64(133), terminal.LastAppliedEventNumber)
-	assert.NoError(t, gent.ValidateBundle(terminal))
-	late, err := RestoreSequencer(terminal, config)
-	assert.NoError(t, err)
-	assert.Equal(t, fresh.Snapshot(), late.Snapshot())
-	_, err = fresh.EventsAfter(0)
+	loaded, err := codecs.UnmarshalRunState(store.runStateSnapshot)
+	require.NoError(t, err)
+	require.Equal(t, gent.RunStateReady, loaded.Status)
+	loop = &traceTestLoop{next: func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		for _, text := range []string{"y", "z"} {
+			if err := execCtx.EmitChunk(gent.StreamChunk{Content: []gent.ContentPart{&gent.AssistantContent{
+				Type: gent.AssistantContentIntermediary, MessageId: "partial",
+				Content: []gent.ContentPart{gent.TextPart(text)}}}}); err != nil {
+				return nil, err
+			}
+		}
+		return traceTestDone(execCtx)
+	}}
+	continued := executor.NewRunner[string](loop, &gent.Config{Codecs: codecs, Recorder: store,
+		Subscribers: []*gent.SubscriberRegistration{{Subscriber: fresh}}})
+	restored, err := continued.Restore(context.Background(), loaded.State)
+	require.NoError(t, err)
+	require.Equal(t, gent.RestoreReady, restored.Status)
+	defer restored.Context.Release()
+	assert.Equal(t, savedCursor, fresh.Snapshot().LastEventSequenceNumber)
+	_, completed, err := continued.Continue(restored.Context)
+	require.NoError(t, err)
+	require.Equal(t, gent.ExecutionFinished, completed.Status)
+	last := fresh.Snapshot().LastEventSequenceNumber
+	events, err := fresh.EventsAfter(last - 1)
+	require.NoError(t, err)
+	assert.Equal(t, StitchStatusGap, ValidateStitch(savedCursor, events).Status)
+	assert.Equal(t, StitchStatusOK, ValidateStitch(last-1, events).Status)
+	_, err = fresh.EventsAfter(savedCursor)
 	assert.ErrorIs(t, err, ErrReplayUnavailable)
+	// A client can miss the last publication without observing another event. A full accepted
+	// archive read must still reveal the complete answer and its terminal cursor.
+	late, err := RestoreSequencer(*store.view, config)
+	require.NoError(t, err)
+	defer late.Close()
+	assert.Equal(t, fresh.Snapshot(), late.Snapshot())
+	assert.Equal(t, gent.PhaseTerminal, store.view.Checkpoint.Phase)
+	assert.Equal(t, "Done", gent.ContentText(late.Snapshot().Contexts[0].Content))
+	assert.NoError(t, gent.ValidateBundle(*store.view, codecs))
 }
 
 type interruptedProvider struct{ started chan struct{} }
 
-func (m *interruptedProvider) GenerateContentStream(ctx context.Context, _ *gent.ModelCallRequest) (
-	gent.Stream, error,
+func (model *interruptedProvider) GenerateContentStream(
+	ctx context.Context,
+	_ *gent.ModelCallRequest,
+) (
+	gent.Stream,
+	error,
 ) {
 	stream := gent.NewStreamWithDuration()
 	go func() {
-		stream.SendMeta(&gent.MetaContent{
-			Type: gent.MetaContentIntermediary,
-			Content: []gent.ContentPart{
-				gent.TextContent{Text: "partial policy evidence"},
-			},
-		})
-		close(m.started)
+		parts := []gent.ContentPart{&gent.AssistantContent{Type: gent.AssistantContentIntermediary,
+			MessageId: "partial", Content: []gent.ContentPart{gent.TextPart("partial policy evidence")}}}
+		stream.Send(gent.StreamChunk{Content: parts})
+		close(model.started)
 		<-ctx.Done()
-		stream.Complete(&gent.ModelCallResponse{
-			Choices: []*gent.ContentChoice{
-				{
-					Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-					CandidateContent: []gent.ContentPart{gent.TextContent{Text: "partial policy evidence"}},
-				},
-			},
-			Info: &gent.GenerationInfo{InputTokens: 12, OutputTokens: 8, TotalTokens: 20},
-		}, ctx.Err())
+		stream.Complete(&gent.ModelCallResponse{Choices: []*gent.ContentChoice{{Parts: parts,
+			Completion: gent.ModelCompletion{Status: gent.ModelStatusIncomplete}}},
+			Info: &gent.GenerationInfo{InputTokens: 12, OutputTokens: 8, TotalTokens: 20}}, ctx.Err())
 	}()
 	return stream, nil
 }
-
-type completedProvider struct{ calls int }
-
-func (m *completedProvider) GenerateContentStream(context.Context, *gent.ModelCallRequest) (
-	gent.Stream, error,
-) {
-	m.calls++
-	return gent.NewCompletedStream(&gent.ModelCallResponse{
-		Choices: []*gent.ContentChoice{
-			{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: "complete answer"}},
-			},
-		},
-		Info: &gent.GenerationInfo{InputTokens: 12, OutputTokens: 8, TotalTokens: 20},
-	}, nil), nil
+func (*interruptedProvider) PrepareRequest(execCtx *gent.ExecutionContext,
+	request *gent.ModelCallRequest, chain gent.ToolChain,
+) (*gent.ModelCallRequest, error) {
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }
 
-func TestHistoryReplay_ModelAttemptsAndKnownUsage(t *testing.T) {
-	config := Config{
-		IncludeChunkText:      true,
-		IncludeModelRequests:  true,
-		IncludeModelResponses: true,
-	}
-	seq := newTestSequencer(t, "attempt", config)
-	worker, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx := gent.NewExecutionContext(worker, "root", nil,
-		gent.WithRunId(seq.Snapshot().RunId), gent.WithObserver(seq))
-	ctx.SetLimits(nil)
-	ctx.PublishBeforeExecution()
-	ctx.IncrementIteration()
-	ctx.PublishBeforeIteration()
-	assert.NoError(t, ctx.CommitCheckpoint(gent.PhaseIterationReady))
-	request := gent.NewModelCallRequest([]*gent.ModelMessage{
-		gent.TextParts(gent.ChatMessageTypeHuman, "policy question"),
-	})
+func TestHistoryReplayModelAttemptsAndKnownUsage(t *testing.T) {
+	config := Config{IncludeChunkText: true, IncludeModelRequests: true, IncludeModelResponses: true}
+	seq := newTestSequencer(t, "", config)
+	defer seq.Close()
 	model := &interruptedProvider{started: make(chan struct{})}
-	stream, err := ctx.GenerateContentStream(model, gent.ModelCall{StreamId: "answer"}, request)
-	if !assert.NoError(t, err) {
-		return
+	buildLoop := func(model gent.Model) *traceTestLoop {
+		return &traceTestLoop{next: func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+			stream, err := execCtx.GenerateContentStream(model,
+				gent.ModelCall{Id: execCtx.ContextId() + ":policy", StreamId: "answer"},
+				gent.NewModelCallRequest([]*gent.ModelMessage{
+					gent.TextParts(gent.ChatMessageTypeHuman, "policy question")}))
+			if err != nil {
+				return nil, err
+			}
+			defer stream.Close()
+			for range stream.Chunks() {
+			}
+			response, err := stream.Response()
+			if err != nil {
+				return nil, err
+			}
+			choice := response.Choices[0]
+			return gent.AcceptOutput(execCtx, &gent.OutputResult[string]{Accepted: true,
+				Value: gent.ContentText(choice.CandidateContent()), Content: choice.CandidateContent()},
+				choice.CandidateSource)
+		}}
 	}
+	runner, execCtx, store := newTraceRun(t, context.Background(), buildLoop(model),
+		&gent.Config{Subscribers: []*gent.SubscriberRegistration{{Subscriber: seq}}})
+	type result struct {
+		execution *gent.ExecutionResult
+		err       error
+	}
+	done := make(chan result, 1)
+	go func() {
+		_, execution, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read policy.")))
+		done <- result{execution, err}
+	}()
 	<-model.started
-	chunk := <-stream.Chunks()
-	assert.Equal(t, "partial policy evidence",
-		gent.MetaText(chunk.MetaContent, gent.MetaContentIntermediary))
-	cancel()
-	for range stream.Chunks() {
-	}
-	response, err := stream.Response()
-	assert.ErrorIs(t, err, context.Canceled)
-	assert.Equal(t, 20, response.Info.TotalTokens)
-	assert.NoError(t, ctx.RecordInterruption(err))
-	bundle, err := ctx.Export()
-	assert.NoError(t, err)
-	freshSeq, err := RestoreSequencer(bundle, config)
-	assert.NoError(t, err)
-	fresh, err := gent.RestoreExecutionContext(context.Background(), bundle,
-		gent.RestoreBindings{Observers: []gent.RecordedEventObserver{freshSeq}})
-	if !assert.NoError(t, err) {
-		return
-	}
-	assert.Equal(t, int64(20), fresh.Stats().GetCounter(gent.SCTotalTokens))
-	freshModel := &completedProvider{}
-	stream, err = fresh.GenerateContentStream(
-		freshModel,
-		gent.ModelCall{StreamId: "answer"},
-		request,
-	)
-	assert.NoError(t, err)
-	for range stream.Chunks() {
-	}
-	_, err = stream.Response()
-	assert.NoError(t, err)
-	assert.Equal(t, 1, freshModel.calls)
-	assert.Equal(t, int64(40), fresh.Stats().GetCounter(gent.SCTotalTokens))
+	execCtx.Stop()
+	paused := <-done
+	require.NoError(t, paused.err)
+	require.Equal(t, gent.ExecutionPaused, paused.execution.Status)
+	assert.Equal(t, int64(20), execCtx.Stats().GetCounter(gent.SCTotalTokens))
+	freshSeq, err := RestoreSequencer(*store.view, config)
+	require.NoError(t, err)
+	defer freshSeq.Close()
+	assert.Equal(t, seq.Snapshot(), freshSeq.Snapshot())
+	codecs := gent.NewCodecRegistry()
+	loaded, err := codecs.UnmarshalRunState(store.runStateSnapshot)
+	require.NoError(t, err)
+	require.Equal(t, gent.RunStateReady, loaded.Status)
+	freshModel := tt.NewMockModel().AddResponse("complete answer", 12, 8)
+	fresh := executor.NewRunner[string](buildLoop(freshModel), &gent.Config{Codecs: codecs,
+		Recorder: store, Subscribers: []*gent.SubscriberRegistration{{Subscriber: freshSeq}}})
+	restored, err := fresh.Restore(context.Background(), loaded.State)
+	require.NoError(t, err)
+	require.Equal(t, gent.RestoreReady, restored.Status)
+	defer restored.Context.Release()
+	assert.Equal(t, int64(20), restored.Context.Stats().GetCounter(gent.SCTotalTokens))
+	value, completed, err := fresh.Continue(restored.Context)
+	require.NoError(t, err)
+	assert.Equal(t, gent.ExecutionFinished, completed.Status)
+	assert.Equal(t, "complete answer", value)
+	assert.Len(t, freshModel.CapturedRequests, 1)
+	assert.Equal(t, int64(40), restored.Context.Stats().GetCounter(gent.SCTotalTokens))
 	snapshot := freshSeq.Snapshot()
-	if assert.Len(t, snapshot.ModelCalls, 2) {
-		first, second := snapshot.ModelCalls[0], snapshot.ModelCalls[1]
-		assert.Equal(t, first.Id, second.Id)
-		assert.NotEqual(t, first.AttemptId, second.AttemptId)
-		assert.NotEqual(t, StepStatusSucceeded, first.Status)
-		assert.Equal(t, StepStatusSucceeded, second.Status)
-		assert.Equal(t, "partial policy evidence",
-			gent.MetaText(first.Stream.MetaContent, gent.MetaContentIntermediary))
-		assert.Equal(t, "complete answer",
-			gent.MetaText(second.Stream.MetaContent, gent.MetaContentIntermediary))
-	}
+	require.Len(t, snapshot.ModelCalls, 2)
+	first, second := snapshot.ModelCalls[0], snapshot.ModelCalls[1]
+	assert.Equal(t, first.Id, second.Id)
+	assert.NotEqual(t, first.AttemptId, second.AttemptId)
+	assert.NotEqual(t, StepStatusSucceeded, first.Status)
+	assert.Equal(t, StepStatusSucceeded, second.Status)
+	assert.Equal(t, "partial policy evidence", gent.ContentText(first.Stream.Content))
+	assert.Equal(t, "complete answer", gent.ContentText(second.Stream.Content))
 	assert.Equal(t, 40, snapshot.Stats.TotalTokens)
-	assert.True(t, errors.Is(ctx.Context().Err(), context.Canceled))
-}
-func (m *interruptedProvider) PrepareRequest(ctx *gent.ExecutionContext,
-	request *gent.ModelCallRequest, chain gent.ToolChain,
-) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
-}
-func (m *completedProvider) PrepareRequest(ctx *gent.ExecutionContext,
-	request *gent.ModelCallRequest, chain gent.ToolChain,
-) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	assert.Equal(t, RunStatusSucceeded, snapshot.Status)
+	assert.ErrorIs(t, execCtx.Context().Err(), context.Canceled)
 }

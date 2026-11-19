@@ -1,60 +1,45 @@
 package gent
 
-const EventNameStateChange = "gent:state_change"
-
-// Event name constants define the EventName values for framework events.
-//
-// # Naming Convention
-//
-// Event names follow the pattern: "namespace:category:timing"
-//   - namespace: "gent" for framework events, application name for custom events
-//   - category: what the event is about (execution, iteration, model_call, tool_call, etc.)
-//   - timing: when in the lifecycle (before, after) - omitted for single events
-//
-// # Examples
-//
-//	gent:iteration:before    // Framework: before iteration
-//	gent:model_call:after    // Framework: after model call
-//	gent:parse_error         // Framework: parse error (no timing)
-//	myapp:cache_hit          // Application: custom event
-const (
-	// Execution lifecycle
-	EventNameExecutionBefore = "gent:execution:before"
-	EventNameExecutionAfter  = "gent:execution:after"
-
-	// Iteration lifecycle
-	EventNameIterationBefore = "gent:iteration:before"
-	EventNameIterationAfter  = "gent:iteration:after"
-
-	// Model calls
-	EventNameModelCallBefore = "gent:model_call:before"
-	EventNameModelCallAfter  = "gent:model_call:after"
-
-	// Tool calls
-	EventNameToolCallBefore = "gent:tool_call:before"
-	EventNameToolCallAfter  = "gent:tool_call:after"
-
-	// Errors and validation
-	EventNameParseError = "gent:parse_error"
-	EventNameError      = "gent:error"
-
-	// Limits
-	EventNameLimitExceeded = "gent:limit_exceeded"
-
-	// Compaction
-	EventNameCompaction = "gent:compaction"
-
-	// Child context lifecycle (published as CommonEvent)
-	EventNameChildSpawn    = "gent:child:spawn"
-	EventNameChildComplete = "gent:child:complete"
-
-	// State change events (published as StateChangeEvent)
-	EventNameIterationHistoryChange = "gent:iteration_history:change"
-	EventNameScratchPadChange       = "gent:scratchpad:change"
+import (
+	core "github.com/rickchristie/gent/internal/core"
 )
 
+// EventNameStateChange identifies a structured history selection update.
+const EventNameStateChange = core.EventNameStateChange
+
+// Execution lifecycle
+const EventNameExecutionBefore = core.EventNameExecutionBefore
+
+const EventNameExecutionAfter = core.EventNameExecutionAfter
+
+// Iteration lifecycle
+const EventNameIterationBefore = core.EventNameIterationBefore
+
+const EventNameIterationAfter = core.EventNameIterationAfter
+
+// Model calls
+const EventNameModelCallBefore = core.EventNameModelCallBefore
+
+const EventNameModelCallAfter = core.EventNameModelCallAfter
+
+// Tool calls
+const EventNameToolCallBefore = core.EventNameToolCallBefore
+
+const EventNameToolCallAfter = core.EventNameToolCallAfter
+
+// Errors and validation
+const EventNameParseError = core.EventNameParseError
+
+const EventNameError = core.EventNameError
+
+// Limits
+const EventNameLimitExceeded = core.EventNameLimitExceeded
+
+// Compaction
+const EventNameCompaction = core.EventNameCompaction
+
 // ParseErrorType categorizes the source of a parse error.
-type ParseErrorType string
+type ParseErrorType = core.ParseErrorType
 
 // ParseErrorTypeToolchain identifies invalid native calls or JSON tool arguments.
-const ParseErrorTypeToolchain ParseErrorType = "toolchain"
+const ParseErrorTypeToolchain ParseErrorType = core.ParseErrorTypeToolchain

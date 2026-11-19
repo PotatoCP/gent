@@ -1,7 +1,5 @@
 package models_test
 
-import genttest "github.com/rickchristie/gent/internal/tt"
-
 import (
 	"context"
 	"encoding/json"
@@ -15,7 +13,9 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
+	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/models"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -74,36 +74,29 @@ func TestNativeHTTP_ToolRoundTrip(t *testing.T) {
 			}
 			var got []map[string]any
 			agent := react.NewAgent(client).
-				WithCallOptions(gent.WithTemperature(0.5), gent.WithTopP(1), gent.WithMaxTokens(100)).
-				RegisterTool(gent.DefineTool("lookup",
-					func(_ context.Context, args map[string]any) (*gent.ToolExecutionResponse, error) {
-						got = append(got, args)
-						return capturedToolResponse("record", nil)
-					}).Description("Read a record").ParameterSchema(nil).MustBuild())
-			ctx := gent.NewExecutionContext(context.Background(), "http", gent.NewBasicLoopData(
-				&gent.Task{
-					Messages: []*gent.ModelMessage{
-						gent.TextParts(gent.ChatMessageTypeSystem, "Read records."),
-						gent.TextParts(gent.ChatMessageTypeHuman, "Read two records."),
-					},
-				}))
-			first, err := agent.Next(ctx)
+				WithCallOptions(gent.WithTemperature(0.5), gent.WithTopP(1), gent.WithMaxTokens(100))
+			chain := toolchain.New().RegisterTool(gent.DefineTool("lookup",
+				func(_ context.Context, args map[string]any) (*gent.ToolExecutionResponse, error) {
+					got = append(got, args)
+					return capturedToolResponse("record", nil)
+				}).Description("Read a record").ParameterSchema(nil).MustBuild())
+			runner := executor.NewRunner(agent, &gent.Config{ToolChain: chain})
+			execCtx, err := runner.NewExecutionContext(context.Background(), t.Name())
 			if !assert.NoError(t, err) {
 				return
 			}
-			assert.Equal(t, &gent.AgentLoopResult{Action: gent.LAContinue}, first)
-			final, err := agent.Next(ctx)
+			defer execCtx.Release()
+			value, result, err := runner.NewTurn(execCtx, &gent.Task{
+				Instructions: []*gent.ModelMessage{gent.TextParts(gent.ChatMessageTypeSystem,
+					"Read records.")}, Messages: []*gent.ModelMessage{gent.TextParts(
+					gent.ChatMessageTypeHuman, "Read two records.")}})
 			if !assert.NoError(t, err) {
 				return
 			}
-			assert.Equal(t, &gent.AgentLoopResult{TerminationReason: gent.TerminationSuccess,
-				Action:        gent.LATerminate,
-				Result:        []gent.ContentPart{gent.TextContent{Text: "Done."}},
-				ContentSource: httpTestSource(ctx, 2),
-				Value: genttest.Value(gent.ContentText([]gent.ContentPart{
-					gent.TextContent{Text: "Done."},
-				})),
-			}, final)
+			assert.Equal(t, "Done.", value)
+			assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished,
+				TurnId: execCtx.TurnId(), TerminationReason: gent.TerminationSuccess,
+				Output: []gent.ContentPart{gent.TextPart("Done.")}}, result)
 			assert.Equal(t, []map[string]any{{"id": json.Number("1")}, {"id": json.Number("2")}}, got)
 			lock.Lock()
 			defer lock.Unlock()
@@ -117,16 +110,4 @@ func TestNativeHTTP_ToolRoundTrip(t *testing.T) {
 			assert.Equal(t, want, requests)
 		})
 	}
-}
-
-func httpTestSource(ctx *gent.ExecutionContext, call int) *gent.ContentSource {
-	id := fmt.Sprintf("%s:model:%d", ctx.ContextId(), call)
-	var ids []string
-	for _, event := range ctx.Events() {
-		if after, ok := event.(*gent.AfterModelCallEvent); ok && after.ModelCallId == id {
-			ids = after.Response.Choices[0].CandidateSource.MessageIds
-		}
-	}
-	return &gent.ContentSource{ModelCallId: id, StreamId: "iter-0", StreamTopicId: "llm-response",
-		MessageIds: ids}
 }

@@ -59,7 +59,6 @@ func BeforeExec(depth, iteration int) *gent.BeforeExecutionEvent {
 		BaseEvent: gent.BaseEvent{
 			EventName: gent.EventNameExecutionBefore,
 			Iteration: iteration,
-			Depth:     depth,
 		},
 	}
 }
@@ -73,7 +72,6 @@ func AfterExec(
 		BaseEvent: gent.BaseEvent{
 			EventName: gent.EventNameExecutionAfter,
 			Iteration: iteration,
-			Depth:     depth,
 		},
 		TerminationReason: termReason,
 	}
@@ -85,7 +83,6 @@ func BeforeIter(depth, iteration int) *gent.BeforeIterationEvent {
 		BaseEvent: gent.BaseEvent{
 			EventName: gent.EventNameIterationBefore,
 			Iteration: iteration,
-			Depth:     depth,
 		},
 	}
 }
@@ -96,7 +93,6 @@ func AfterIter(depth, iteration int, result *gent.AgentLoopResult) *gent.AfterIt
 		BaseEvent: gent.BaseEvent{
 			EventName: gent.EventNameIterationAfter,
 			Iteration: iteration,
-			Depth:     depth,
 		},
 		Result: result,
 	}
@@ -108,7 +104,6 @@ func BeforeModelCall(depth, iteration int, model string) *gent.BeforeModelCallEv
 		BaseEvent: gent.BaseEvent{
 			EventName: gent.EventNameModelCallBefore,
 			Iteration: iteration,
-			Depth:     depth,
 		},
 		Model:   model,
 		Request: &gent.ModelCallRequest{},
@@ -125,7 +120,6 @@ func AfterModelCall(
 		BaseEvent: gent.BaseEvent{
 			EventName: gent.EventNameModelCallAfter,
 			Iteration: iteration,
-			Depth:     depth,
 		},
 		Model:   model,
 		Request: &gent.ModelCallRequest{},
@@ -149,7 +143,6 @@ func LimitExceeded(
 		BaseEvent: gent.BaseEvent{
 			EventName: gent.EventNameLimitExceeded,
 			Iteration: iteration,
-			Depth:     depth,
 		},
 		Limit:        limit,
 		CurrentValue: currentValue,
@@ -167,7 +160,6 @@ func ParseError(
 		BaseEvent: gent.BaseEvent{
 			EventName: gent.EventNameParseError,
 			Iteration: iteration,
-			Depth:     depth,
 		},
 		ErrorType:  errorType,
 		RawContent: rawContent,
@@ -184,7 +176,6 @@ func Compaction(
 		BaseEvent: gent.BaseEvent{
 			EventName: gent.EventNameCompaction,
 			Iteration: iteration,
-			Depth:     depth,
 		},
 		ScratchpadLengthBefore: lengthBefore,
 		ScratchpadLengthAfter:  lengthAfter,
@@ -197,7 +188,6 @@ func Error(depth, iteration int, err error) *gent.ErrorEvent {
 		BaseEvent: gent.BaseEvent{
 			EventName: gent.EventNameError,
 			Iteration: iteration,
-			Depth:     depth,
 		},
 		Error: err,
 	}

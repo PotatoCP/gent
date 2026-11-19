@@ -27,12 +27,6 @@ type ImageOutput struct {
 	validator        customValidator[[]gent.BinaryContent]
 }
 
-func (o *ImageOutput) RecoveryConfig() any {
-	return map[string]any{"maxFileSizeBytes": o.maxFileSizeBytes, "maxWidth": o.maxWidth,
-		"maxHeight": o.maxHeight, "maxDecodedPixels": o.maxDecodedPixels,
-		"allowedMIMETypes": slices.Clone(o.allowedMIMETypes), "validator": o.validator.name}
-}
-
 func NewImageOutput() *ImageOutput {
 	return &ImageOutput{maxDecodedPixels: 64 << 20}
 }
@@ -118,18 +112,18 @@ func (o *ImageOutput) Configure(request *gent.ModelCallRequest) error {
 }
 
 func (o *ImageOutput) Process(
-	ctx *gent.ExecutionContext, content []gent.ContentPart,
+	execCtx *gent.ExecutionContext, content []gent.ContentPart,
 ) (processed *gent.OutputResult[[]gent.BinaryContent], processErr error) {
 	local := true
 	defer func() {
 		if local {
-			publishLocalResult(ctx, "image", processed, processErr)
+			publishLocalResult(execCtx, "image", processed, processErr)
 		}
 	}()
 	if err := o.check(); err != nil {
 		return nil, err
 	}
-	if err := ctx.Context().Err(); err != nil {
+	if err := execCtx.Context().Err(); err != nil {
 		return nil, err
 	}
 	if len(content) == 0 {
@@ -147,7 +141,7 @@ func (o *ImageOutput) Process(
 			return reject[[]gent.BinaryContent](fmt.Sprintf(
 				"Answer part %d is not image bytes. Return only complete image files.", i+1)), nil
 		}
-		mime, steering, err := o.validateImage(ctx.Context(), i+1, value)
+		mime, steering, err := o.validateImage(execCtx.Context(), i+1, value)
 		if err != nil {
 			return nil, err
 		}
@@ -157,8 +151,8 @@ func (o *ImageOutput) Process(
 		images = append(images, gent.BinaryContent{MIMEType: mime, Data: bytes.Clone(value.Data)})
 	}
 	local = false
-	ctx.PublishOutputValidation(gent.OutputValidationLocal, "image", true, nil, nil)
-	if result, err := o.validator.validate(ctx, images); result != nil || err != nil {
+	execCtx.PublishOutputValidation(gent.OutputValidationLocal, "image", true, nil, nil)
+	if result, err := o.validator.validate(execCtx, images); result != nil || err != nil {
 		return result, err
 	}
 	delivery := make([]gent.ContentPart, len(images))

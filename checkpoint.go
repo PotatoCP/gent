@@ -2,116 +2,61 @@ package gent
 
 import (
 	"context"
-	"errors"
-	"time"
+	core "github.com/rickchristie/gent/internal/core"
 )
 
-type ExecutionPhase string
+type ExecutionPhase = core.ExecutionPhase
 
-const (
-	PhaseInitial             ExecutionPhase = "initial"
-	PhaseIterationReady      ExecutionPhase = "iteration_ready"
-	PhaseDecisionReady       ExecutionPhase = "decision_ready"
-	PhaseToolReady           ExecutionPhase = "tool_ready"
-	PhaseToolCompleted       ExecutionPhase = "tool_completed"
-	PhaseIterationCompleted  ExecutionPhase = "iteration_completed"
-	PhaseCompactionCompleted ExecutionPhase = "compaction_completed"
-	PhaseTerminal            ExecutionPhase = "terminal"
-)
+// PhaseInitial means task admission and the turn reset are accepted before loop work.
+const PhaseInitial ExecutionPhase = core.PhaseInitial
 
-// CompatibilityManifest identifies code and configuration rebound by a replacement worker.
-// Functions, credentials, provider clients, and live contexts are deliberately absent.
-type CompatibilityManifest struct {
-	Version    int               `json:"version"`
-	Components map[string]string `json:"components"`
-}
+// PhaseIterationReady means the next Loop.Next entry has an accepted iteration position.
+const PhaseIterationReady ExecutionPhase = core.PhaseIterationReady
 
-type Checkpoint struct {
-	SchemaVersion int                   `json:"schemaVersion"`
-	RunId         string                `json:"runId"`
-	Revision      HistoryRevision       `json:"revision"`
-	EventNumber   uint64                `json:"eventNumber"`
-	Phase         ExecutionPhase        `json:"phase"`
-	Contexts      []ContextCheckpoint   `json:"contexts"`
-	Compatibility CompatibilityManifest `json:"compatibility"`
-	Outcome       *SavedOutcome         `json:"outcome,omitempty"`
-}
+// PhaseDecisionReady keeps a prepared reference-loop decision for managed continuation.
+const PhaseDecisionReady ExecutionPhase = core.PhaseDecisionReady
 
-type ContextCheckpoint struct {
-	SteeringMessages   SteeringMessages                `json:"steeringMessages"`
-	PTCIntegerMode     PTCIntegerMode                  `json:"ptcIntegerMode"`
-	ContextId          string                          `json:"contextId"`
-	ParentContextId    string                          `json:"parentContextId,omitempty"`
-	Name               string                          `json:"name"`
-	Task               EncodedValue                    `json:"task"`
-	Active             []EntryId                       `json:"active"`
-	Iteration          int                             `json:"iteration"`
-	CompletedIteration int                             `json:"completedIteration"`
-	AttemptId          string                          `json:"attemptId"`
-	Runtime            ContextRuntime                  `json:"runtime"`
-	Limits             []Limit                         `json:"limits"`
-	StartedAt          time.Time                       `json:"startedAt"`
-	Deadline           *time.Time                      `json:"deadline,omitempty"`
-	State              map[string]EncodedValue         `json:"state"`
-	Completed          bool                            `json:"completed"`
-	Extensions         map[string]SavedCheckpointState `json:"extensions,omitempty"`
-}
+// PhaseToolReady means the effective input and identity are saved before a managed tool call.
+const PhaseToolReady ExecutionPhase = core.PhaseToolReady
 
-type SavedCheckpointState struct {
-	Type    string       `json:"type"`
-	Version int          `json:"version"`
-	Value   EncodedValue `json:"value"`
-}
+// PhaseToolCompleted means a managed tool result and its plan position are accepted.
+const PhaseToolCompleted ExecutionPhase = core.PhaseToolCompleted
 
-type SavedOutcome struct {
-	Value       *EncodedValue     `json:"value,omitempty"`
-	Refusal     *EncodedValue     `json:"refusal,omitempty"`
-	Reason      TerminationReason `json:"reason"`
-	Result      EncodedValue      `json:"result"`
-	Error       *SavedError       `json:"error,omitempty"`
-	CompletedAt time.Time         `json:"completedAt"`
-}
+// PhaseIterationCompleted means the completed iteration state is accepted before the next one.
+const PhaseIterationCompleted ExecutionPhase = core.PhaseIterationCompleted
 
-type CheckpointState interface {
-	CheckpointType() string
-	CheckpointVersion() int
-	SaveCheckpointState() (EncodedValue, error)
-	RestoreCheckpointState(EncodedValue) error
-}
+// PhaseCompactionCompleted means the new summary, selection, and trigger state are accepted.
+const PhaseCompactionCompleted ExecutionPhase = core.PhaseCompactionCompleted
 
-type RestoreBindings struct {
-	Recorder Recorder
-	// CheckpointPolicy applies pending-save limits to the replacement worker.
-	CheckpointPolicy   CheckpointPolicy
-	Observers          []RecordedEventObserver
-	Codecs             *CodecRegistry
-	Data               LoopData
-	Compatibility      CompatibilityManifest
-	Components         map[string]CheckpointState
-	CompactionStrategy CompactionStrategy
-	CompactionTrigger  CompactionTrigger
-	// Configure prepares the actual restored context before compatibility/state validation.
-	// Executor.Resume supplies its normal configuration here; no temporary context is needed.
-	Configure func(*ExecutionContext) error
-}
+// PhaseTerminal means the completed-turn outcome and output are accepted.
+const PhaseTerminal ExecutionPhase = core.PhaseTerminal
 
-var (
-	ErrIncompatibleCheckpoint = errors.New("gent: incompatible checkpoint")
-	ErrUnsupportedRecovery    = errors.New("gent: unsupported recovery phase")
-)
+// PhasePaused preserves an unfinished turn at an intentional Stop or limit boundary.
+const PhasePaused ExecutionPhase = core.PhasePaused
 
-type toolIdentityKey struct{}
+// PhaseRecoveryCompleted accepts managed recovery preparation before entering the Loop.
+const PhaseRecoveryCompleted ExecutionPhase = core.PhaseRecoveryCompleted
+
+type Checkpoint = core.Checkpoint
+
+type ContextCheckpoint = core.ContextCheckpoint
+
+type SavedCheckpointState = core.SavedCheckpointState
+
+// SavedOutcome keeps the typed value with the result from one accepted completion or pause.
+// Only a Finished outcome replaces RunState's last completed result.
+type SavedOutcome = core.SavedOutcome
+
+type CheckpointState = core.CheckpointState
+
+var ErrIncompatibleCheckpoint = core.ErrIncompatibleCheckpoint
+
+var ErrUnsupportedRecovery = core.ErrUnsupportedRecovery
 
 // ToolIdentity lets a tool pass the stable logical ID to an external idempotency mechanism.
 // AttemptId changes after takeover; ToolCallId does not.
-type ToolIdentity struct {
-	RunId      string
-	ContextId  string
-	ToolCallId string
-	AttemptId  string
-}
+type ToolIdentity = core.ToolIdentity
 
 func ToolIdentityFromContext(ctx context.Context) (ToolIdentity, bool) {
-	identity, ok := ctx.Value(toolIdentityKey{}).(ToolIdentity)
-	return identity, ok
+	return core.ToolIdentityFromContext(ctx)
 }

@@ -1,6 +1,7 @@
 package trace
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -19,21 +20,31 @@ func newTestSequencer(t *testing.T, id string, cfg Config) *Sequencer {
 
 // Project a fixture representing an already persisted event. History tests exercise acceptance
 // through real execution contexts; these cases isolate display/retention behavior.
-func recordTestValue(t *testing.T, seq *Sequencer, kind string, value any) {
+func recordTestValue(
+	t *testing.T,
+	seq *Sequencer,
+	kind string,
+	value any,
+	envelopes ...gent.RecordedEvent,
+) {
 	t.Helper()
 	registry := gent.NewCodecRegistry()
-	encoded, err := registry.Encode(value)
+	frozen, err := registry.Clone(value)
 	if !assert.NoError(t, err) {
 		return
 	}
 	snapshot := seq.Snapshot()
-	event := &gent.RecordedEvent{Type: kind, Payload: &encoded, RunId: snapshot.RunId,
-		EventNumber: snapshot.LastEventNumber + 1, Ts: time.Now()}
+	event := &gent.RecordedEvent{}
+	if len(envelopes) > 0 {
+		*event = envelopes[0]
+	}
+	event.Type, event.Payload, event.RunId = kind, frozen, snapshot.RunId
+	event.EventSequenceNumber, event.Ts = snapshot.LastEventSequenceNumber+1, time.Now()
 	if typed, ok := value.(interface{ EventBase() *gent.BaseEvent }); ok {
 		base := typed.EventBase()
 		event.ContextId, event.Iteration = base.ContextId, base.Iteration
 		event.AttemptId = base.AttemptId
-		event.ParentContextId, event.EventName = base.ParentContextId, base.EventName
+		event.EventName = base.EventName
 		if !base.Timestamp.IsZero() {
 			event.Ts = base.Timestamp
 		}
@@ -48,9 +59,8 @@ func recordTestValue(t *testing.T, seq *Sequencer, kind string, value any) {
 	case *gent.AfterToolCallEvent:
 		event.ToolCallId = typed.ToolCallId
 	case gent.StreamChunk:
-		event.ModelCallId = typed.ModelCallId
-		event.ContextId, event.ParentContextId = typed.ContextId, typed.ParentContextId
-		event.Iteration = typed.Iteration
+		chunk := frozen.(gent.StreamChunk)
+		event.Payload = &chunk
 	}
-	assert.NoError(t, seq.ObserveCommitted([]*gent.RecordedEvent{event}, registry))
+	assert.NoError(t, seq.OnEvent(context.Background(), event))
 }

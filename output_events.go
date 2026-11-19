@@ -1,76 +1,45 @@
 package gent
 
-const EventNameOutputValidation = "gent:output:validation"
+import (
+	core "github.com/rickchristie/gent/internal/core"
+)
+
+const EventNameOutputValidation = core.EventNameOutputValidation
 
 // OutputValidationStage separates a built-in check, a custom callback, and the loop's final
 // processing decision. Only the processing stage counts a candidate once for overall limits.
-type OutputValidationStage string
+type OutputValidationStage = core.OutputValidationStage
 
-const (
-	OutputValidationLocal   OutputValidationStage = "local"
-	OutputValidationCustom  OutputValidationStage = "custom"
-	OutputValidationProcess OutputValidationStage = "process"
-)
+// OutputValidationLocal records a built-in output format check.
+const OutputValidationLocal OutputValidationStage = core.OutputValidationLocal
+
+// OutputValidationCustom records the configured application validator decision.
+const OutputValidationCustom OutputValidationStage = core.OutputValidationCustom
+
+// OutputValidationProcess records the overall candidate decision and updates rejection limits.
+const OutputValidationProcess OutputValidationStage = core.OutputValidationProcess
 
 // OutputValidationEvent records the decision without copying the complete typed value. Steering
 // belongs to a rejected candidate. Error means processing failed and does not count as rejection.
-type OutputValidationEvent struct {
-	BaseEvent
-	Stage    OutputValidationStage
-	Name     string
-	Accepted bool
-	Steering []ContentPart
-	Error    error
-}
+type OutputValidationEvent = core.OutputValidationEvent
 
-type OutputValidationSubscriber interface {
-	OnOutputValidation(*ExecutionContext, *OutputValidationEvent)
-}
+// SCOutputRejectedTotal counts candidates rejected by the complete output-processing decision.
+const SCOutputRejectedTotal StatKey = core.SCOutputRejectedTotal
 
-const (
-	SCOutputRejectedTotal             StatKey = "gent:output_rejected_total"
-	SGOutputRejectedConsecutive       StatKey = "gent:output_rejected_consecutive"
-	SCOutputLocalRejectedTotal        StatKey = "gent:output_local_rejected_total"
-	SGOutputLocalRejectedConsecutive  StatKey = "gent:output_local_rejected_consecutive"
-	SCOutputCustomRejectedTotal       StatKey = "gent:output_custom_rejected_total"
-	SCOutputCustomRejectedBy          StatKey = "gent:output_custom_rejected_by:"
-	SGOutputCustomRejectedConsecutive StatKey = "gent:output_custom_rejected_consecutive"
-)
+// SGOutputRejectedConsecutive measures rejected candidates since the last accepted candidate.
+const SGOutputRejectedConsecutive StatKey = core.SGOutputRejectedConsecutive
 
-// PublishOutputValidation queues the decision with its steering. The loop keeps a rejected
-// candidate and feedback before it accepts the next checkpoint, including when a limit stops it.
-func (ctx *ExecutionContext) PublishOutputValidation(
-	stage OutputValidationStage, name string, accepted bool, steering []ContentPart, err error,
-) {
-	ctx.publish(&OutputValidationEvent{
-		BaseEvent: BaseEvent{EventName: EventNameOutputValidation}, Stage: stage, Name: name,
-		Accepted: accepted, Steering: CloneContentParts(steering), Error: err,
-	})
-}
+// SCOutputLocalRejectedTotal counts failures of built-in output validation.
+const SCOutputLocalRejectedTotal StatKey = core.SCOutputLocalRejectedTotal
 
-// updateOutputStats runs under the same context lock as the other event statistics.
-func (ctx *ExecutionContext) updateOutputStats(event *OutputValidationEvent) {
-	if event.Error != nil {
-		return
-	}
-	var total, consecutive StatKey
-	switch event.Stage {
-	case OutputValidationProcess:
-		total, consecutive = SCOutputRejectedTotal, SGOutputRejectedConsecutive
-	case OutputValidationLocal:
-		total, consecutive = SCOutputLocalRejectedTotal, SGOutputLocalRejectedConsecutive
-	case OutputValidationCustom:
-		total, consecutive = SCOutputCustomRejectedTotal, SGOutputCustomRejectedConsecutive
-	default:
-		return
-	}
-	if event.Accepted {
-		ctx.stats.ResetGauge(consecutive)
-		return
-	}
-	ctx.stats.incrCounterDirect(total, 1)
-	ctx.stats.incrGaugeInternal(consecutive, 1)
-	if event.Stage == OutputValidationCustom {
-		ctx.stats.incrCounterDirect(SCOutputCustomRejectedBy+StatKey(event.Name), 1)
-	}
-}
+// SGOutputLocalRejectedConsecutive measures consecutive built-in validation rejections.
+const SGOutputLocalRejectedConsecutive StatKey = core.SGOutputLocalRejectedConsecutive
+
+// SCOutputCustomRejectedTotal counts application output-validator rejections.
+const SCOutputCustomRejectedTotal StatKey = core.SCOutputCustomRejectedTotal
+
+// SCOutputCustomRejectedBy prefixes the custom rejection counter with the validator name.
+const SCOutputCustomRejectedBy StatKey = core.SCOutputCustomRejectedBy
+
+// SGOutputCustomRejectedConsecutive measures consecutive application-validator rejections.
+const SGOutputCustomRejectedConsecutive StatKey = core.SGOutputCustomRejectedConsecutive

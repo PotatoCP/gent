@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Gent saved run explorer</title>
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./style.css">
+  <link rel="stylesheet" href="./demo.css">
+
+</head>
+<body>
+  <h1>Explore a saved run</h1>
+  <p>Open the Recovered state JSON downloaded from Gent's inspector. The file stays in this
+    browser. Gent's Go codec must decode storage bytes before this view can read them.</p>
+  <label>Recovered JSON file <input id="file" type="file" accept=".json,application/json"></label>
+  <label>Encoded JSON file (optional)
+    <input id="encoded-file" type="file" accept=".json,application/json" disabled></label>
+  <p id="notice" role="status"></p>
+  <div id="explorer"></div>
+  <script type="module" src="./demo.js"></script>
+</body>
+</html>

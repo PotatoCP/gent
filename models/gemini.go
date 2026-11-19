@@ -32,10 +32,6 @@ func NewGemini(config *Config) *Gemini {
 
 func (m *generateContentModel) ModelName() string { return m.config.Model }
 func (m *generateContentModel) Provider() string  { return m.provider }
-func (m *generateContentModel) RecoveryConfig() any {
-	return map[string]any{"api": "generateContent", "provider": m.Provider(),
-		"baseURL": m.config.BaseURL, "model": m.config.Model}
-}
 
 func (m *generateContentModel) GenerateContentStream(ctx context.Context,
 	request *gent.ModelCallRequest,
@@ -160,8 +156,7 @@ func (m *generateContentModel) requestBody(request *gent.ModelCallRequest) (
 		// Live Vertex calls require responseFormat plus VALIDATED for schema output with tools.
 		// The legacy schema fields repeated completed tools. VALIDATED permits calls and answers,
 		// so both the tool choice and the answer schema remain active throughout the loop.
-		body["toolConfig"] = map[string]any{
-			"functionCallingConfig": map[string]any{"mode": "VALIDATED"}}
+		body["toolConfig"] = map[string]any{"functionCallingConfig": map[string]any{"mode": "VALIDATED"}}
 	}
 	var modalities []string
 	for _, modality := range o.ResponseModalities {

@@ -42,7 +42,7 @@ func assertProviderResumeNativeHistory(t *testing.T, provider string, body map[s
 {"role":"tool","tool_name":"lookup","content":"record-seven"}]`
 	}
 	if compact {
-		start++
+		start += 4 // Three retained notes and the summary follow the first retained prompt.
 	}
 	items, ok := body[field].([]any)
 	if !assert.True(t, ok) || !assert.GreaterOrEqual(t, len(items), start+size) {

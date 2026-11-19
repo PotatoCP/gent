@@ -14,6 +14,7 @@ import (
 	"github.com/rickchristie/gent/agents/react"
 	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/output"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -58,9 +59,15 @@ func checkLiveText(t liveTextCheck, ctx context.Context, model gent.Model) {
 	actual := expected{}
 	var preview strings.Builder
 	for chunk := range stream.Chunks() {
-		assert.NoError(t, chunk.Err)
-		assert.Empty(t, chunk.Content, "provider output is provisional until validation")
-		preview.WriteString(gent.MetaText(chunk.MetaContent, gent.MetaContentIntermediary))
+
+		for _, part := range chunk.Content {
+			item, ok := part.(*gent.AssistantContent)
+			if assert.True(t, ok, "provider text must have an assistant item") &&
+				(item.Type == gent.AssistantContentIntermediary ||
+					item.Type == gent.AssistantContentFinalAnswerCandidate) {
+				preview.WriteString(gent.ContentText(item.Content))
+			}
+		}
 	}
 	actual.preview = preview.String()
 	response, err := stream.Response()
@@ -69,9 +76,13 @@ func checkLiveText(t liveTextCheck, ctx context.Context, model gent.Model) {
 	}
 	actual.status = response.Choices[0].Completion.Status
 	out := output.NewTextOutput()
-	execCtx := liveExecutionContext(ctx, "text", "Return the requested text.", "gent-live-ok")
+	runner := executor.NewRunner(modelFixtureLoop(modelFixtureDone), &gent.Config{})
+	execCtx, err := runner.NewExecutionContext(ctx, "live text output")
+	if !assert.NoError(t, err) {
+		return
+	}
 	defer execCtx.Release()
-	processed, err := out.Process(execCtx, response.Choices[0].CandidateContent)
+	processed, err := out.Process(execCtx, response.Choices[0].CandidateContent())
 	if !assert.NoError(t, err) || !assert.True(t, processed.Accepted) {
 		return
 	}
@@ -84,14 +95,14 @@ func checkLiveText(t liveTextCheck, ctx context.Context, model gent.Model) {
 	}
 }
 
-func liveExecutionContext(ctx context.Context, name, system, prompt string) *gent.ExecutionContext {
-	execCtx := gent.NewExecutionContext(ctx, "live "+name,
-		gent.NewBasicLoopData(&gent.Task{Messages: []*gent.ModelMessage{
-			gent.TextParts(gent.ChatMessageTypeSystem, system),
-			gent.TextParts(gent.ChatMessageTypeHuman, prompt),
-		}}))
-	execCtx.SetLimits([]gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 4}})
-	return execCtx
+func liveTask(system, prompt string) *gent.Task {
+	return &gent.Task{Instructions: []*gent.ModelMessage{
+		gent.TextParts(gent.ChatMessageTypeSystem, system)}, Messages: []*gent.ModelMessage{
+		gent.TextParts(gent.ChatMessageTypeHuman, prompt)}}
+}
+
+func liveLimits() []gent.Limit {
+	return []gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 4}}
 }
 
 func checkLiveTools(t *testing.T, ctx context.Context, model gent.Model) {
@@ -127,20 +138,19 @@ func checkLiveTools(t *testing.T, ctx context.Context, model gent.Model) {
 			}
 			return &gent.OutputValidationResult{Accepted: true}, nil
 		})
-	agent := react.NewWithOutput(model, out).RegisterTool(tool).
-		WithCallOptions(gent.WithMaxTokens(2048))
-	execCtx := liveExecutionContext(ctx, "native tools", "Use the tools to read records.",
+	agent := react.NewWithOutput(model, out).WithCallOptions(gent.WithMaxTokens(2048))
+	runner, execCtx := newModelExecution(t, ctx, agent, &gent.Config{
+		ToolChain: toolchain.New().RegisterTool(tool), Limits: liveLimits()})
+	task := liveTask("Use the tools to read records.",
 		`Call read_live_record exactly once with id "test". Return only the record text it supplies,
 without quotes, JSON, or formatting.`)
-	value, result, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(execCtx)
+	value, result, err := runner.NewTurn(execCtx, task)
 	if !assert.NoError(t, err) {
 		return
 	}
 	// Providers can split text into several content parts. Validate every part and the full text;
 	// a fixed part count would test transport chunk boundaries instead of the accepted output.
-	// The runner has closed execCtx, so this independent check needs its own context.
-	checkCtx := liveExecutionContext(ctx, "record output", "Read the record text.", "")
-	defer checkCtx.Release()
+	_, checkCtx := newModelExecution(t, ctx, modelFixtureLoop(modelFixtureDone), nil)
 	processed, err := output.NewTextOutput().Process(checkCtx, result.Output)
 	if !assert.NoError(t, err) || !assert.True(t, processed.Accepted) {
 		return
@@ -150,7 +160,7 @@ without quotes, JSON, or formatting.`)
 	assert.Equal(t, want, expected{calls, value, processed.Value, result.TerminationReason})
 	// Check the full tool result presented on each follow-up call. This distinguishes a lost
 	// result from a model answer that does not use the result.
-	for _, event := range execCtx.Events() {
+	for _, event := range providerEvents(execCtx) {
 		before, ok := event.(*gent.BeforeModelCallEvent)
 		if !ok || before.Iteration == 1 {
 			continue
@@ -189,8 +199,9 @@ func checkLiveOutputs(t *testing.T, ctx context.Context, model gent.Model, nativ
 		expected expected
 	}
 	want := expected{liveOutputValue{2}, []liveOutputValue{{1}, {2}}, []bool{native, native}, 1,
-		&gent.ExecutionResult{TerminationReason: gent.TerminationSuccess,
-			Output: []gent.ContentPart{gent.TextContent{Text: `{"value":2}`}}}}
+		&gent.ExecutionResult{Status: gent.ExecutionFinished, TurnId: "",
+			TerminationReason: gent.TerminationSuccess,
+			Output:            []gent.ContentPart{gent.TextContent{Text: `{"value":2}`}}}}
 	cases := []testCase{
 		{"JsonOutput", input{func(validator gent.OutputCustomValidator[liveOutputValue]) (
 			gent.Output[liveOutputValue], error,
@@ -228,14 +239,14 @@ func checkLiveOutputs(t *testing.T, ctx context.Context, model gent.Model, nativ
 			if !assert.NoError(t, err) {
 				return
 			}
-			execCtx := liveExecutionContext(ctx, test.name, out.Instructions(), `Return {"value":1}.`)
 			agent := react.NewWithOutput(model, out).WithCallOptions(gent.WithMaxTokens(2048))
-			actual.value, actual.result, err = executor.NewRunner(agent,
-				executor.DefaultConfig()).Execute(execCtx)
+			runner, execCtx := newModelExecution(t, ctx, agent, &gent.Config{Limits: liveLimits()})
+			actual.value, actual.result, err = runner.NewTurn(execCtx,
+				liveTask(out.Instructions(), `Return {"value":1}.`))
 			if !assert.NoError(t, err) {
 				return
 			}
-			for _, event := range execCtx.Events() {
+			for _, event := range providerEvents(execCtx) {
 				after, ok := event.(*gent.AfterModelCallEvent)
 				if !ok {
 					continue
@@ -251,7 +262,11 @@ func checkLiveOutputs(t *testing.T, ctx context.Context, model gent.Model, nativ
 				actual.native = append(actual.native, enforced)
 			}
 			actual.rejected = execCtx.Stats().GetCounter(gent.SCOutputCustomRejectedTotal)
-			assert.Equal(t, test.expected, actual)
+			want := test.expected
+			completed := *want.result
+			completed.TurnId = execCtx.TurnId()
+			want.result = &completed
+			assert.Equal(t, want, actual)
 		})
 	}
 }
@@ -281,21 +296,23 @@ func TestLiveImages(t *testing.T) {
 				}
 				return &gent.OutputValidationResult{Accepted: true}, nil
 			})
-			execCtx := liveExecutionContext(ctx, "image", out.Instructions(),
+			task := liveTask(out.Instructions(),
 				`Generate one 512 by 512 image of a solid blue square. Return only the JPEG image.
 The image_generation tool output is the complete answer. Do not send any assistant text,
 including a caption, a link, a description, or a completion message.`)
-			defer logLiveImageFailure(t, execCtx)
 			agent := react.NewWithOutput(newLiveModel(t, provider, &config), out).
 				WithCallOptions(gent.WithMaxTokens(2048))
-			values, result, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(execCtx)
+			runner, execCtx := newModelExecution(t, ctx, agent, &gent.Config{Limits: liveLimits()})
+			defer logLiveImageFailure(t, execCtx)
+			values, result, err := runner.NewTurn(execCtx, task)
 			if !assert.NoError(t, err) || !assert.Len(t, values, 1) {
 				return
 			}
 			assert.Equal(t, 2, validations)
 			assert.Equal(t, int64(1), execCtx.Stats().GetCounter(gent.SCOutputCustomRejectedTotal))
-			assert.Equal(t, &gent.ExecutionResult{TerminationReason: gent.TerminationSuccess,
-				Output: []gent.ContentPart{values[0]}}, result)
+			assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished, TurnId: execCtx.TurnId(),
+				TerminationReason: gent.TerminationSuccess,
+				Output:            []gent.ContentPart{values[0]}}, result)
 			assert.Equal(t, "image/jpeg", values[0].MIMEType)
 			assert.Greater(t, len(values[0].Data), 0)
 			assert.LessOrEqual(t, len(values[0].Data), 8<<20)
@@ -314,12 +331,12 @@ including a caption, a link, a description, or a completion message.`)
 
 // Report validation and part sizes so a live failure can be diagnosed without image bytes,
 // provider continuation data, or credentials in the test log.
-func logLiveImageFailure(t *testing.T, ctx *gent.ExecutionContext) {
+func logLiveImageFailure(t *testing.T, execCtx *gent.ExecutionContext) {
 	t.Helper()
 	if !t.Failed() {
 		return
 	}
-	for _, event := range ctx.Events() {
+	for _, event := range providerEvents(execCtx) {
 		switch event := event.(type) {
 		case *gent.OutputValidationEvent:
 			t.Logf("image validation: iteration=%d stage=%s accepted=%t steering=%q error=%v",
@@ -331,7 +348,7 @@ func logLiveImageFailure(t *testing.T, ctx *gent.ExecutionContext) {
 			}
 			for _, choice := range event.Response.Choices {
 				var parts []string
-				for _, part := range choice.CandidateContent {
+				for _, part := range choice.CandidateContent() {
 					switch part := part.(type) {
 					case gent.BinaryContent:
 						parts = append(parts, fmt.Sprintf("%s: %d bytes", part.MIMEType, len(part.Data)))

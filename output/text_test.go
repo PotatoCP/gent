@@ -6,15 +6,15 @@ import (
 	"testing"
 
 	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/executor"
+	"github.com/rickchristie/gent/internal/tt"
 	"github.com/rickchristie/gent/output"
 	"github.com/stretchr/testify/assert"
 )
 
 func execution(t *testing.T) *gent.ExecutionContext {
 	t.Helper()
-	ctx := gent.NewExecutionContext(context.Background(), "output", gent.NewBasicLoopData(nil))
-	t.Cleanup(ctx.Release)
-	return ctx
+	return tt.NewContext(t, &gent.Config{})
 }
 
 func text(value string) []gent.ContentPart {
@@ -76,7 +76,7 @@ func TestTextOutput(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := execution(t)
+			execCtx := execution(t)
 			out := output.NewTextOutput()
 			calls := 0
 			if tt.input.custom {
@@ -88,7 +88,7 @@ func TestTextOutput(t *testing.T) {
 					return tt.input.validator, tt.input.failure
 				})
 			}
-			result, err := out.Process(ctx, tt.input.parts)
+			result, err := out.Process(execCtx, tt.input.parts)
 			assert.Equal(t, tt.expected.result, result)
 			assert.Equal(t, tt.expected.calls, calls)
 			if tt.expected.errorText != "" {
@@ -112,9 +112,23 @@ func TestTextOutputConfigurationAndCancellation(t *testing.T) {
 	expected.Options.ResponseModalities = []string{"text"}
 	assert.NoError(t, out.Configure(request))
 	assert.Equal(t, expected, request)
-	ctx := execution(t)
-	ctx.CancelRun(context.Canceled)
-	result, err := out.Process(ctx, text("candidate"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runner := executor.NewRunner(&outputContextLoop{}, &gent.Config{})
+	execCtx, err := runner.NewExecutionContext(ctx, "output")
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer execCtx.Release()
+	cancel()
+	result, err := out.Process(execCtx, text("candidate"))
 	assert.Nil(t, result)
 	assert.ErrorIs(t, err, context.Canceled)
+}
+
+type outputContextLoop struct{}
+
+func (*outputContextLoop) Output() gent.Output[string] { return output.NewTextOutput() }
+func (*outputContextLoop) Next(*gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+	panic("output unit tests do not execute a loop")
 }

@@ -69,8 +69,7 @@ func TestImageOutputValidation(t *testing.T) {
 			[]gent.ContentPart{first}}, rejected(fmt.Sprintf(
 			"Image 1 is %d bytes. The maximum is %d. Return a smaller image file.",
 			len(first.Data), len(first.Data)-1))},
-		{"decoded size", input{output.NewImageOutput().SetMaxDecodedPixels(5),
-			[]gent.ContentPart{first}},
+		{"decoded size", input{output.NewImageOutput().SetMaxDecodedPixels(5), []gent.ContentPart{first}},
 			rejected("Image 1 exceeds the decoder limit of 5 pixels. Return a smaller image.")},
 		{"declared type", input{output.NewImageOutput(), []gent.ContentPart{
 			gent.BinaryContent{MIMEType: "image/jpeg", Data: first.Data}}},
@@ -94,7 +93,7 @@ func TestImageOutputValidation(t *testing.T) {
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			ctx := execution(t)
+			execCtx := execution(t)
 			calls := 0
 			tt.input.out.SetCustomValidator("domain", func(
 				_ *gent.ExecutionContext, value []gent.BinaryContent,
@@ -103,7 +102,7 @@ func TestImageOutputValidation(t *testing.T) {
 				assert.Equal(t, tt.expected.result.Value, value)
 				return &gent.OutputValidationResult{Accepted: true}, nil
 			})
-			result, err := tt.input.out.Process(ctx, tt.input.parts)
+			result, err := tt.input.out.Process(execCtx, tt.input.parts)
 			assert.Equal(t, tt.expected.result, result)
 			assert.Equal(t, tt.expected.calls, calls)
 			if tt.expected.errorText != "" {
@@ -130,7 +129,7 @@ func TestImageOutputOwnershipAndConcurrentUse(t *testing.T) {
 	allow[0] = "image/jpeg"
 	var workers sync.WaitGroup
 	for range 4 {
-		ctx := execution(t)
+		execCtx := execution(t)
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
@@ -138,7 +137,7 @@ func TestImageOutputOwnershipAndConcurrentUse(t *testing.T) {
 			assert.NoError(t, out.Configure(request))
 			assert.Equal(t, []string{"image/png"}, request.Options.ImageMIMETypes)
 			request.Options.ImageMIMETypes[0] = "image/jpeg"
-			result, err := out.Process(ctx, []gent.ContentPart{value})
+			result, err := out.Process(execCtx, []gent.ContentPart{value})
 			if !assert.NoError(t, err) || !assert.True(t, result.Accepted) {
 				return
 			}

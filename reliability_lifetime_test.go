@@ -5,142 +5,151 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/executor"
 	"github.com/stretchr/testify/assert"
 )
 
-type failedSetupLoop struct{ reviewLoop }
+type failedSetupLoop struct {
+	reviewLoop
+	configured *gent.ExecutionContext
+	failure    error
+}
 
-func (failedSetupLoop) ConfigureExecution(*gent.ExecutionContext) error {
-	return errors.New("setup failed")
+func (loop *failedSetupLoop) ConfigureExecution(execCtx *gent.ExecutionContext) error {
+	loop.configured = execCtx
+	return loop.failure
 }
 
 func TestReliabilitySetupFailureReleasesContext(t *testing.T) {
-	parent, cancel := context.WithCancel(context.Background())
+	owner, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	for i := 0; i < 32; i++ {
-		ctx := gent.NewExecutionContext(parent, "test", nil)
-		_, result, err := executor.NewRunner(failedSetupLoop{}, executor.Config{}).Execute(ctx)
+	failure := errors.New("setup failed")
+	for range 32 {
+		loop := &failedSetupLoop{failure: failure}
+		runner := executor.NewRunner[string](loop, &gent.Config{})
+		execCtx, err := runner.NewExecutionContext(owner, "test")
+		assert.Nil(t, execCtx)
+		assert.ErrorIs(t, err, failure)
+		if !assert.NotNil(t, loop.configured) {
+			return
+		}
+		// A setup callback can retain its input. The failed handle is permanently disposed.
+		_, result, err := runner.NewTurn(loop.configured, gent.NewTask(gent.TextPart("Run.")))
+		assert.Error(t, err)
 		assert.Nil(t, result)
-		assert.EqualError(t, err, "setup failed")
-		assert.ErrorIs(t, ctx.Context().Err(), context.Canceled)
-		assert.False(t, ctx.IsWorkerInterrupted())
-		assert.NoError(t, parent.Err())
+		assert.NoError(t, owner.Err())
 	}
 }
 
-func TestReliabilityCompleteChildReleasesWork(t *testing.T) {
-	root := gent.NewExecutionContext(context.Background(), "parent", nil)
-	defer root.Release()
-	for i := 0; i < 32; i++ {
-		child := root.SpawnChild("child", nil)
-		grandchild := child.SpawnChild("grandchild", nil)
-		assert.NoError(t, child.CompleteChild(grandchild))
-		assert.NoError(t, root.CompleteChild(child))
-		assert.ErrorIs(t, grandchild.Context().Err(), context.Canceled)
-		assert.ErrorIs(t, child.Context().Err(), context.Canceled)
-		assert.False(t, child.IsWorkerInterrupted())
-		assert.NoError(t, root.Context().Err())
-	}
-	view, err := root.Export()
-	assert.NoError(t, err)
-	assert.NoError(t, gent.ValidateBundle(view))
-}
-
-func TestReliabilityRestoreFailureReleasesConfiguredWork(t *testing.T) {
-	parent, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Hour))
-	defer cancel()
-	ctx := gent.NewExecutionContext(parent, "test", nil)
-	defer ctx.Release()
-	if !assert.NoError(t, ctx.CommitCheckpoint(gent.PhaseInitial)) {
-		return
-	}
-	view, err := ctx.Export()
-	if !assert.NoError(t, err) {
-		return
-	}
-	var configured *gent.ExecutionContext
-	restored, err := gent.RestoreExecutionContext(parent, view, gent.RestoreBindings{
-		Configure: func(ctx *gent.ExecutionContext) error {
-			configured = ctx
-			return errors.New("restore setup failed")
-		},
+func TestReliabilityRestoreFailureKeepsOwnedState(t *testing.T) {
+	store := newCheckpointStore()
+	loop := contentLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		execCtx.Stop()
+		return nil, execCtx.Context().Err()
 	})
-	assert.Nil(t, restored)
-	assert.EqualError(t, err, "restore setup failed")
-	if assert.NotNil(t, configured) {
-		assert.ErrorIs(t, configured.Context().Err(), context.Canceled)
-	}
-	assert.NoError(t, parent.Err())
-}
-
-func TestReliabilityExportDuringAcceptance(t *testing.T) {
-	ctx := gent.NewExecutionContext(context.Background(), "test", nil,
-		gent.WithCheckpointPolicy(gent.CheckpointPolicy{MaxEvents: 16}))
-	defer ctx.Release()
-	if !assert.NoError(t, ctx.EmitChunk(gent.StreamChunk{
-		MetaContent: []*gent.MetaContent{
-			{
-				Type: gent.MetaContentIntermediary,
-				Content: []gent.ContentPart{
-					gent.TextContent{Text: "first"},
-				},
-			},
-		},
-	})) {
-		return
-	}
-	assert.NoError(t, ctx.FlushProgress())
-	first, err := ctx.Export()
+	runner, execCtx := newTestExecution(t, context.Background(), loop, &gent.Config{
+		Recorder: store, Codecs: store.codecs})
+	_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Pause.")))
 	if !assert.NoError(t, err) {
 		return
 	}
-	var wg sync.WaitGroup
-	start := make(chan struct{})
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		<-start
-		for i := 0; i < 128; i++ {
-			assert.NoError(t, ctx.EmitChunk(gent.StreamChunk{
-				MetaContent: []*gent.MetaContent{
-					{
-						Type: gent.MetaContentIntermediary,
-						Content: []gent.ContentPart{
-							gent.TextContent{Text: "next"},
-						},
-					},
-				},
-			}))
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		<-start
-		for i := 0; i < 32; i++ {
-			view, err := ctx.Export()
-			if !assert.NoError(t, err) {
-				return
-			}
-			assert.NoError(t, gent.ValidateBundle(view))
-			assert.Len(t, view.Activity, int(view.LastAppliedEventNumber))
-			assert.Len(t, view.Batches, 1+int(view.LastAppliedEventNumber-1)/16)
-			// Public snapshots are caller-owned, including the growing indexes and payloads.
-			clear(view.Batches)
-			view.Activity[0].Type = "changed by caller"
-		}
-	}()
-	close(start)
-	wg.Wait()
-	last, err := ctx.Export()
+	loaded, err := store.codecs.UnmarshalRunState(store.runStateSnapshot)
+	if !assert.NoError(t, err) {
+		return
+	}
+	before, err := store.codecs.MarshalRunState(loaded.State)
 	assert.NoError(t, err)
-	assert.NoError(t, gent.ValidateBundle(last))
-	assert.Len(t, last.Activity, 129)
-	assert.Len(t, last.Batches, 9)
-	assert.Equal(t, first.Activity, last.Activity[:1])
-	assert.Len(t, first.Activity, 1)
-	assert.Len(t, first.Batches, 1)
+	failure := errors.New("restore setup failed")
+	failed := &failedSetupLoop{failure: failure}
+	freshRunner := executor.NewRunner[string](failed, &gent.Config{Codecs: store.codecs})
+	restored, err := freshRunner.Restore(context.Background(), loaded.State)
+	assert.Nil(t, restored)
+	assert.ErrorIs(t, err, failure)
+	after, err := store.codecs.MarshalRunState(loaded.State)
+	assert.NoError(t, err)
+	assert.Equal(t, before, after, "failed Restore leaves the caller's state usable")
+	_, result, err := freshRunner.Continue(failed.configured)
+	assert.Error(t, err)
+	assert.Nil(t, result)
+}
+
+type captureLifetimeStore struct {
+	codecs  *gent.CodecRegistry
+	states  []*gent.RunState
+	encoded [][]byte
+	first   chan *gent.RunState
+	release chan struct{}
+}
+
+func (store *captureLifetimeStore) Save(_ context.Context, _ *gent.SaveBatch,
+	capture func() (*gent.RunState, error),
+) error {
+	state, err := capture()
+	if err != nil {
+		return err
+	}
+	encoded, err := store.codecs.MarshalRunState(state)
+	if err != nil {
+		return err
+	}
+	store.states = append(store.states, state)
+	store.encoded = append(store.encoded, encoded)
+	if len(store.states) == 1 {
+		store.first <- state
+		<-store.release
+	}
+	return nil
+}
+
+func TestReliabilityRunStateSnapshotsStayStableDuringAcceptance(t *testing.T) {
+	store := &captureLifetimeStore{
+		codecs: gent.NewCodecRegistry(),
+		first: make(
+			chan *gent.RunState,
+			1,
+		),
+		release: make(chan struct{}),
+	}
+	release := sync.OnceFunc(func() { close(store.release) })
+	defer release()
+	loop := contentLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		if err := execCtx.EmitChunk(checkpointChunk("Progress.")); err != nil {
+			return nil, err
+		}
+		if execCtx.Iteration() < 32 {
+			return &gent.AgentLoopResult{Action: gent.LAContinue}, nil
+		}
+		return acceptRootOutput(execCtx, "Done.")
+	})
+	runner, execCtx := newTestExecution(t, context.Background(), loop, &gent.Config{
+		Codecs: store.codecs, Recorder: store})
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Continue work.")))
+		done <- err
+	}()
+	first := checkpointReceive(t, store.first)
+	firstEncoded, err := store.codecs.MarshalRunState(first)
+	assert.NoError(t, err)
+	release()
+	for range 32 {
+		encoded, err := store.codecs.MarshalRunState(first)
+		assert.NoError(t, err)
+		assert.Equal(t, firstEncoded, encoded)
+	}
+	assert.NoError(t, checkpointReceive(t, done))
+	assert.Len(t, store.states, 65)
+	var previous uint64
+	for i, state := range store.states {
+		encoded, err := store.codecs.MarshalRunState(state)
+		assert.NoError(t, err)
+		assert.Equal(t, store.encoded[i], encoded)
+		loaded, err := store.codecs.UnmarshalRunState(encoded)
+		assert.NoError(t, err)
+		assert.Equal(t, gent.RunStateReady, loaded.Status)
+		assert.Greater(t, state.LastAppliedEventSequenceNumber(), previous)
+		previous = state.LastAppliedEventSequenceNumber()
+	}
 }

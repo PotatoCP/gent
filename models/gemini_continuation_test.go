@@ -8,7 +8,6 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/output"
 	"github.com/stretchr/testify/assert"
 )
@@ -65,9 +64,8 @@ func TestGeminiTokenContinuationRespectsTokenCeiling(t *testing.T) {
 				})
 				agent := react.NewWithOutput(fixtureModel(provider, client), out).
 					WithCallOptions(gent.WithMaxTokens(test.input.maxTokens))
-				ctx := gent.NewExecutionContext(context.Background(), "continue", gent.NewBasicLoopData(
-					gent.NewTask(gent.TextContent{Text: "Read."})))
-				value, result, err := executor.Run(ctx, agent, executor.DefaultConfig())
+				runner, execCtx := newModelExecution(t, context.Background(), agent, nil)
+				value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read.")))
 				if !assert.NoError(t, err) {
 					return
 				}
@@ -90,7 +88,7 @@ func TestGeminiTokenContinuationRespectsTokenCeiling(t *testing.T) {
 					assert.Equal(t, test.expected.maxTokens, config["maxOutputTokens"])
 				}
 				var statuses []gent.ModelStatus
-				for _, event := range ctx.Events() {
+				for _, event := range providerEvents(execCtx) {
 					if after, ok := event.(*gent.AfterModelCallEvent); ok {
 						statuses = append(statuses, after.Response.Choices[0].Completion.Status)
 					}

@@ -10,8 +10,8 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/output"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -22,7 +22,7 @@ type providerLoopValue struct {
 
 func providerToolJSONAgent(t *testing.T, model gent.Model, record string, choice any,
 	calls *[]providerLookupInput, values *[]providerLoopValue,
-) *react.Agent[providerLoopValue] {
+) (*react.Agent[providerLoopValue], *gent.Config) {
 	t.Helper()
 	out, err := output.NewJsonOutput[providerLoopValue]()
 	if !assert.NoError(t, err) {
@@ -44,13 +44,23 @@ func providerToolJSONAgent(t *testing.T, model gent.Model, record string, choice
 		*calls = append(*calls, value)
 		return capturedToolResponse(record, nil)
 	}).Description("Read the record for the supplied id.").MustBuild()
-	return react.NewWithOutput(model, out).RegisterTool(tool).WithRecoveryVersion("provider-loop/v1").
-		WithCallOptions(gent.WithMaxTokens(2048), func(o *gent.CallOptions) { o.ToolChoice = choice })
+	return react.NewWithOutput(model, out).WithCallOptions(
+			gent.WithMaxTokens(2048),
+			func(
+				o *gent.CallOptions,
+			) {
+				o.ToolChoice = choice
+			},
+		), &gent.Config{
+			ToolChain: toolchain.New().RegisterTool(
+				tool,
+			),
+		}
 }
 
 func providerToolJSONTask(out gent.Output[providerLoopValue]) *gent.Task {
-	return &gent.Task{Messages: []*gent.ModelMessage{
-		gent.TextParts(gent.ChatMessageTypeSystem, out.Instructions()),
+	return &gent.Task{Instructions: []*gent.ModelMessage{
+		gent.TextParts(gent.ChatMessageTypeSystem, out.Instructions())}, Messages: []*gent.ModelMessage{
 		gent.TextParts(gent.ChatMessageTypeHuman, `Call lookup exactly once with id 7.
 Use the returned text as record. Return the record and round 1 in the required JSON.
 Do not guess the record. Use saved completed tool results without repeating their calls.`),
@@ -70,17 +80,44 @@ func checkProviderToolJSON(t *testing.T, base context.Context, model gent.Model,
 		err         error
 	}
 	actual := expected{}
-	agent := providerToolJSONAgent(t, model, record, choice, &actual.calls, &actual.validations)
-	ctx := gent.NewExecutionContext(base, "automatic tools",
-		gent.NewBasicLoopData(providerToolJSONTask(agent.Output())))
-	ctx.SetLimits([]gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 4}})
-	defer logCompactionFailure(t, ctx)
-	actual.value, actual.result, actual.err = executor.Run(ctx, agent, executor.DefaultConfig())
-	actual.rejected = ctx.Stats().GetCounter(gent.SCOutputCustomRejectedTotal)
-	assert.Equal(t, expected{providerLoopValue{record, 2}, []providerLookupInput{{7}},
-		[]providerLoopValue{{record, 1}, {record, 2}}, 1,
-		&gent.ExecutionResult{TerminationReason: gent.TerminationSuccess, Output: []gent.ContentPart{
-			gent.TextPart(fmt.Sprintf(`{"record":%q,"round":2}`, record))}}, nil}, actual)
+	agent, config := providerToolJSONAgent(
+		t,
+		model,
+		record,
+		choice,
+		&actual.calls,
+		&actual.validations,
+	)
+	config.Limits = []gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 4}}
+	runner, execCtx := newModelExecution(t, base, agent, config)
+	defer logCompactionFailure(t, execCtx)
+	actual.value, actual.result, actual.err = runner.NewTurn(
+		execCtx,
+		providerToolJSONTask(
+			agent.Output(),
+		),
+	)
+	actual.rejected = execCtx.Stats().GetCounter(gent.SCOutputCustomRejectedTotal)
+	assert.Equal(
+		t,
+		expected{
+			providerLoopValue{record, 2},
+			[]providerLookupInput{{7}},
+			[]providerLoopValue{{record, 1}, {record, 2}},
+			1,
+			&gent.ExecutionResult{
+				Status:            gent.ExecutionFinished,
+				TurnId:            execCtx.TurnId(),
+				TerminationReason: gent.TerminationSuccess,
+				Output: []gent.ContentPart{
+
+					gent.TextPart(fmt.Sprintf(`{"record":%q,"round":2}`, record)),
+				},
+			},
+			nil,
+		},
+		actual,
+	)
 }
 
 func TestProvidersAutomaticToolJSON(t *testing.T) {

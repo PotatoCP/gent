@@ -1,7 +1,6 @@
 package trace
 
 import (
-	"context"
 	"testing"
 
 	"github.com/rickchristie/gent"
@@ -32,36 +31,40 @@ func TestMetadataTraceRetention(t *testing.T) {
 		{"redacted", input{true, 0, true}, expected{text: "Removed."}},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			cfg := Config{IncludeChunkText: test.input.include,
-				MaxMetaContentBytes: test.input.limit}
-			if test.input.redact {
-				cfg.Redactor = RedactorFuncs{Chunk: func(chunk gent.StreamChunk) gent.StreamChunk {
-					chunk.MetaContent[0].Content = []gent.ContentPart{gent.TextContent{Text: "Removed."}}
-					return chunk
-				}}
-			}
-			seq := newTestSequencer(t, "commentary", cfg)
-			ctx := gent.NewExecutionContext(context.Background(), "trace", nil,
-				gent.WithRunId(seq.Snapshot().RunId), gent.WithObserver(seq))
-			before := ctx.PublishBeforeModelCall("fixture", gent.NewModelCallRequest(nil))
-			err := ctx.EmitChunk(gent.StreamChunk{ModelCallId: before.ModelCallId,
-				ContextId: before.ContextId, MetaContent: []*gent.MetaContent{
-					{
-						Type:    gent.MetaContentCommentary,
-						Content: []gent.ContentPart{gent.TextContent{Text: "Checking."}},
-					}}})
-			if !assert.NoError(t, err) || !assert.NoError(t, ctx.FlushProgress()) {
-				return
-			}
-			calls := seq.Snapshot().ModelCalls
-			if !assert.Len(t, calls, 1) || !assert.NotNil(t, calls[0].Stream) {
-				return
-			}
-			stream := calls[0].Stream
-			assert.Equal(t, test.expected, expected{
-				gent.MetaText(stream.MetaContent, gent.MetaContentCommentary),
-				stream.MetaContentTruncated, err})
-		})
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				cfg := Config{IncludeChunkText: test.input.include, MaxStreamContentBytes: test.input.limit}
+				if test.input.redact {
+					cfg.Redactor = RedactorFuncs{
+						Chunk: func(chunk gent.StreamChunk) gent.StreamChunk {
+							chunk.Content[0].(*gent.AssistantContent).Content = []gent.ContentPart{
+								gent.TextContent{
+									Text: "Removed.",
+								},
+							}
+							return chunk
+						},
+					}
+				}
+				seq := newTestSequencer(t, "commentary", cfg)
+				recordTestValue(t, seq, "model_call_started", &gent.BeforeModelCallEvent{
+					Model: "fixture", ModelCallId: "model-1", Request: gent.NewModelCallRequest(nil)})
+				chunk := gent.StreamChunk{Content: []gent.ContentPart{&gent.AssistantContent{
+					Type: gent.AssistantContentCommentary, MessageId: "commentary",
+					Content: []gent.ContentPart{gent.TextPart("Checking.")}}}}
+				recordTestValue(t, seq, "model_stream_chunk", chunk, gent.RecordedEvent{ModelCallId: "model-1"})
+				// The display redactor owns its copy. It must not change saved model evidence.
+				assert.Equal(t, "Checking.", gent.ContentText(chunk.Content))
+				calls := seq.Snapshot().ModelCalls
+				if !assert.Len(t, calls, 1) || !assert.NotNil(t, calls[0].Stream) {
+					return
+				}
+				stream := calls[0].Stream
+				assert.Equal(t, test.expected, expected{
+					gent.ContentText(gent.AssistantParts(stream.Content, gent.AssistantContentCommentary)),
+					stream.ContentTruncated, nil})
+			},
+		)
 	}
 }

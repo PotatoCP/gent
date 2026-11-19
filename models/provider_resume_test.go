@@ -11,7 +11,6 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/compaction"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/format"
 	"github.com/stretchr/testify/assert"
 )
@@ -26,16 +25,38 @@ type providerResumeStore struct {
 	saved  []byte
 }
 
-func (s *providerResumeStore) Save(_ context.Context, batch *gent.SaveBatch) error {
-	next, err := gent.ApplyBatch(s.view, batch, s.codecs)
+func (s *providerResumeStore) Save(
+	_ context.Context, batch *gent.SaveBatch,
+	captureRunStateSnapshot func() (*gent.RunState, error),
+) error {
+	if s.view.RunId == "" {
+		s.view = *gent.NewRunView(batch.RunId)
+	}
+	encoded, err := s.codecs.Marshal(batch)
 	if err != nil {
 		return err
 	}
-	s.view = next
+	var owned gent.SaveBatch
+	if err := s.codecs.Unmarshal(encoded, &owned); err != nil {
+		return err
+	}
+	// The store owns this one archive. Decode only the borrowed batch for ownership transfer;
+	// copying the entire growing archive at every save adds no recovery coverage.
+	applied, err := s.view.Apply(&owned, s.codecs)
+	if err != nil {
+		return err
+	}
+	if applied.Status != gent.ApplyApplied {
+		return fmt.Errorf("provider resume archive: %s: %s", applied.Status, applied.Detail)
+	}
 	if s.saved != nil || s.stop == nil || !s.stop(batch) {
 		return nil
 	}
-	s.saved, err = s.codecs.Marshal(next)
+	state, err := captureRunStateSnapshot()
+	if err != nil {
+		return err
+	}
+	s.saved, err = s.codecs.MarshalRunState(state)
 	if err != nil {
 		return err
 	}
@@ -52,7 +73,7 @@ func providerResumeBoundary(name string) func(*gent.SaveBatch) bool {
 					responses++
 				}
 			}
-			// Stop after the tool result was used, before processing its first JSON answer.
+			// Model evidence is grouped with the rejected iteration, with no extra model save.
 			return responses == 2
 		}
 		checkpoint := batch.Checkpoint
@@ -73,10 +94,11 @@ func providerResumeBoundary(name string) func(*gent.SaveBatch) bool {
 	}
 }
 
-func configureProviderResume(ctx *gent.ExecutionContext, model gent.Model, compact bool) {
+func configureProviderResume(config *gent.Config, model gent.Model, compact bool) {
 	if compact {
-		ctx.SetCompaction(compaction.NewStatThresholdTrigger().OnGauge(gent.SGScratchpadLength, 4),
-			compaction.NewSummarization(model, format.NewMarkdown()).WithKeepRecent(1))
+		config.CompactionTrigger = compaction.NewStatThresholdTrigger().OnCounter(gent.SCToolCalls, 1)
+		config.CompactionStrategy = compaction.NewSummarization(model, format.NewMarkdown()).
+			WithKeepRecent(1)
 	}
 }
 
@@ -87,96 +109,71 @@ func checkProviderResume(t *testing.T, base context.Context, build func() gent.M
 	worker, cancel := context.WithCancel(base)
 	defer cancel()
 	codecs := gent.NewCodecRegistry()
-	store := &providerResumeStore{codecs: codecs, stop: stop, cancel: cancel,
-		view: gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "provider-resume"}}
+	store := &providerResumeStore{codecs: codecs, stop: stop, cancel: cancel}
 	var calls []providerLookupInput
 	var values []providerLoopValue
 	model := build()
-	agent := providerToolJSONAgent(t, model, record, nil, &calls, &values)
-	options := []gent.ContextOption{gent.WithRunId(store.view.RunId), gent.WithCodecs(codecs)}
-	if stop != nil {
-		options = append(options, gent.WithRecorder(store))
-	}
-	ctx := gent.NewExecutionContext(worker, "native resume",
-		gent.NewBasicLoopData(providerToolJSONTask(agent.Output())), options...)
-	ctx.SetLimits([]gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 4}})
-	configureProviderResume(ctx, model, compact)
+	agent, config := providerToolJSONAgent(t, model, record, nil, &calls, &values)
+	config.Codecs, config.Recorder, config.Limits = codecs, store, liveLimits()
+	configureProviderResume(config, model, compact)
+	task := providerToolJSONTask(agent.Output())
 	if compact {
-		texts := []string{"Read the record.", "Keep its exact text.", "Use the lookup tool."}
-		for _, text := range texts {
-			if !assert.NoError(t, ctx.AppendRecord(&gent.HistoryEntry{
-				Messages: []*gent.MessageContent{{Role: gent.ChatMessageTypeHuman,
-					Parts: []gent.ContentPart{gent.TextPart(text)}}}}, true)) {
-				return ctx
-			}
+		for _, text := range []string{
+			"Read the record.", "Keep its exact text.", "Use the lookup tool.",
+		} {
+			task.Messages = append(task.Messages, gent.TextParts(gent.ChatMessageTypeHuman, text))
 		}
 	}
-	runner := executor.NewRunner(agent, executor.DefaultConfig())
-	value, result, err := runner.Execute(ctx)
+	runner, execCtx := newModelExecution(t, worker, agent, config)
+	value, result, err := runner.NewTurn(execCtx, task)
 	if stop != nil {
 		if !assert.ErrorIs(t, err, context.Canceled) || !assert.NotEmpty(t, store.saved) {
-			return ctx
+			return execCtx
 		}
+		assert.Nil(t, result)
 		assert.Equal(t, []providerLookupInput{{7}}, calls)
-		// New adapters, agent, runner, registry, and decoded state must replace the old object graph.
+		// Replace every runtime binding. The stored archive remains with the application.
 		model = build()
-		agent = providerToolJSONAgent(t, model, record, nil, &calls, &values)
+		agent, config = providerToolJSONAgent(t, model, record, nil, &calls, &values)
 		codecs = gent.NewCodecRegistry()
-		if !assert.NoError(t, agent.RegisterCodecs(codecs)) {
-			return ctx
-		}
-		var saved gent.RunView
-		if !assert.NoError(t, codecs.Unmarshal(store.saved, &saved)) ||
-			!assert.NoError(t, gent.ValidateBundle(saved, codecs)) {
-			return ctx
-		}
-		assert.NotEqual(t, gent.PhaseTerminal, saved.Checkpoint.Phase)
-		value, result, err = executor.NewRunner(agent, executor.DefaultConfig()).Resume(base, saved,
-			gent.RestoreBindings{Codecs: codecs, Configure: func(restored *gent.ExecutionContext) error {
-				ctx = restored
-				configureProviderResume(ctx, model, compact)
-				return nil
-			}})
+		store.codecs = codecs
+		config.Codecs, config.Recorder, config.Limits = codecs, store, liveLimits()
+		configureProviderResume(config, model, compact)
+		runner, execCtx = restoreModelExecution(t, base, agent, config, store.saved)
+		value, result, err = runner.Continue(execCtx)
 	}
 	if !assert.NoError(t, err) {
-		logCompactionFailure(t, ctx)
-		return ctx
+		logCompactionFailure(t, execCtx)
+		return execCtx
 	}
 	assert.Equal(t, providerLoopValue{record, 2}, value)
-	assert.Equal(t, &gent.ExecutionResult{TerminationReason: gent.TerminationSuccess,
+	assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished,
+		TurnId: execCtx.TurnId(), TerminationReason: gent.TerminationSuccess,
 		Output: []gent.ContentPart{gent.TextPart(
 			fmt.Sprintf(`{"record":%q,"round":2}`, record))}}, result)
 	assert.Equal(t, []providerLookupInput{{7}}, calls, "completed tool work must not run again")
 	assert.Equal(t, []providerLoopValue{{record, 1}, {record, 2}}, values)
-	assert.Equal(t, int64(1), ctx.Stats().GetCounter(gent.SCToolCalls))
-	assert.Equal(t, int64(1), ctx.Stats().GetCounter(gent.SCOutputCustomRejectedTotal))
-	// Rebuild usage from accepted model evidence. Resume must not count a saved response twice.
-	saved, err := ctx.Export()
-	if !assert.NoError(t, err) {
-		return ctx
-	}
+	assert.Equal(t, int64(1), execCtx.Stats().GetCounter(gent.SCToolCalls))
+	assert.Equal(t, int64(1), execCtx.Stats().GetCounter(gent.SCOutputCustomRejectedTotal))
+	// Rebuild usage from the complete accepted archive, including the part before restoration.
 	var input, output int64
-	for _, event := range saved.Activity {
+	for _, event := range store.view.Activity {
 		if event.Type != "model_call_finished" {
 			continue
 		}
-		decoded, err := ctx.DecodeEvent(event)
-		if !assert.NoError(t, err) {
-			return ctx
-		}
-		after := decoded.(*gent.AfterModelCallEvent)
+		after := event.Payload.(*gent.AfterModelCallEvent)
 		if !assert.NoError(t, after.Error) || !assert.NotNil(t, after.Response) {
-			return ctx
+			return execCtx
 		}
 		input += int64(after.Response.Info.InputTokens)
 		output += int64(after.Response.Info.OutputTokens)
 	}
 	assert.Positive(t, input)
 	assert.Positive(t, output)
-	assert.Equal(t, input, ctx.Stats().GetCounter(gent.SCInputTokens))
-	assert.Equal(t, output, ctx.Stats().GetCounter(gent.SCOutputTokens))
-	assert.Equal(t, input+output, ctx.Stats().GetCounter(gent.SCTotalTokens))
-	return ctx
+	assert.Equal(t, input, execCtx.Stats().GetCounter(gent.SCInputTokens))
+	assert.Equal(t, output, execCtx.Stats().GetCounter(gent.SCOutputTokens))
+	assert.Equal(t, input+output, execCtx.Stats().GetCounter(gent.SCTotalTokens))
+	return execCtx
 }
 
 func providerResumeResponse(t *testing.T, provider, text string, tool bool) string {
@@ -277,10 +274,10 @@ func TestProvidersUnfinishedResume(t *testing.T) {
 				if resumed {
 					stop = providerResumeBoundary(test.input.boundary)
 				}
-				ctx := checkProviderResume(t, context.Background(), build, "record-seven",
+				execCtx := checkProviderResume(t, context.Background(), build, "record-seven",
 					test.input.compact, stop)
 				assert.Equal(t, test.expected, expected{len(requests),
-					ctx.Stats().GetCounter(gent.SCTotalTokens)})
+					execCtx.Stats().GetCounter(gent.SCTotalTokens)})
 				if !resumed {
 					baselines[key] = requests
 					continue

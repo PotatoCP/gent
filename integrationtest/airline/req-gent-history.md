@@ -118,7 +118,7 @@ The intended use is:
    remove the saved record. If a worker crashes between commit and broadcast, a full-history reload includes the saved
    activity.
 5. **Load history and join live updates.** Subscribe first and buffer incoming numbered changes. Load full history with
-   its `lastAppliedEventNumber`, discard buffered events at or below that number, and apply consecutive later events.
+   its `lastAppliedEventSequenceNumber`, discard buffered events at or below that number, and apply consecutive later events.
    Reuse the full-history read for recovery, including gaps, reconnects, and a lost final event. Saved progress after
    the last checkpoint must be included. The detailed frontend flow below is agreed; new API paths are pending.
 6. **Continue after interruption.** A replacement worker loads the last accepted checkpoint, its history, and the
@@ -148,7 +148,7 @@ For human A opening the chat during iteration 5:
 1. **Subscribe and buffer.** Install the incoming-event handler before sending `streamSubscribe`. Buffer changes by
    run ID and event number. Wait for `serverStreamSubscribed` before starting the full-history load.
 2. **Read full history.** Select the run and load its saved history, committed partial activity, status, and
-   `lastAppliedEventNumber = N`. Continue buffering throughout the read. The content and cursor must describe one
+   `lastAppliedEventSequenceNumber = N`. Continue buffering throughout the read. The content and cursor must describe one
    consistent committed state; N cannot cover events whose effects are absent from that state.
 3. **Trim and apply.** Replace the view with the returned history. Discard buffered events at or below N. Apply only
    N + 1, advance the applied cursor after its changes apply, and repeat while consecutive events are available.
@@ -319,7 +319,7 @@ changes. Remove only the `Diff` field and the automatic JSON text-diff computati
 trace adapters, subscribers, tests, examples, and docs. Remove a diff dependency only if no other feature needs it.
 Whether to rename the event is a design decision; a rename must preserve state-change publication and subscription.
 
-Preserve the per-run event ordering provided by `trace.Sequencer` and `trace.Event.EventNumber`
+Preserve the per-run event ordering provided by `trace.Sequencer` and `trace.Event.EventSequenceNumber`
 (`trace/sequencer.go:90`, `trace/types.go:62`). Saved events must keep their numbers during persistence and replay.
 When a run continues after restoration, new event numbers must start after the highest durably recorded event number,
 including any saved progress after the last resumable checkpoint. Do not reset numbering or reuse old event numbers.

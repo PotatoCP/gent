@@ -78,9 +78,11 @@ func TestStreamingCancellationRejectsFailure(t *testing.T) {
 	}
 	cases := []testCase{
 		{"invalid key", input{401, false},
-			expected{"unexpected stream error: model HTTP 401: rejected", 1, 1, 1}},
+			expected{`stream ended before cancellation (0 chunks): cancellation not verified
+model HTTP 401: rejected`, 1, 1, 1}},
 		{"rate limit", input{429, false},
-			expected{"unexpected stream error: model HTTP 429: rejected", 1, 1, 1}},
+			expected{`stream ended before cancellation (0 chunks): cancellation not verified
+model HTTP 429: rejected`, 1, 1, 1}},
 		{"early answer", input{200, false}, expected{
 			"stream ended before cancellation (1 chunks): cancellation not verified", 1, 1, 1}},
 		{"cancellation and cleanup", input{200, true}, expected{"", 1, 1, 1}},
@@ -150,26 +152,41 @@ func TestStreamingCancellationRejectsCompletionCause(t *testing.T) {
 		{"completed before cancellation", input{nil},
 			expected{"expected context cancellation, got <nil>"}},
 		{"request deadline", input{context.DeadlineExceeded},
-			expected{"unexpected stream error: context deadline exceeded"}},
+			expected{"expected context cancellation, got context deadline exceeded"}},
 		{"joined cleanup failure", input{errors.Join(context.Canceled, io.ErrUnexpectedEOF)},
-			expected{`unexpected stream error: context canceled
+			expected{`expected context cancellation, got context canceled
 unexpected EOF`}},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			var chunks []gent.StreamChunk
-			for range 5 {
-				chunks = append(chunks, gent.StreamChunk{MetaContent: []*gent.MetaContent{
-					{Type: gent.MetaContentIntermediary, Content: []gent.ContentPart{gent.TextPart("word")}},
-				}})
-			}
-			err := runStreamingCancellation(context.Background(), io.Discard, TestOutputConfig(),
-				liveCheckModel{chunks: chunks, err: test.input.cause})
-			actual := expected{}
-			if err != nil {
-				actual.err = err.Error()
-			}
-			assert.Equal(t, test.expected, actual)
-		})
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				var chunks []gent.StreamChunk
+				for range 5 {
+					chunks = append(
+						chunks,
+						gent.StreamChunk{
+							Content: []gent.ContentPart{
+								&gent.AssistantContent{
+									Type: gent.AssistantContentIntermediary,
+									Content: []gent.ContentPart{
+										gent.TextPart(
+											"word",
+										),
+									},
+								},
+							},
+						},
+					)
+				}
+				err := runStreamingCancellation(context.Background(), io.Discard, TestOutputConfig(),
+					liveCheckModel{chunks: chunks, err: test.input.cause})
+				actual := expected{}
+				if err != nil {
+					actual.err = err.Error()
+				}
+				assert.Equal(t, test.expected, actual)
+			},
+		)
 	}
 }

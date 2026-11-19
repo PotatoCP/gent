@@ -7,7 +7,7 @@ import (
 	agentutil "github.com/rickchristie/gent/agents"
 )
 
-func finishGuardedStream(ctx *gent.ExecutionContext, stream gent.Stream,
+func finishGuardedStream(execCtx *gent.ExecutionContext, stream gent.Stream,
 	acc *gent.StreamAccumulator, guard *agentutil.RepetitionResult,
 ) (*gent.ModelCallResponse, *agentutil.RepetitionResult, error) {
 	stream.Close()
@@ -17,7 +17,7 @@ func finishGuardedStream(ctx *gent.ExecutionContext, stream gent.Stream,
 	if err != nil && !onlyStreamCancellation(err) {
 		return nil, nil, err
 	}
-	if err := ctx.Context().Err(); err != nil {
+	if err := execCtx.Context().Err(); err != nil {
 		return nil, nil, err
 	}
 	if response != nil && len(response.Choices) > 0 && response.Choices[0] != nil {

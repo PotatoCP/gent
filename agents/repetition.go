@@ -14,16 +14,15 @@ var ErrRepetitionDetected = gent.ErrRepetitionDetected
 var ErrMaxResponseSize = gent.ErrMaxResponseSize
 
 // RepetitionAction controls what happens when repetition is detected.
-type RepetitionAction int
+type RepetitionAction string
 
 const (
 	// RepetitionRecover truncates the response, increments the loop gauge, and injects
-	// a reminder to try a different approach. The agent continues to the next iteration.
+	// a reminder to try a different approach. The empty value is the default; the loop continues.
 	// If the consecutive loop gauge reaches the executor's limit, execution terminates.
-	RepetitionRecover RepetitionAction = iota
-
+	RepetitionRecover RepetitionAction = ""
 	// RepetitionTerminate returns an error immediately, terminating execution.
-	RepetitionTerminate
+	RepetitionTerminate RepetitionAction = "terminate"
 )
 
 // RepetitionConfig configures the streaming repetition detector.
@@ -96,8 +95,8 @@ const DefaultResponseTooLongMessage = `Your response was too long and was trunca
 
 // DefaultRecoverPoisonedMessage is the reminder injected when Filter returns
 // empty, indicating the repeated text contains hallucinated content.
-const DefaultRecoverPoisonedMessage = `You have repeated the same reasoning/action multiple times ` +
-	`in a loop.
+const DefaultRecoverPoisonedMessage = `You have repeated the same reasoning/action ` +
+	`multiple times in a loop.
 We cannot show your previous reasoning because it contains hallucinated text.
 DO NOT HALLUCINATE. FOLLOW SYSTEM PROMPT CLOSELY.`
 

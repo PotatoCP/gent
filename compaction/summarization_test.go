@@ -22,25 +22,21 @@ func (m *drainRequiredSummaryModel) GenerateContentStream(
 		responseDone: make(chan struct{}),
 	}
 	go func() {
-		stream.chunks <- gent.StreamChunk{
-			MetaContent: []*gent.MetaContent{
-				{
-					Type: gent.MetaContentIntermediary,
-					Content: []gent.ContentPart{
-						gent.TextContent{Text: "drained"},
-					},
-				},
+		stream.chunks <- gent.StreamChunk{Content: []gent.ContentPart{&gent.AssistantContent{
+			Type: gent.AssistantContentIntermediary, MessageId: "answer",
+			Content: []gent.ContentPart{
+				gent.TextContent{Text: "drained"},
 			},
+		},
+		},
 		}
-		stream.chunks <- gent.StreamChunk{
-			MetaContent: []*gent.MetaContent{
-				{
-					Type: gent.MetaContentIntermediary,
-					Content: []gent.ContentPart{
-						gent.TextContent{Text: " summary"},
-					},
-				},
+		stream.chunks <- gent.StreamChunk{Content: []gent.ContentPart{&gent.AssistantContent{
+			Type: gent.AssistantContentIntermediary, MessageId: "answer",
+			Content: []gent.ContentPart{
+				gent.TextContent{Text: " summary"},
 			},
+		},
+		},
 		}
 		close(stream.chunks)
 		close(stream.responseDone)
@@ -60,10 +56,30 @@ func (s *drainRequiredSummaryStream) Chunks() <-chan gent.StreamChunk {
 func (s *drainRequiredSummaryStream) Response() (*gent.ModelCallResponse, error) {
 	<-s.responseDone
 	return &gent.ModelCallResponse{
+
 		Choices: []*gent.ContentChoice{
+
 			{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: "drained summary"}},
+
+				Completion: gent.ModelCompletion{
+					Status: gent.ModelStatusAnswer,
+				},
+				CandidateSource: &gent.ContentSource{
+					MessageIds: []string{
+						"answer",
+					},
+				},
+				Parts: []gent.ContentPart{
+					&gent.AssistantContent{
+						Type:      gent.AssistantContentFinalAnswerCandidate,
+						MessageId: "answer",
+						Content: []gent.ContentPart{
+							gent.TextContent{
+								Text: "drained summary",
+							},
+						},
+					},
+				},
 			},
 		},
 		Info: &gent.GenerationInfo{InputTokens: 10, OutputTokens: 5},
@@ -73,11 +89,9 @@ func (s *drainRequiredSummaryStream) Response() (*gent.ModelCallResponse, error)
 func (s *drainRequiredSummaryStream) Close() {}
 
 func TestSummarization_CompactDrainsModelStream(t *testing.T) {
-	data := gent.NewBasicLoopData(nil)
 
-	execCtx := gent.NewExecutionContext(context.Background(), "test", data)
+	execCtx := tt.NewContext(t, &gent.Config{})
 	setTestRecords(t, execCtx, []*gent.HistoryEntry{makeIter("data")})
-	execCtx.SetLimits(nil)
 	strategy := NewSummarization(&drainRequiredSummaryModel{}, tt.NewMockFormat())
 
 	done := make(chan error, 1)
@@ -457,13 +471,8 @@ Custom summarized` +
 				)
 			}
 
-			data := gent.NewBasicLoopData(nil)
-
-			execCtx := gent.NewExecutionContext(
-				context.Background(), "test", data,
-			)
+			execCtx := tt.NewContext(t, &gent.Config{})
 			setTestRecords(t, execCtx, tc.input.scratchpad)
-			execCtx.SetLimits(nil)
 
 			err := applyTestCompaction(execCtx, strategy)
 
@@ -513,7 +522,7 @@ Custom summarized` +
 						gent.RecordCompactedSynthetic {
 						continue
 					}
-					text := extractText(iter)
+					text := gent.ContentText(iter.Messages[0].Parts)
 					if text == tc.expected.summaryContains {
 						found = true
 						break
@@ -695,13 +704,8 @@ func TestSummarization_PromptContent(t *testing.T) {
 				)
 			}
 
-			data := gent.NewBasicLoopData(nil)
-
-			execCtx := gent.NewExecutionContext(
-				context.Background(), "test", data,
-			)
+			execCtx := tt.NewContext(t, &gent.Config{})
 			setTestRecords(t, execCtx, tc.input.scratchpad)
-			execCtx.SetLimits(nil)
 
 			err := applyTestCompaction(execCtx, strategy)
 			assert.NoError(t, err)
@@ -793,15 +797,10 @@ func TestSummarization_WithPromptSingleMessage(
 		WithPrompt(`Custom: %s
 %s`)
 
-	data := gent.NewBasicLoopData(nil)
-
-	execCtx := gent.NewExecutionContext(
-		context.Background(), "test", data,
-	)
+	execCtx := tt.NewContext(t, &gent.Config{})
 	setTestRecords(t, execCtx, []*gent.HistoryEntry{
 		makeIter("test data"),
 	})
-	execCtx.SetLimits(nil)
 
 	err := applyTestCompaction(execCtx, strategy)
 	assert.NoError(t, err)
@@ -832,16 +831,11 @@ func TestSummarization_DefaultTwoMessages(t *testing.T) {
 	mockFmt := tt.NewMockFormat()
 	strategy := NewSummarization(model, mockFmt)
 
-	data := gent.NewBasicLoopData(nil)
-
-	execCtx := gent.NewExecutionContext(
-		context.Background(), "test", data,
-	)
+	execCtx := tt.NewContext(t, &gent.Config{})
 	setTestRecords(t, execCtx, []*gent.HistoryEntry{
 		makeIter("step 1"),
 		makeIter("step 2"),
 	})
-	execCtx.SetLimits(nil)
 
 	err := applyTestCompaction(execCtx, strategy)
 	assert.NoError(t, err)
@@ -887,8 +881,8 @@ func TestSummarization_DefaultTwoMessages(t *testing.T) {
 			"static instructions",
 	)
 }
-func (m *drainRequiredSummaryModel) PrepareRequest(ctx *gent.ExecutionContext,
+func (m *drainRequiredSummaryModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

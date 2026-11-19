@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-func testScratchpad(t testing.TB, ctx *gent.ExecutionContext) []*gent.HistoryEntry {
+func testScratchpad(t testing.TB, execCtx *gent.ExecutionContext) []*gent.HistoryEntry {
 	t.Helper()
-	records, err := ctx.Scratchpad()
+	records, err := execCtx.Scratchpad()
 	if err != nil {
 		t.Fatal(err)
 	}

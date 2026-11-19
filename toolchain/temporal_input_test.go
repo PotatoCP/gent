@@ -53,8 +53,6 @@ func TestNativeNestedTemporalArguments(t *testing.T) {
 				calls++
 				return &gent.ToolExecutionResponse{Status: gent.ToolExecuted}, nil
 			}).MustBuild()
-			ctx := newExecCtx()
-			defer ctx.Release()
 			var chain gent.ToolChain = New().RegisterTool(tool)
 			call := nativeCall("schedule", arguments)
 			if test.input.shared {
@@ -68,10 +66,10 @@ func TestNativeNestedTemporalArguments(t *testing.T) {
 				assert.NoError(t, err)
 				call = nativeCall("execute_tool", string(wrapped))
 			}
-			record := executeNativeTestCall(t, chain, ctx, call)
+			record, execCtx := runNativeTestCall(t, chain, &gent.Config{}, call)
 			assert.Equal(t, test.expected, expected{record.Execution().Status, received, calls})
 			if record.Input() != nil && calls == 1 {
-				restored, err := ctx.Codecs().Decode(*record.Input())
+				restored, err := execCtx.Codecs().Decode(*record.Input())
 				assert.NoError(t, err)
 				assert.Equal(t, test.expected.value, restored)
 			}

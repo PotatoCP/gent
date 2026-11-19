@@ -45,8 +45,7 @@ func TestProvidersCancellationStopsProducer(t *testing.T) {
 	var cases []testCase
 	for _, provider := range testProviders {
 		cases = append(cases,
-			testCase{provider + "/context", input{provider: provider},
-				expected{context.Canceled, true}},
+			testCase{provider + "/context", input{provider: provider}, expected{context.Canceled, true}},
 			testCase{provider + "/concurrent close", input{provider: provider, closeStream: true},
 				expected{context.Canceled, true}},
 			testCase{provider + "/before headers", input{provider: provider, beforeHeader: true},
@@ -111,8 +110,7 @@ func TestProvidersCancellationStopsProducer(t *testing.T) {
 				closed = true
 			default:
 			}
-			assert.Equal(t, test.expected.closed, closed,
-				"Response must wait for HTTP cleanup")
+			assert.Equal(t, test.expected.closed, closed, "Response must wait for HTTP cleanup")
 		})
 	}
 }
@@ -200,7 +198,13 @@ func TestProvidersOperationFailures(t *testing.T) {
 			}
 			defer stream.Close()
 			for chunk := range stream.Chunks() {
-				assert.Empty(t, chunk.Content)
+				for _, part := range chunk.Content {
+					item, ok := part.(*gent.AssistantContent)
+					if assert.True(t, ok) {
+						assert.NotEqual(t, gent.AssistantContentFinalAnswer, item.Type,
+							"provider progress cannot publish accepted output")
+					}
+				}
 			}
 			_, err = stream.Response()
 			if test.expected.err != nil {

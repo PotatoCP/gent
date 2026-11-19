@@ -6,7 +6,6 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
@@ -20,21 +19,15 @@ type nativeRecoveryModel struct {
 func (model *nativeRecoveryModel) GenerateContentStream(_ context.Context,
 	request *gent.ModelCallRequest) (gent.Stream, error) {
 	model.requests = append(model.requests, request)
-	choice := &gent.ContentChoice{
-		Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-		CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Policy P10 permits it."}},
-	}
+	choice := recoveryAnswerChoice("Policy P10 permits it.")
 	if !model.answer && len(model.requests) == 1 {
-		choice.CandidateContent = []gent.ContentPart{gent.TextContent{Text: "Read the policy."}}
-		for _, id := range []string{"provider-a", "provider-b"} {
-			choice.Completion.Status = gent.ModelStatusToolCalls
-			choice.ToolCalls = append(choice.ToolCalls, &gent.ModelToolCallRequest{ID: id, Type: "function",
-				FunctionCall: &gent.FunctionCall{Name: "policy", Arguments: `{"id":"P10"}`}})
+		choice = recoveryChoice()
+		for i, id := range []string{"provider-a", "provider-b"} {
+			choice.Parts[i+1].(*gent.ModelToolCallRequest).ID = id
 		}
 		if model.code {
-			choice.Completion.Status = gent.ModelStatusToolCalls
-			choice.ToolCalls = []*gent.ModelToolCallRequest{{ID: "provider-code", Type: "function",
-				FunctionCall: &gent.FunctionCall{Name: "run_code",
+			choice.Parts = []gent.ContentPart{&gent.ModelToolCallRequest{ID: "provider-code",
+				Type: "function", FunctionCall: &gent.FunctionCall{Name: "run_code",
 					Arguments: `{"code":"tool.call({tool:'policy',args:{id:'P10'}});"}`}}}
 		}
 	}
@@ -44,8 +37,8 @@ func (model *nativeRecoveryModel) GenerateContentStream(_ context.Context,
 
 func newNativeRecoveryAgent(
 	model *nativeRecoveryModel, calls *[]gent.ToolIdentity,
-) *react.Agent[string] {
-	chain := toolchain.New().RegisterTool(gent.DefineTool("policy",
+) (*react.Agent[string], *gent.Config) {
+	var chain gent.ToolChain = toolchain.New().RegisterTool(gent.DefineTool("policy",
 		func(ctx context.Context, input recoveryInput) (*gent.ToolExecutionResponse, error) {
 			identity, _ := gent.ToolIdentityFromContext(ctx)
 			*calls = append(*calls, identity)
@@ -54,8 +47,7 @@ func newNativeRecoveryAgent(
 	if model.code {
 		chain = toolchain.NewJsToolChainWrapper(chain)
 	}
-	return react.NewAgent(model).WithToolChain(chain).
-		WithRecoveryVersion("native-recovery/v1")
+	return react.NewAgent(model), &gent.Config{ToolChain: chain}
 }
 
 func TestNativeHistory_Recovery(t *testing.T) {
@@ -75,7 +67,6 @@ func TestNativeHistory_Recovery(t *testing.T) {
 	cases := []testCase{
 		{"initial", input{phase: gent.PhaseInitial}, expected{0, 2, 0, 2, nil}},
 		{"saved response", input{event: "model_call_finished"}, expected{1, 1, 0, 0, nil}},
-		{"decision", input{phase: gent.PhaseDecisionReady}, expected{1, 1, 0, 0, nil}},
 		{"uncertain call", input{phase: gent.PhaseToolReady},
 			expected{1, 1, 0, 0, nil}},
 		{"first result", input{phase: gent.PhaseToolCompleted}, expected{1, 1, 1, 0, nil}},
@@ -86,28 +77,18 @@ func TestNativeHistory_Recovery(t *testing.T) {
 			worker, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			store := &recoveryStore{codecs: gent.NewCodecRegistry(), cancel: cancel,
-				view:  gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "native"},
 				phase: test.input.phase, event: test.input.event}
 			model := &nativeRecoveryModel{}
 			var before []gent.ToolIdentity
-			agent := newNativeRecoveryAgent(model, &before)
-			ctx := gent.NewExecutionContext(worker, "root", gent.NewBasicLoopData(
-				gent.NewTask(gent.TextContent{Text: "Read the policy twice."})), gent.WithRunId("native"),
-				gent.WithRecorder(store), gent.WithCodecs(store.codecs))
-			_, _, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
+			agent, config := newNativeRecoveryAgent(model, &before)
+			config.Codecs, config.Recorder = store.codecs, store
+			runner, execCtx := newTestExecution(t, worker, agent, config)
+			_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read the policy twice.")))
 			assert.ErrorIs(t, err, context.Canceled)
-			bundle, err := ctx.Export()
-			assert.NoError(t, err)
-			assert.NoError(t, gent.ValidateBundle(bundle, ctx.Codecs()))
 			nextModel := &nativeRecoveryModel{answer: len(model.requests) > 0}
 			var after []gent.ToolIdentity
-			nextAgent := newNativeRecoveryAgent(nextModel, &after)
-			bindings := recoveryBindings(t, nextAgent)
-			data, err := bindings.Codecs.Marshal(bundle)
-			assert.NoError(t, err)
-			var saved gent.RunView
-			assert.NoError(t, bindings.Codecs.Unmarshal(data, &saved))
-			restored, result, err := resumeRecovery(nextAgent, saved, bindings)
+			nextAgent, freshConfig := newNativeRecoveryAgent(nextModel, &after)
+			restored, result, err := resumeRecovery(t, nextAgent, store.runStateSnapshot, freshConfig)
 			if test.expected.failure != nil {
 				assert.ErrorIs(t, err, test.expected.failure)
 			} else if assert.NoError(t, err) {
@@ -115,13 +96,16 @@ func TestNativeHistory_Recovery(t *testing.T) {
 					result.Output)
 				assert.Equal(t, int64(40), restored.Stats().GetCounter(gent.SCTotalTokens))
 				expectedCalls := int64(test.expected.beforeTools + test.expected.afterTools)
-				if test.name == "uncertain call" {
+				if test.name == "uncertain call" || test.input.event != "" {
 					expectedCalls = 1
 				}
 				assert.Equal(t, expectedCalls, restored.Stats().GetCounter(gent.SCToolCalls))
 				last := nextModel.requests[len(nextModel.requests)-1]
 				assert.Equal(t, &gent.ModelMessage{Role: gent.ChatMessageTypeAI,
-					Parts: []gent.ContentPart{gent.TextContent{Text: "Read the policy."},
+					Parts: []gent.ContentPart{&gent.AssistantContent{
+						MessageId: last.Messages[1].Parts[0].(*gent.AssistantContent).MessageId,
+						Type:      gent.AssistantContentCommentary,
+						Content:   []gent.ContentPart{gent.TextPart("Read the policy.")}},
 						&gent.ModelToolCallRequest{ID: "provider-a", Type: "function",
 							FunctionCall: &gent.FunctionCall{
 								Name: "policy", Arguments: `{"id":"P10"}`,
@@ -158,22 +142,18 @@ func TestNativeHistory_JavaScriptRecoveryBoundary(t *testing.T) {
 			worker, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			store := &recoveryStore{codecs: gent.NewCodecRegistry(), cancel: cancel,
-				view:  gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "native-code"},
 				phase: gent.PhaseToolCompleted, after: test.input.completedCheckpoints}
 			model := &nativeRecoveryModel{code: true}
 			var effects []gent.ToolIdentity
-			agent := newNativeRecoveryAgent(model, &effects)
-			ctx := gent.NewExecutionContext(worker, "root", gent.NewBasicLoopData(
-				gent.NewTask(gent.TextContent{Text: "Read the policy."})), gent.WithRunId("native-code"),
-				gent.WithRecorder(store), gent.WithCodecs(store.codecs))
-			_, _, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
+			agent, config := newNativeRecoveryAgent(model, &effects)
+			config.Codecs, config.Recorder = store.codecs, store
+			runner, execCtx := newTestExecution(t, worker, agent, config)
+			_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Read the policy.")))
 			assert.ErrorIs(t, err, context.Canceled)
-			bundle, err := ctx.Export()
-			assert.NoError(t, err)
 			nextModel := &nativeRecoveryModel{code: true, answer: true}
 			var repeated []gent.ToolIdentity
-			nextAgent := newNativeRecoveryAgent(nextModel, &repeated)
-			_, result, err := resumeRecovery(nextAgent, bundle, recoveryBindings(t, nextAgent))
+			nextAgent, freshConfig := newNativeRecoveryAgent(nextModel, &repeated)
+			_, result, err := resumeRecovery(t, nextAgent, store.runStateSnapshot, freshConfig)
 			if test.expected.failure != nil {
 				assert.ErrorIs(t, err, test.expected.failure)
 			} else if assert.NoError(t, err) {
@@ -186,8 +166,8 @@ func TestNativeHistory_JavaScriptRecoveryBoundary(t *testing.T) {
 		})
 	}
 }
-func (m *nativeRecoveryModel) PrepareRequest(ctx *gent.ExecutionContext,
+func (m *nativeRecoveryModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

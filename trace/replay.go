@@ -15,18 +15,10 @@ func RestoreSequencer(saved gent.RunView, cfg Config) (*Sequencer, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := seq.ObserveCommitted(saved.Activity, registry); err != nil {
+	if err := seq.observeEvents(saved.Activity, registry); err != nil {
 		return nil, err
 	}
 	return seq, nil
-}
-
-// ObserveCommitted sees only accepted records. The same projection handles live and restored
-// activity, so neither callback order nor current executor state can change the displayed past.
-func (s *Sequencer) ObserveCommitted(
-	events []*gent.RecordedEvent, registry *gent.CodecRegistry,
-) error {
-	return s.observeEvents(events, registry)
 }
 
 func (s *Sequencer) observeEvents(
@@ -35,6 +27,11 @@ func (s *Sequencer) observeEvents(
 	s.observeMu.Lock()
 	defer s.observeMu.Unlock()
 	for _, recorded := range events {
+		s.mu.Lock()
+		if s.runId == "" && recorded != nil && recorded.RunId != "" {
+			s.runId, s.snapshot.RunId = recorded.RunId, recorded.RunId
+		}
+		s.mu.Unlock()
 		event, err := s.project(recorded, registry)
 		if err != nil {
 			return err
@@ -45,32 +42,22 @@ func (s *Sequencer) observeEvents(
 }
 
 func (s *Sequencer) applyAttempt(event *Event) {
-	if event.Type != "attempt_started" && event.Type != "attempt_interrupted" {
+	if event.Type != EventTypeAttemptStarted && event.Type != EventTypeAttemptInterrupted {
 		return
 	}
+	if event.Type == EventTypeAttemptStarted {
+		s.snapshot.Status, s.snapshot.CompletedTs = RunStatusRunning, nil
+		if ctx := s.contextById[event.ContextId]; ctx != nil {
+			ctx.Status, ctx.CompletedTs = StepStatusRunning, nil
+		}
+	}
 	interrupted := func(attempt string) bool {
-		if event.Type == "attempt_started" {
+		if event.Type == EventTypeAttemptStarted {
 			return attempt != event.AttemptId
 		}
 		return attempt == event.AttemptId
 	}
-	// A child interruption must not mark a concurrently running parent or sibling interrupted.
-	withinContext := func(id string) bool {
-		for id != "" {
-			if id == event.ContextId {
-				return true
-			}
-			parent := ""
-			for _, saved := range s.snapshot.Contexts {
-				if saved.Id == id {
-					parent = saved.ParentId
-					break
-				}
-			}
-			id = parent
-		}
-		return false
-	}
+	withinContext := func(id string) bool { return id == event.ContextId }
 	resumeIteration := false
 	for _, iteration := range s.snapshot.Iterations {
 		if iteration.ContextId == event.ContextId && iteration.Iteration == event.Iteration &&
@@ -96,7 +83,7 @@ func (s *Sequencer) applyAttempt(event *Event) {
 			iteration.Status = StepStatusInterrupted
 		}
 	}
-	if event.Type == "attempt_started" && resumeIteration {
+	if event.Type == EventTypeAttemptStarted && resumeIteration {
 		s.applyIterationStarted(event)
 	}
 }

@@ -229,4 +229,3 @@ func TestFusedIndex_EndToEnd_BM25PlusSemantic(t *testing.T) {
 		assert.Equal(t, "new_tool", results[0].Id)
 	})
 }
-

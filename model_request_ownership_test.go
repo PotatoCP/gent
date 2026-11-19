@@ -5,24 +5,12 @@ import (
 	"testing"
 
 	"github.com/rickchristie/gent"
-	"github.com/rickchristie/gent/events"
+	"github.com/rickchristie/gent/internal/tt"
 	"github.com/stretchr/testify/assert"
 )
 
-type mediaRequestHook struct{}
-
-func (*mediaRequestHook) OnBeforeModelCall(_ *gent.ExecutionContext,
-	event *gent.BeforeModelCallEvent,
-) {
-	event.Request.Messages[0].Parts[0].(gent.BinaryContent).Data[0] = 9
-}
-
-type mediaRequestObserver struct{}
-
-func (*mediaRequestObserver) OnAfterModelCall(*gent.ExecutionContext, *gent.AfterModelCallEvent) {}
-
 func TestManagedRequestCopiesMediaOnlyForMutableHooks(t *testing.T) {
-	type input struct{ publisher gent.EventPublisher }
+	type input struct{ hooks *gent.Hooks }
 	type expected struct {
 		shared bool
 		bytes  []byte
@@ -33,19 +21,24 @@ func TestManagedRequestCopiesMediaOnlyForMutableHooks(t *testing.T) {
 		expected expected
 	}
 	cases := []testCase{
-		{"no dispatcher", input{}, expected{true, []byte{1, 2, 3}}},
-		{"empty registry", input{events.NewRegistry()}, expected{true, []byte{1, 2, 3}}},
-		{"after hook only", input{events.NewRegistry().Subscribe(&mediaRequestObserver{})},
+		{"no hooks", input{}, expected{true, []byte{1, 2, 3}}},
+		{"empty hooks", input{&gent.Hooks{}}, expected{true, []byte{1, 2, 3}}},
+		{"tool hook only", input{&gent.Hooks{BeforeToolCall: func(context.Context,
+			*gent.BeforeToolCallEvent) error {
+			return nil
+		}}},
 			expected{true, []byte{1, 2, 3}}},
-		{"mutable request hook", input{events.NewRegistry().Subscribe(&mediaRequestHook{})},
+		{"mutable request hook", input{&gent.Hooks{BeforeModelCall: func(_ context.Context,
+			event *gent.BeforeModelCallEvent) error {
+			event.Request.Messages[0].Parts[0].(gent.BinaryContent).Data[0] = 9
+			return nil
+		}}},
 			expected{false, []byte{9, 2, 3}}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			data := []byte{1, 2, 3}
-			ctx := gent.NewExecutionContext(context.Background(), "media", nil)
-			defer ctx.Release()
-			ctx.SetEventPublisher(test.input.publisher)
+			execCtx := tt.NewContext(t, &gent.Config{Hooks: test.input.hooks})
 			var actual expected
 			model := checkpointModel(func(_ context.Context, request *gent.ModelCallRequest) (
 				gent.Stream, error,
@@ -57,7 +50,7 @@ func TestManagedRequestCopiesMediaOnlyForMutableHooks(t *testing.T) {
 			request := gent.NewModelCallRequest([]*gent.ModelMessage{
 				{Role: gent.ChatMessageTypeHuman, Parts: []gent.ContentPart{gent.PDFPart(data)}},
 			})
-			stream, err := ctx.GenerateContentStream(model, gent.ModelCall{}, request)
+			stream, err := execCtx.GenerateContentStream(model, gent.ModelCall{}, request)
 			if !assert.NoError(t, err) {
 				return
 			}

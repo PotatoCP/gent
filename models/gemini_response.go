@@ -87,9 +87,9 @@ func (m *generateContentModel) readResponse(ctx context.Context, response *http.
 			if err := json.Unmarshal(raw, &part); err != nil {
 				return false, err
 			}
-			kind := gent.MetaContentIntermediary
+			kind := gent.AssistantContentIntermediary
 			if part.Thought {
-				kind = gent.MetaContentReasoning
+				kind = gent.AssistantContentReasoning
 			}
 			if err := sendProviderText(ctx, stream, options, kind,
 				fmt.Sprintf("part:%d", len(parts)), part.Text); err != nil {
@@ -176,9 +176,10 @@ func (m *generateContentModel) convertResponse(ctx context.Context, response *ge
 			return nil, err
 		}
 	}
-	if choice.Completion.Status == gent.ModelStatusAnswer && len(choice.ToolCalls) > 0 {
+	if choice.Completion.Status == gent.ModelStatusAnswer && len(choice.ToolCalls()) > 0 {
 		choice.Completion.Status = gent.ModelStatusToolCalls
 	}
+	classifyAnswerItems(choice)
 	if err := choice.ValidateCompletion(); err != nil {
 		return nil, err
 	}
@@ -235,7 +236,7 @@ func (m *generateContentModel) convertPart(ctx context.Context, choice *gent.Con
 			}
 			return errors.New("Gemini function call has no name")
 		}
-		choice.ToolCalls = append(choice.ToolCalls, &gent.ModelToolCallRequest{ID: part.Call.ID,
+		choice.Parts = append(choice.Parts, &gent.ModelToolCallRequest{ID: part.Call.ID,
 			Type: "function", FunctionCall: &gent.FunctionCall{
 				Name: part.Call.Name, Arguments: string(part.Call.Args)}})
 		return nil
@@ -245,17 +246,16 @@ func (m *generateContentModel) convertPart(ctx context.Context, choice *gent.Con
 		return errors.New("unsupported Gemini response part")
 	}
 	id := fmt.Sprintf("part:%d", index)
-	kind := gent.MetaContentIntermediary
+	kind := gent.AssistantContentIntermediary
 	if part.Thought {
-		kind = gent.MetaContentReasoning
+		kind = gent.AssistantContentReasoning
 	} else {
-		choice.CandidateContent = append(choice.CandidateContent, content...)
 		if choice.CandidateSource == nil {
 			choice.CandidateSource = &gent.ContentSource{}
 		}
 		choice.CandidateSource.MessageIds = append(choice.CandidateSource.MessageIds, id)
 	}
-	choice.MetaContent = append(choice.MetaContent, &gent.MetaContent{
+	choice.Parts = append(choice.Parts, &gent.AssistantContent{
 		Type: kind, MessageId: id, Content: content})
 	return nil
 }

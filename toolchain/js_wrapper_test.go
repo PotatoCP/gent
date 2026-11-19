@@ -38,70 +38,71 @@ func TestProgramAutomaticResultsAndForwarding(t *testing.T) {
 					Instructions: "Check the receipt."}, nil
 			}).MustBuild()
 			wrapper := NewJsToolChainWrapper(New().RegisterTool(tool))
-			ctx := newExecCtx()
-			defer ctx.Release()
 			code := `const reply=tool.call({tool:"receipt",args:{}});`
 			if test.input.forward {
 				code += `tool.forward(reply.parts.filter(p=>p.kind==="bytes"));`
 			}
-			records, err := executeTestCode(wrapper, ctx, code, testFormat())
-			if !assert.NoError(t, err) {
-				return
-			}
-			outer := records[0]
-			bytes, omissions := 0, 0
-			var data []any
-			for _, part := range outer.Response().Parts() {
-				switch value := part.(type) {
-				case gent.BinaryContent:
-					bytes++
-					assert.Equal(t, []byte("%PDF-saved"), value.Data)
-				case gent.DataContent:
-					data = append(data, value.Value())
-				case gent.TextContent:
-					if value.Text == gent.DefaultSteeringMessages().PTCBytesOmitted+
-						" MIME type: application/pdf." {
-						omissions++
+			runToolScenario(t, wrapper, &gent.Config{}, func(execCtx *gent.ExecutionContext) {
+				records, err := executeTestCode(wrapper, execCtx, code, testFormat())
+				if !assert.NoError(t, err) {
+					return
+				}
+				outer := records[0]
+				bytes, omissions := 0, 0
+				var data []any
+				for _, part := range outer.Response().Parts() {
+					switch value := part.(type) {
+					case gent.BinaryContent:
+						bytes++
+						assert.Equal(t, []byte("%PDF-saved"), value.Data)
+					case gent.DataContent:
+						data = append(data, value.Value())
+					case gent.TextContent:
+						if value.Text == gent.DefaultSteeringMessages().PTCBytesOmitted+
+							" MIME type: application/pdf." {
+							omissions++
+						}
 					}
 				}
-			}
-			assert.Equal(t, test.expected, expected{bytes, omissions})
-			assert.Equal(t, []any{map[string]any{"id": "O1"}}, data)
-			innerCount := 0
-			for _, event := range ctx.Events() {
-				after, ok := event.(*gent.AfterToolCallEvent)
-				if !ok || after.ToolName != "receipt" {
-					continue
+				assert.Equal(t, test.expected, expected{bytes, omissions})
+				assert.Equal(t, []any{map[string]any{"id": "O1"}}, data)
+				innerCount := 0
+				for _, event := range toolEvents(t, execCtx) {
+					after, ok := event.Payload.(*gent.AfterToolCallEvent)
+					if !ok || after.ToolName != "receipt" {
+						continue
+					}
+					innerCount++
+					record := after.Output.(*gent.ToolCallRecord)
+					assert.Equal(t, gent.PDFPart([]byte("%PDF-saved")), record.Response().Parts()[1])
+					assert.Equal(t, gent.TextPart("Check the receipt."), record.Response().Parts()[2])
 				}
-				innerCount++
-				record := after.Output.(*gent.ToolCallRecord)
-				assert.Equal(t, gent.PDFPart([]byte("%PDF-saved")), record.Response().Parts()[1])
-				assert.Equal(t, gent.TextPart("Check the receipt."), record.Response().Parts()[2])
-			}
-			assert.Equal(t, 1, innerCount)
-			assert.Equal(t, gent.TextPart("<output>\nCode executed successfully.\n</output>"),
-				outer.Response().Parts()[len(outer.Response().Parts())-1])
+				assert.Equal(t, 1, innerCount)
+				assert.Equal(t, gent.TextPart("<output>\nCode executed successfully.\n</output>"),
+					outer.Response().Parts()[len(outer.Response().Parts())-1])
+			})
 		})
 	}
 }
 
 func TestProgramErrorGuidanceIsAutomatic(t *testing.T) {
-	ctx := gent.NewExecutionContext(context.Background(), "script", gent.NewBasicLoopData(nil),
-		gent.WithSteeringMessages(gent.SteeringMessages{ToolError: "SAFE ERROR"}))
-	defer ctx.Release()
+	config := &gent.Config{SteeringMessages: &gent.SteeringMessages{ToolError: "SAFE ERROR"}}
 	chain := New().RegisterTool(gent.DefineTool("fail", func(context.Context, struct{}) (
 		*gent.ToolExecutionResponse, error,
 	) {
 		return &gent.ToolExecutionResponse{Status: gent.ToolExecuted,
 			Parts: []gent.ContentPart{gent.TextPart("PRIVATE RETURN")}}, errors.New("PRIVATE ERROR")
 	}).MustBuild())
-	records, err := executeTestCode(NewJsToolChainWrapper(chain), ctx,
-		`const r=tool.call({tool:"fail",args:{}});console.log(r.kind,r.executionStatus);`, testFormat())
-	assert.NoError(t, err)
-	parts := records[0].Response().Parts()
-	assert.Equal(t, []gent.ContentPart{gent.TextPart("SAFE ERROR"),
-		gent.TextPart("<output>\ncall_error undefined\n</output>")}, parts[1:])
-	assert.Equal(t, int64(1), ctx.Stats().GetCounter(gent.SCToolCallsErrorTotal))
+	wrapper := NewJsToolChainWrapper(chain)
+	runToolScenario(t, wrapper, config, func(execCtx *gent.ExecutionContext) {
+		records, err := executeTestCode(wrapper, execCtx,
+			`const r=tool.call({tool:"fail",args:{}});console.log(r.kind,r.executionStatus);`, testFormat())
+		assert.NoError(t, err)
+		parts := records[0].Response().Parts()
+		assert.Equal(t, []gent.ContentPart{gent.TextPart("SAFE ERROR"),
+			gent.TextPart("<output>\ncall_error undefined\n</output>")}, parts[1:])
+		assert.Equal(t, int64(1), execCtx.Stats().GetCounter(gent.SCToolCallsErrorTotal))
+	})
 }
 
 func TestProgramPrevalidationAndRuntimeCorrection(t *testing.T) {
@@ -126,8 +127,6 @@ func TestProgramPrevalidationAndRuntimeCorrection(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := newExecCtx()
-			defer ctx.Release()
 			calls := 0
 			tool := gent.DefineTool("read", func(context.Context, validationInput) (
 				*gent.ToolExecutionResponse, error,
@@ -135,21 +134,22 @@ func TestProgramPrevalidationAndRuntimeCorrection(t *testing.T) {
 				calls++
 				return capturedToolResponse("read", nil)
 			}).MustBuild()
-			records, err := executeTestCode(NewJsToolChainWrapper(New().RegisterTool(tool)), ctx,
-				test.input.code, testFormat())
-			assert.NoError(t, err)
-			assert.Equal(t, test.expected, expected{calls, records[0].Execution().Status})
-			// Both paths use the same complete schema correction core.
-			var correction string
-			if test.input.prevalidation {
-				correction = records[0].Execution().Instructions
-			} else {
-				for _, event := range ctx.Events() {
-					if after, ok := event.(*gent.AfterToolCallEvent); ok && after.ToolName == "read" {
-						correction = after.Output.(*gent.ToolCallRecord).Execution().Instructions
+			wrapper := NewJsToolChainWrapper(New().RegisterTool(tool))
+			runToolScenario(t, wrapper, &gent.Config{}, func(execCtx *gent.ExecutionContext) {
+				records, err := executeTestCode(wrapper, execCtx, test.input.code, testFormat())
+				assert.NoError(t, err)
+				assert.Equal(t, test.expected, expected{calls, records[0].Execution().Status})
+				// Both paths use the same complete schema correction core.
+				var correction string
+				if test.input.prevalidation {
+					correction = records[0].Execution().Instructions
+				} else {
+					for _, event := range toolEvents(t, execCtx) {
+						if after, ok := event.Payload.(*gent.AfterToolCallEvent); ok && after.ToolName == "read" {
+							correction = after.Output.(*gent.ToolCallRecord).Execution().Instructions
+						}
 					}
-				}
-				expectedSchema := `{
+					expectedSchema := `{
   "additionalProperties": false,
   "properties": {
     "id": {
@@ -161,26 +161,27 @@ func TestProgramPrevalidationAndRuntimeCorrection(t *testing.T) {
   ],
   "type": "object"
 }`
-				assert.Equal(t, "Invalid arguments for tool \"read\".\nargs.id: expected string.\n"+
-					"Expected input schema:\n"+expectedSchema, correction)
-			}
-			assert.NotEmpty(t, correction)
+					assert.Equal(t, "Invalid arguments for tool \"read\".\nargs.id: expected string.\n"+
+						"Expected input schema:\n"+expectedSchema, correction)
+				}
+				assert.NotEmpty(t, correction)
+			})
 		})
 	}
 }
 
 func TestProgramTimeoutAndSuccessfulReset(t *testing.T) {
-	ctx := newExecCtx()
-	defer ctx.Release()
 	wrapper := NewJsToolChainWrapper(New()).WithCodeTimeout(time.Millisecond)
-	records, err := executeTestCode(wrapper, ctx, `while(true){}`, testFormat())
-	assert.NoError(t, err)
-	assert.Equal(t, gent.ToolExecuted, records[0].Execution().Status)
-	assert.Equal(t, int64(1), ctx.Stats().GetCounter(gent.SCCodeExecutionsError))
-	assert.Equal(t, float64(1), ctx.Stats().GetGauge(gent.SGCodeExecutionsErrorConsecutive))
-	wrapper.WithCodeTimeout(time.Second)
-	records, err = executeTestCode(wrapper, ctx, `console.log("done");`, testFormat())
-	assert.NoError(t, err)
-	assert.Equal(t, "<output>\ndone\n</output>", recordText(records[0]))
-	assert.Equal(t, float64(0), ctx.Stats().GetGauge(gent.SGCodeExecutionsErrorConsecutive))
+	runToolScenario(t, wrapper, &gent.Config{}, func(execCtx *gent.ExecutionContext) {
+		records, err := executeTestCode(wrapper, execCtx, `while(true){}`, testFormat())
+		assert.NoError(t, err)
+		assert.Equal(t, gent.ToolExecuted, records[0].Execution().Status)
+		assert.Equal(t, int64(1), execCtx.Stats().GetCounter(gent.SCCodeExecutionsError))
+		assert.Equal(t, float64(1), execCtx.Stats().GetGauge(gent.SGCodeExecutionsErrorConsecutive))
+		wrapper.WithCodeTimeout(time.Second)
+		records, err = executeTestCode(wrapper, execCtx, `console.log("done");`, testFormat())
+		assert.NoError(t, err)
+		assert.Equal(t, "<output>\ndone\n</output>", recordText(records[0]))
+		assert.Equal(t, float64(0), execCtx.Stats().GetGauge(gent.SGCodeExecutionsErrorConsecutive))
+	})
 }

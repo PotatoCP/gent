@@ -31,7 +31,7 @@ func (c *SearchChain) RegisterDeprecatedTool(tool any) *SearchChain {
 
 // SearchDefinition returns current discoverable definitions. Historical replies remain evidence,
 // not new runtime bindings. Configure registration before concurrent calls.
-func (c *SearchChain) SearchDefinition(ctx *gent.ExecutionContext) (
+func (c *SearchChain) SearchDefinition(execCtx *gent.ExecutionContext) (
 	*gent.ToolSearchDefinition, error,
 ) {
 	c.mu.RLock()
@@ -76,8 +76,8 @@ func (c *SearchChain) searchDefinition() *gent.ToolDefinition {
 	}}
 }
 
-func (c *SearchChain) NativeTools(ctx *gent.ExecutionContext) ([]*gent.ToolDefinition, error) {
-	definition, err := c.SearchDefinition(ctx)
+func (c *SearchChain) NativeTools(execCtx *gent.ExecutionContext) ([]*gent.ToolDefinition, error) {
+	definition, err := c.SearchDefinition(execCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -98,7 +98,7 @@ func (c *SearchChain) NativeTools(ctx *gent.ExecutionContext) ([]*gent.ToolDefin
 
 // Search performs a repeatable local catalog read. Accepted replies stay in history; an unsaved
 // search can be repeated. This permission never applies to domain tool calls or PTC programs.
-func (c *SearchChain) Search(ctx *gent.ExecutionContext,
+func (c *SearchChain) Search(execCtx *gent.ExecutionContext,
 	request *gent.ToolSearchRequest,
 ) (*gent.ToolSearchResult, error) {
 	c.mu.RLock()
@@ -112,7 +112,7 @@ func (c *SearchChain) Search(ctx *gent.ExecutionContext,
 			Instructions: "query_type must name an available search engine."}, nil
 	}
 	started := time.Now()
-	result, err := engine.Search(ctx.Context(), request.Query)
+	result, err := engine.Search(execCtx.Context(), request.Query)
 	if err == nil && result == nil {
 		err = errors.New("search engine returned no result")
 	}
@@ -123,11 +123,11 @@ func (c *SearchChain) Search(ctx *gent.ExecutionContext,
 		Flow: "shared_local_search", Duration: time.Since(started)}
 	if err != nil {
 		trace.Error = gent.SaveError(err)
-		ctx.RecordToolSearch(trace)
+		execCtx.RecordToolSearch(trace)
 		return nil, err
 	}
 	if result.Status != gent.ToolExecuted {
-		ctx.RecordToolSearch(trace)
+		execCtx.RecordToolSearch(trace)
 		return result, nil
 	}
 	var names []string
@@ -146,7 +146,7 @@ func (c *SearchChain) Search(ctx *gent.ExecutionContext,
 	}
 	selected := names[start:min(start+pageSize, len(names))]
 	trace.Names = selected
-	ctx.RecordToolSearch(trace)
+	execCtx.RecordToolSearch(trace)
 	instructions := result.Instructions
 	if len(selected) == 0 {
 		instructions = joinText(instructions, c.noResultsMessage)
@@ -157,7 +157,7 @@ func (c *SearchChain) Search(ctx *gent.ExecutionContext,
 	}, nil
 }
 
-func (c *SearchChain) executeParsed(ctx *gent.ExecutionContext, calls []*parsedCall,
+func (c *SearchChain) executeParsed(execCtx *gent.ExecutionContext, calls []*parsedCall,
 	format gent.TextFormat,
 ) ([]*gent.ToolCallRecord, error) {
 	registry := &Registry{tools: c.tools, toolMap: c.toolMap, schemaMap: c.schemaMap}
@@ -166,14 +166,23 @@ func (c *SearchChain) executeParsed(ctx *gent.ExecutionContext, calls []*parsedC
 		selected := registry
 		if call.Name == searchToolName || call.Name == executeToolName {
 			selected = New()
-			selected.RegisterTool(c.localSearchTool(ctx, func(names []string) { call.discovered = names }))
+			selected.RegisterTool(
+				c.localSearchTool(
+					execCtx,
+					func(
+						names []string,
+					) {
+						call.discovered = names
+					},
+				),
+			)
 			selected.RegisterTool(gent.DefineTool(executeToolName,
 				func(context.Context, gent.ToolExecuteRequest) (*gent.ToolExecutionResponse, error) {
 					return &gent.ToolExecutionResponse{Status: gent.ToolInvalidArguments,
 						Instructions: "args must be an object and tool must select an available target."}, nil
 				}).ParameterSchema(sharedExecutionSchema).MustBuild())
 		}
-		result, err := selected.executeCall(ctx, call)
+		result, err := selected.executeCall(execCtx, call)
 		if err != nil {
 			return records, err
 		}
@@ -182,13 +191,13 @@ func (c *SearchChain) executeParsed(ctx *gent.ExecutionContext, calls []*parsedC
 	return records, nil
 }
 
-func (c *SearchChain) localSearchTool(ctx *gent.ExecutionContext,
+func (c *SearchChain) localSearchTool(execCtx *gent.ExecutionContext,
 	discovered func([]string),
 ) gent.Tool[gent.ToolSearchRequest] {
 	return gent.DefineTool(searchToolName, func(_ context.Context, request gent.ToolSearchRequest) (
 		*gent.ToolExecutionResponse, error,
 	) {
-		result, err := c.Search(ctx, &request)
+		result, err := c.Search(execCtx, &request)
 		if err != nil {
 			return nil, err
 		}

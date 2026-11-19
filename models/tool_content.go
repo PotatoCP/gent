@@ -66,6 +66,18 @@ func prepareMediaParts(ctx context.Context, client *http.Client, parts []gent.Co
 		var diagnostic error
 		location := fmt.Sprintf("%s[%d]", path, i)
 		switch value := partValue(part).(type) {
+		case *gent.AssistantContent:
+			nested, updated, err := prepareMediaParts(ctx, client, value.Content, endpoint,
+				role, steering, location+".content")
+			if err != nil {
+				return nil, false, err
+			}
+			if updated {
+				item := *value
+				item.Content = nested
+				part, partChanged = &item, true
+			}
+
 		case *gent.ModelToolCallResponse:
 			nested, updated, err := prepareMediaParts(ctx, client, value.Parts(), endpoint,
 				gent.ChatMessageTypeTool, steering, location+".parts")

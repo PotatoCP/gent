@@ -1,16 +1,17 @@
-# Pending checkpoint decisions
+# Historical checkpoint discussion
 
-Checkpoint behavior is implemented. Its contracts are documented in [history and
-storage](docs/history.md) and [live delivery](docs/native-tools.md). This file keeps only the
-remaining decisions and the context needed to review them.
+This document records the earlier checkpoint design. Its API names, open questions, and proposed
+contracts are historical evidence. The locked multi-turn contract in
+[req-multi-turn.md](req-multi-turn.md) supersedes it. Use [history and storage](docs/content/storage/history.md) and
+[live delivery](docs/content/observe/streaming.md) for current implemented interfaces.
 
-For child execution scope, follow D116 in [req-multi-turn.md](req-multi-turn.md). The current
-refactor removes that feature. Its future replacement must use the same root recovery process.
+The current refactor removes child contexts under D116. Its future replacement must use the same
+root recovery process and guarantees.
 
 The discussion started on 2026-10-29. On 2026-10-30, the user postponed the interface field-name
-review. The API still uses `Run`, `EventNumber`, `RunSchemaVersion`, and a string for
-`RecordedEvent.Type`. The naming and typed-constant decisions below are not implemented. Open
-proposals remain separate from agreed decisions.
+review. At that time, the API used `Run`, `EventNumber`, `RunSchemaVersion`, and a string for
+`RecordedEvent.Type`. The naming and typed-constant decisions below were not implemented then.
+Later decisions and implementation are documented in the current requirements and guides.
 
 ## Deferred interface review
 
@@ -106,7 +107,7 @@ The current producer categories are:
 
 | Group | Values |
 | --- | --- |
-| Execution | `execution_started`, `execution_finished`, `execution_content` |
+| Execution | `execution_started`, `execution_finished`, `accepted_answer` |
 | Iteration | `iteration_started`, `iteration_finished` |
 | Model | `model_call_started`, `model_stream_chunk`, `model_call_finished` |
 | Tool | `tool_call_started`, `tool_call_finished` |
@@ -151,7 +152,7 @@ Keep the three current meanings clear:
 - `RecordedEvent.Payload.Type` is a codec identifier that selects how to decode the stored value.
 
 The record category cannot always be derived from the payload's Go type: both `model_stream_chunk`
-and `execution_content` can contain a `StreamChunk`. Some records have no encoded event payload.
+and `accepted_answer` can contain a `StreamChunk`. Some records have no encoded event payload.
 Conversely, `EventName` is empty for some records that have a category.
 
 Two separate category/name fields are not a fundamental recovery requirement. A future design

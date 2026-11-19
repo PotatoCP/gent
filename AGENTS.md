@@ -106,8 +106,8 @@
   when implemented. Custom Next restarts at its entry point on restored data; its author owns safe
   repeated local work and new operations. Gent does not require custom step enums. Preserve accepted
   managed results and recovery preparation for the same operation.
-- Teach the Quick Start with short examples that show inputs, calls, and results. Keep setup and
-  unrelated application code outside each example. Complete Go files are optional references.
+- Teach the documentation site with short examples that show inputs, calls, and results. Keep setup
+  and unrelated application code outside each example. Complete Go files are optional references.
 - Keep public interfaces simple, intuitive, elegant, and quick to understand.
 
 Keys to controlling complexity:
@@ -140,135 +140,112 @@ Apply these constraints in priority order:
 <codebase_architecture>
 # Gent - Go LLM Agent Framework
 
-## Overview
-Gent is a flexible framework for building LLM agents in Go. It provides core interfaces
-for custom agent patterns and a few standard implementations that you can use in production. The
-goal is to make it easy to write and experiment with custom agent loops.
+Gent provides explicit interfaces for custom Go agent loops and standard implementations. One
+ExecutionContext represents one conversation. NewTurn adds user input to the same RunId.
 
-## File Organization
-- **Root `.go` files**: Interface/type definitions (e.g., `agent.go`, `model.go`)
-- **Subdirectories**: Implementations (e.g., `executor/`, `agents/react/`, `models/`)
+## File organization
 
-## High-Level Features & Responsibilities
+- Root `.go` files expose public interfaces, type aliases, and constructors.
+- `internal/core/` implements shared state and runtime services behind those public aliases.
+- `executor/` exposes the typed Runner wrapper without exposing the internal runner type.
+- `agents/react/`, `models/`, `toolchain/`, `output/`, and `compaction/` implement the interfaces.
+- `internal/tt/` supplies test helpers; `internal/multiturntest/` proves recovery across savepoints.
 
-### Runner + Loop[T]
-- Interface: `agent.go` (`Loop[T]`, `LoopData`)
-- Implementation: `executor/executor.go` (`Runner[T]`)
-- Runner manages lifecycle, limits, checkpoints, and resource release
-- `Loop[T].Next` returns `LAContinue` or `LATerminate`; `Output()` defines the accepted type
-- `Execute` and `Resume` return `(T, *ExecutionResult, error)`
-- ReAct: `agents/react/` reads native completion, runs tools, or processes a final candidate
-- Accepted output is saved before publication; terminal restore does not run processing again
+## Runner and Loop
 
-### LoopData and Task
-- `Task.Messages` contains `[]*ModelMessage`; each message carries ordered `[]ContentPart`
-- Default examples use a caller-authored system message followed by a user message
-- `NewTask(parts...)` supplies a convenient single user message
-- ExecutionContext freezes the Task and owns history and working context
-- The Task stays outside compaction; a request hook cannot change its saved content
-- BasicLoopData is the default; embed it for additional application fields
-- Scratchpad: ordered HistoryEntry IDs used in the next model call
-- History: append-only originals, summaries, compaction decisions, and context transitions
-- UpdateHistory queues StateChangeEvent; checkpoints accept evidence atomically
-- See `docs/history.md` for storage and continuation contracts
+- `Loop[T].Next` returns LAContinue or LATerminate; `Output()` defines the accepted type.
+- `executor.NewRunner(loop, config)` binds common services. Models and loop policy stay on Loop.
+- `NewExecutionContext(ctx, name)` creates a fresh conversation; `Restore(ctx, state)` restores
+  local state.
+- NewTurn and Continue return `(T, *ExecutionResult, error)` and use fresh attempt resources.
+- Status is Finished, Paused, Busy, or NoActiveTurn. Stop and limits pause unfinished tasks.
+- Stop requests a recoverable pause. Go context cancellation interrupts the worker. Release disposes
+  of the handle and joins workers; it does not complete the task or make a terminal save.
+- After clean completion or pause, reuse the handle. After interruption or error, restore accepted
+  state. GetLastTurnResult returns the last completed result without execution or validation.
+- Custom Next restarts at entry on restored LoopData. Its author owns safe repeated local work and
+  new operation identities. Gent reuses accepted managed results for the same operation.
+- ReAct saves its model response and tool-plan progress internally; no custom step enum is required.
 
-### Model
-- Interface: `model.go`; native implementations: `models/`
-- Supported: OpenAI, Anthropic, Gemini, xAI, DeepSeek, vLLM, Ollama, OpenRouter, llama.cpp, SGLang
-- OpenAI uses Responses. Each adapter owns its native request and response mapping
-- Use native API controls when the endpoint can enforce the declared contract
-- Unsupported media uses configured steering; adapters do not transcode input files
-- Preserve native completion, refusal, tool IDs, and opaque continuation items
-- Managed calls freeze and number live chunks before delivery; grouped saves persist them later
-- Request and response saves block dependent model, tool, and output processing
-- Adapters return a Stream and Complete only after producer cleanup, including cancellation
-- Content and MetaContent retain ordered text and binary parts; only accepted output is Content
-- See `docs/models.md` for endpoint-specific support and limitations
+## Task, custom data, history, and state
 
-### ToolChain
-- Interface: `toolchain.go` (native calls only)
-- Implementations: Registry, SearchChain, JsToolChainWrapper in `toolchain/`
-- NativeTools selects definitions; PrepareCalls saves a plan; ExecuteNext executes one step
-- Validates JSON arguments, converts typed input, runs hooks, and saves results
-- SharedLocalSearch advertises search, shared execution, and pins; catalogs can change on resume
-- PTC exposes run_code and saves inner calls separately from the outer plan
-- Tool.Recover supplies Completed, NotStarted, or Unresolved evidence; the model decides next actions
-- Interrupted PTC returns partial evidence and guidance without restarting the script
-- SIDE EFFECT: BeforeToolCallEvent increments tool-call counters; AfterToolCallEvent tracks errors
-- SIDE EFFECT: Fresh Executed/Blocked reset call-error gauges; invalid input and recovery do not
+- Task.Instructions supplies system prefix messages. Nil keeps the prefix; a non-nil slice replaces
+  it, including an empty slice that clears it. Task.Messages holds conversation input with at least
+  one user message. NewTask(parts...) creates one user message.
+- Task messages enter compactable history, including the original prompt. Instructions stay outside
+  compaction. Hooks cannot change the saved task; they can change effective request input.
+- LoopData embeds CheckpointState and TurnResetter. BasicLoopData is an empty default
+  implementation.
+- Config.NewLoopData creates an empty instance. Restore fills its saved fields; NewTurn keeps it and
+  resets only declared turn fields. ResetTurn must perform local assignment only.
+- History keeps stable absolute identities and saved origin. UpdateHistory proposes appended records
+  and a complete ordered selection. Approved saves accept the state and evidence together.
+- Private RunState holds compact execution state. RunView reconstructs the complete accepted
+  archive.
+  A compact RunStateSnapshot cannot replace earlier batches for archive reconstruction.
+- RunState capture is optional replay acceleration. Every SaveBatch carries complete custom data and
+  control state. The Recorder capture callback returns a stable value for that exact batch.
+- CodecRegistry validates format, integrity, and typed data. Register codecs before decoding. Apply,
+  UnmarshalRunState, and Restore report expected outcomes with typed results.
+- See `docs/content/storage/history.md` for archive contracts and links to savepoints, recovery,
+  retention, and ownership.
 
-### Output[T]
-- Interface: `output.go`; implementations: `output/`
-- Built-ins: TextOutput, ImageOutput, JsonOutput[T], SchemaOutput[T]
-- Instructions() supplies optional prompt text; only the caller decides to include it
-- Configure requests native controls; Process validates and processes ordered content parts
-- Always run local validation, then the optional OutputCustomValidator callback
-- OutputResult exposes Accepted, Value, Content, and Steering; error means operation failure
-- Retain a rejected candidate and its steering together through the next main model call
-- Corrections use ordinary run limits; they have no separate retry counter
-- OutputValidationEvent distinguishes local, custom, and overall processing decisions
-- See `docs/output.md` for typed values, images, validation, and saved restoration
+## Model and assistant content
 
-### TextFormat
-- Interface: `format.go`; implementations: `format/xml.go`, `format/markdown.go`
-- FormatSections renders tool-result text; it does not parse answers or build agent prompts
+- Model receives standard context.Context and resolved ModelCallRequest; native adapters are in
+  `models/`. Managed calls go through ExecutionContext.GenerateContentStream.
+- OpenAI uses Responses. Each adapter owns its native request and response mapping.
+- Use native controls where supported. Unsupported media uses configured guidance; no transcoding.
+- Preserve native completion, refusal, tool IDs, phases, signatures, and opaque continuation items.
+- ModelCallResponse.Parts preserves ordered content and native tool requests. AssistantContent
+  classifies each logical item; known candidate output is FinalAnswerCandidate until accepted.
+- StreamChunk.Content uses the same item representation. Live chunks are frozen but provisional.
+- Model calls do not add independent request/response savepoints. The next approved save accepts
+  their evidence; interruption can repeat unsaved model work and lose unsaved usage accounting.
+- Stream producers call Complete only after cleanup, including cancellation. Response waits for it.
+- accepted_answer publishes complete FinalAnswer content only after the terminal save. Source IDs
+  link processed output to the original model candidates; the archive retains both.
+- See `docs/content/agent/models.md`, `docs/content/agent/tools.md`, and
+  `docs/content/agent/outputs.md` for provider and content details.
 
-### Stats + Limits
-- Defined in: `stats.go`, `stats_keys.go`, `limit.go`
-- `StatKey` type with `Self()` and `IsSelf()` methods
-- SC prefix = Counter (monotonic, always propagated, has $self: counterpart)
-- SG prefix = Gauge (can go up/down, never propagated, local-only)
-- $self:-prefixed keys track per-context only (no children)
-- Counters: IncrCounter only (no Set/Reset, panics on negative)
-- Gauges: IncrGauge, SetGauge, ResetGauge (used for consecutive errors)
-- Limits: checked on EVERY stats update, cancels context when exceeded
-- SIDE EFFECT: LimitExceededEvent published, then context.CancelCause() called
+## ToolChain and Output
 
-### ExecutionContext
-- Defined in: `context.go`
-- Central hub: holds LoopData, Stats, Events, Limits, streaming subscriptions
-- SpawnChild() creates nested context with shared stats propagation
-- PublishXXX() runs mutable hooks and queues frozen evidence; stats updates enforce limits
-- FlushProgress/CommitCheckpoint accept evidence before committed observers see it
-- SubscribeEvents and trace.Sequencer.Follow receive live evidence before its grouped save
+- Registry, SearchChain, and JsToolChainWrapper implement native ToolChain in `toolchain/`.
+- NativeTools selects definitions; PrepareCalls proposes a plan; ExecuteNext runs a managed step.
+- Save effective validated input before a tool starts; accept result, prepared reply, and plan
+  progress together afterward. Fresh Executed/Blocked reset call-error gauges; invalid input and
+  recovery do not. Publishing call events updates the corresponding statistics.
+- Tool.Recover reports Completed, NotStarted, or Unresolved. It inspects the original effect; it
+  does not repeat it. The model decides later actions. Accepted recovery preparation is reused.
+- SharedLocalSearch advertises search, shared execution, and pins. Current catalogs can change.
+- PTC exposes run_code and saves inner effects separately. Interrupted scripts return partial
+  evidence without restarting the script. Parallel plans require the chain's explicit support.
+- TextOutput, ImageOutput, JsonOutput[T], and SchemaOutput[T] implement Output[T]. Instructions()
+  supplies optional caller-authored guidance. Configure sets native controls; Process checks values.
+- Always run local validation, then the optional custom validator. OutputResult carries Accepted,
+  Value, Content, and Steering. Unexpected errors follow the Propagate, Fix, Restore, Continue rule.
+- Keep a rejected candidate and correction selected through the next main model call. Corrections
+  use normal limits. Terminal restoration reads accepted output without processing it again.
+- TextFormat renders tool-result sections; it does not parse answers or create agent prompts.
 
-## Data Flow (ReAct Agent)
-1. Runner.Execute configures a typed output contract on the caller's ExecutionContext
-2. Each iteration builds a request from the frozen Task and active history
-3. Native completion selects tool execution, continuation, refusal, failure, or output processing
-4. Tool calls use PrepareCalls and ExecuteNext; results remain in structured history
-5. Rejected output and steering stay provisional; accepted output saves Value and Content together
-6. Limits cancel execution with their own termination reason
-7. A successful terminal save permits typed return and accepted Content publication
+## Statistics, limits, subscribers, and hooks
 
-## Stats Keys (gent: prefix)
-### Counters (SC*, propagated, $self: counterpart)
-- SCIterations (PROTECTED from user IncrCounter)
-- SCInputTokens, SCInputTokensFor (+ model)
-- SCOutputTokens, SCOutputTokensFor (+ model)
-- SCTotalTokens, SCTotalTokensFor (+ model)
-- SCToolCalls, SCToolCallsFor (+ tool)
-- SCToolCallsErrorTotal, SCToolCallsErrorFor (+ tool)
-- SCToolchainParseErrorTotal
-- SCOutputRejectedTotal, SCOutputLocalRejectedTotal, SCOutputCustomRejectedTotal
-- SCOutputCustomRejectedBy (+ named custom validator)
-
-### Gauges (SG*, local-only, never propagated)
-- SGOutputRejectedConsecutive, SGOutputLocalRejectedConsecutive, SGOutputCustomRejectedConsecutive
-- SGToolchainParseErrorConsecutive
-- SGToolCallsErrorConsecutive
-- SGToolCallsErrorConsecutiveFor (+ tool)
-- SGScratchpadLength
-- SGInputTokensLastIteration, SGInputTokensLastIterationFor (+ model)
-- SGOutputTokensLastIteration, SGOutputTokensLastIterationFor (+ model)
-- SGTotalTokensLastIteration, SGTotalTokensLastIterationFor (+ model)
-
-## Limits
-- LimitExactKey - match specific key
-- LimitKeyPrefix - match any key with prefix
-- Use Key.Self() for per-context limits (excludes children)
-- DefaultLimits uses SCIterations.Self() for per-context iteration limit
-- Runner has default limits
+- GetCounter is cumulative; GetTurnCounter subtracts the accepted turn baseline. Counters increase
+  only. NewTurn resets all gauges and rebuilds context-size gauges from retained state.
+- Limit.Scope defaults to LimitTurn. LimitRun measures cumulative counters; gauges remain
+  turn-scoped.
+  Exact iteration limits use >= at completed iteration boundaries; other rules use > per update.
+- Config.Limits has no hidden default. DefaultLimits returns an optional caller-selected preset.
+  Check saved usage before dependent work; Continue does not reset an exhausted allowance.
+- Child contexts, hierarchy propagation, and self-prefixed counters are removed under D116. A future
+  subagent feature must meet the root recovery and ease-of-use contract above.
+- Config.Subscribers registers bounded, ordered Accepted or explicit Live delivery. Payloads are
+  concrete read-only values. A stopped subscriber reports its cursor; it does not fail execution.
+- Config.Hooks supports only BeforeModelCall and BeforeToolCall. They run synchronously before input
+  is frozen. A failure prevents the dependent operation and propagates to the application.
+- Trace is a display projection, not recovery storage. Reconnect against the accepted archive and
+  reconcile provisional Live positions. See `docs/content/observe/subscribers.md` for delivery failure
+  handling.
 </codebase_architecture>
 
 <testing_standards>

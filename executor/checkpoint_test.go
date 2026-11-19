@@ -1,55 +1,52 @@
 package executor_test
 
-import genttest "github.com/rickchristie/gent/internal/tt"
-
 import (
 	"context"
 	"fmt"
-	"github.com/rickchristie/gent/output"
 	"testing"
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/executor"
+	"github.com/rickchristie/gent/output"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type resumeLoop struct {
 	configured int
 	calls      int
 	step       int
-	task       string
 }
 
-func (loop *resumeLoop) ConfigureExecution(ctx *gent.ExecutionContext) error {
+func (loop *resumeLoop) ConfigureExecution(*gent.ExecutionContext) error {
 	loop.configured++
 	loop.step = 0
-	loop.task = ctx.Data().GetTask().Messages[0].Parts[0].(gent.TextContent).Text
 	return nil
 }
 
-func (loop *resumeLoop) Next(ctx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+func (loop *resumeLoop) Next(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
 	loop.calls++
 	loop.step++
 	if loop.step == 1 {
 		return &gent.AgentLoopResult{Action: gent.LAContinue}, nil
 	}
-	text := fmt.Sprintf("%s:%d", loop.task, loop.step)
-	return &gent.AgentLoopResult{TerminationReason: gent.TerminationSuccess, Action: gent.LATerminate,
-		Result: []gent.ContentPart{
-			gent.TextContent{Text: text},
-		},
-		Value: genttest.Value(gent.ContentText([]gent.ContentPart{
-			gent.TextContent{Text: text},
-		}))}, nil
+	task, err := execCtx.Task()
+	if err != nil {
+		return nil, err
+	}
+	return acceptTestOutput(execCtx, fmt.Sprintf("%s:%d", gent.ContentText(task.Messages[0].Parts),
+		loop.step))
 }
 
-func (*resumeLoop) CheckpointType() string { return "test/resume-loop" }
-func (*resumeLoop) CheckpointVersion() int { return 1 }
-func (loop *resumeLoop) SaveCheckpointState() (gent.EncodedValue, error) {
-	return gent.NewCodecRegistry().Encode(loop.step)
+func (*resumeLoop) Output() gent.Output[string] { return output.NewTextOutput() }
+func (*resumeLoop) CheckpointType() string      { return "test/resume-loop" }
+func (*resumeLoop) CheckpointVersion() int      { return 1 }
+func (loop *resumeLoop) SaveCheckpointState() (*gent.EncodedValue, error) {
+	value, err := gent.NewCodecRegistry().Encode(loop.step)
+	return &value, err
 }
-func (loop *resumeLoop) RestoreCheckpointState(saved gent.EncodedValue) error {
-	value, err := gent.NewCodecRegistry().Decode(saved)
+func (loop *resumeLoop) RestoreCheckpointState(saved *gent.EncodedValue) error {
+	value, err := gent.NewCodecRegistry().Decode(*saved)
 	if err != nil {
 		return err
 	}
@@ -61,112 +58,93 @@ func (loop *resumeLoop) RestoreCheckpointState(saved gent.EncodedValue) error {
 	return nil
 }
 
-type resumeRecorder struct {
-	view   gent.RunView
-	stop   gent.ExecutionPhase
-	cancel context.CancelFunc
-}
-
-func (recorder *resumeRecorder) Save(_ context.Context, batch *gent.SaveBatch) error {
-	view, err := gent.ApplyBatch(recorder.view, batch)
-	if err != nil {
-		return err
-	}
-	recorder.view = view
-	if batch.Checkpoint != nil && batch.Checkpoint.Phase == recorder.stop {
-		recorder.cancel()
-	}
-	return nil
-}
-
-func TestExecutorResume_ConfiguresBeforeRestoringState(t *testing.T) {
+func TestRestoreConfiguresBeforeRestoringState(t *testing.T) {
 	type input struct {
-		phase         gent.ExecutionPhase
-		version       string
-		manualRestore bool
+		phase     gent.ExecutionPhase
+		limits    []gent.Limit
+		batchOnly bool
 	}
-	type expected struct {
-		configured int
-		calls      int
-		step       int
-		result     *gent.ExecutionResult
-		err        error
-	}
+	type expected struct{ restoredStep, calls int }
 	type testCase struct {
 		name     string
 		input    input
 		expected expected
 	}
-	result := &gent.ExecutionResult{TerminationReason: gent.TerminationSuccess,
-		Output: []gent.ContentPart{gent.TextContent{Text: "original task:2"}}}
 	cases := []testCase{
-		{"continue custom state", input{gent.PhaseIterationCompleted, "v1", false},
-			expected{1, 1, 2, result, nil}},
-		{"reject changed configuration", input{gent.PhaseIterationCompleted, "v2", false},
-			expected{1, 0, 0, nil, gent.ErrIncompatibleCheckpoint}},
-		{"reuse terminal result after configuration check", input{gent.PhaseTerminal, "v1", false},
-			expected{1, 0, 0, result, nil}},
-		{"terminal rejects changed configuration", input{gent.PhaseTerminal, "v2", false},
-			expected{1, 0, 0, nil, gent.ErrIncompatibleCheckpoint}},
-		{"continue manually restored context", input{gent.PhaseIterationCompleted, "v1", true},
-			expected{1, 1, 2, result, nil}},
-		{"continue rejects changed executor", input{gent.PhaseIterationCompleted, "v2", true},
-			expected{1, 0, 1, nil, gent.ErrIncompatibleCheckpoint}},
+		{"initial", input{phase: gent.PhaseInitial}, expected{0, 2}},
+		{"before iteration", input{phase: gent.PhaseIterationReady}, expected{0, 2}},
+		{"completed iteration", input{phase: gent.PhaseIterationCompleted}, expected{1, 1}},
+		{"new limits", input{phase: gent.PhaseIterationCompleted, limits: []gent.Limit{
+			{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 20}}}, expected{1, 1}},
+		{"batch only", input{phase: gent.PhaseIterationCompleted, batchOnly: true}, expected{1, 1}},
+		{"terminal custom state", input{phase: gent.PhaseTerminal}, expected{2, 0}},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			worker, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			store := &resumeRecorder{view: gent.RunView{SchemaVersion: gent.RunSchemaVersion,
-				RunId: "resume-test"}, stop: test.input.phase, cancel: cancel}
-			original := gent.NewExecutionContext(worker, "root",
-				gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "original task"})),
-				gent.WithRunId("resume-test"), gent.WithRecorder(store))
-			_, _, err := executor.NewRunner(&resumeLoop{},
-				executor.Config{RecoveryVersion: "v1"}).Execute(original)
-			if test.input.phase == gent.PhaseTerminal {
-				assert.NoError(t, err)
-			} else {
-				assert.ErrorIs(t, err, context.Canceled)
-			}
-			registry := gent.NewCodecRegistry()
-			encoded, err := registry.Marshal(store.view)
-			if !assert.NoError(t, err) {
-				return
-			}
-			var saved gent.RunView
-			if !assert.NoError(t, registry.Unmarshal(encoded, &saved)) {
-				return
-			}
-			fresh := &resumeLoop{}
-			exec := executor.NewRunner(fresh,
-				executor.Config{RecoveryVersion: test.input.version})
-			var actual *gent.ExecutionResult
-			if test.input.manualRestore {
-				// Advanced callers prepare the actual context and bind fresh state components.
-				// Continue must validate this executor without repeating that initialization.
-				bindings := gent.RestoreBindings{Components: map[string]gent.CheckpointState{
-					"loop": fresh}, Configure: func(ctx *gent.ExecutionContext) error {
-					if err := fresh.ConfigureExecution(ctx); err != nil {
-						return err
-					}
-					return ctx.SetCompatibility(saved.Checkpoint.Compatibility)
-				}}
-				restored, restoreErr := gent.RestoreExecutionContext(context.Background(), saved, bindings)
-				if !assert.NoError(t, restoreErr) {
-					return
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				store := &executionRecorder{
+					codecs: gent.NewCodecRegistry(),
+					afterSave: func(
+						batch *gent.SaveBatch,
+					) {
+						if batch.Checkpoint.Phase == test.input.phase {
+							cancel()
+						}
+					},
 				}
-				_, actual, err = exec.Continue(restored)
-			} else {
-				_, actual, err = exec.Resume(context.Background(), saved, gent.RestoreBindings{})
-			}
-			assert.ErrorIs(t, err, test.expected.err)
-			assert.Equal(t, test.expected.result, actual)
-			assert.Equal(t, test.expected.configured, fresh.configured)
-			assert.Equal(t, test.expected.calls, fresh.calls)
-			assert.Equal(t, test.expected.step, fresh.step)
-		})
+				runner := executor.NewRunner[string](&resumeLoop{}, &gent.Config{Codecs: store.codecs,
+					Recorder: store})
+				original, err := runner.NewExecutionContext(ctx, "checkpoint")
+				require.NoError(t, err)
+				defer original.Release()
+				_, _, err = runner.NewTurn(original, gent.NewTask(gent.TextPart("original task")))
+				if test.input.phase == gent.PhaseTerminal {
+					assert.NoError(t, err)
+				} else {
+					assert.ErrorIs(t, err, context.Canceled)
+				}
+				codecs := gent.NewCodecRegistry()
+				state := store.latest(t, codecs)
+				if test.input.batchOnly {
+					state = gent.NewRunState(original.RunId())
+					for _, data := range store.batches {
+						var batch gent.SaveBatch
+						require.NoError(t, codecs.Unmarshal(data, &batch))
+						applied, err := state.Apply(&batch, codecs)
+						require.NoError(t, err)
+						require.Equal(t, gent.ApplyApplied, applied.Status)
+					}
+				}
+				loop := &resumeLoop{}
+				fresh := executor.NewRunner[string](
+					loop,
+					&gent.Config{
+						Codecs: codecs,
+						Limits: test.input.limits,
+					},
+				)
+				restored, err := fresh.Restore(context.Background(), state)
+				require.NoError(t, err)
+				require.Equal(t, gent.RestoreReady, restored.Status)
+				defer restored.Context.Release()
+				assert.Equal(t, &resumeLoop{configured: 1, step: test.expected.restoredStep}, loop)
+				var value string
+				var result *gent.ExecutionResult
+				if test.input.phase == gent.PhaseTerminal {
+					value, result, err = fresh.GetLastTurnResult(restored.Context)
+				} else {
+					value, result, err = fresh.Continue(restored.Context)
+				}
+				assert.NoError(t, err)
+				assert.Equal(t, "original task:2", value)
+				assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionFinished,
+					TurnId: original.TurnId(), TerminationReason: gent.TerminationSuccess,
+					Output: []gent.ContentPart{gent.TextPart("original task:2")}}, result)
+				assert.Equal(t, &resumeLoop{configured: 1, calls: test.expected.calls, step: 2}, loop)
+			},
+		)
 	}
 }
-
-func (*resumeLoop) Output() gent.Output[string] { return output.NewTextOutput() }

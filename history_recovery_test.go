@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +13,7 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/rickchristie/gent/trace"
 	"github.com/stretchr/testify/assert"
 )
@@ -26,31 +27,20 @@ type recoveryModel struct {
 	answer   bool
 }
 
-func (m *recoveryModel) GenerateContentStream(
-	_ context.Context, request *gent.ModelCallRequest,
+func (m *recoveryModel) GenerateContentStream(_ context.Context, request *gent.ModelCallRequest,
 ) (gent.Stream, error) {
 	m.requests = append(m.requests, request)
-	choice := &gent.ContentChoice{
-		Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-		CandidateContent: []gent.ContentPart{gent.TextContent{Text: "Policy P10 permits it."}},
-	}
+	choice := recoveryAnswerChoice("Policy P10 permits it.")
 	if !m.answer && len(m.requests) == 1 {
-		choice.CandidateContent = []gent.ContentPart{gent.TextContent{Text: "Read the policy."}}
-		for _, id := range []string{"policy-a", "policy-b"} {
-			choice.Completion.Status = gent.ModelStatusToolCalls
-			choice.ToolCalls = append(choice.ToolCalls, &gent.ModelToolCallRequest{ID: id, Type: "function",
-				FunctionCall: &gent.FunctionCall{Name: "policy", Arguments: `{"id":"P10"}`}})
-		}
+		choice = recoveryChoice()
 	}
-	return gent.NewCompletedStream(&gent.ModelCallResponse{
-		Choices: []*gent.ContentChoice{choice},
-		Info:    &gent.GenerationInfo{InputTokens: 12, OutputTokens: 8, TotalTokens: 20},
-	}, nil), nil
+	return gent.NewCompletedStream(&gent.ModelCallResponse{Choices: []*gent.ContentChoice{choice},
+		Info: &gent.GenerationInfo{InputTokens: 12, OutputTokens: 8, TotalTokens: 20}}, nil), nil
 }
 
 func newRecoveryAgent(model *recoveryModel, calls *[]gent.ToolIdentity,
 	recovery ...gent.ToolRecoveryFunc[recoveryInput],
-) *react.Agent[string] {
+) (*react.Agent[string], *gent.Config) {
 	var handler gent.ToolRecoveryFunc[recoveryInput]
 	if len(recovery) != 0 {
 		handler = recovery[0]
@@ -65,29 +55,55 @@ func newRecoveryAgent(model *recoveryModel, calls *[]gent.ToolIdentity,
 		*calls = append(*calls, identity)
 		return capturedToolResponse(input.Id+": exact original text", nil)
 	}).Description("Read the original policy").ParameterSchema(nil).Recovery(handler).MustBuild()
-	return react.NewAgent(model).RegisterTool(tool).WithRecoveryVersion("recovery-fixture/v1")
+	return react.NewAgent(model), &gent.Config{ToolChain: toolchain.New().RegisterTool(tool)}
 }
 
 type recoveryStore struct {
-	mu      sync.Mutex
-	view    gent.RunView
-	cancel  context.CancelFunc
-	phase   gent.ExecutionPhase
-	event   string
-	stopped bool
-	after   int
-	hits    int
-	codecs  *gent.CodecRegistry
+	mu               sync.Mutex
+	view             gent.RunView
+	cancel           context.CancelFunc
+	phase            gent.ExecutionPhase
+	event            string
+	stopped          bool
+	after            int
+	hits             int
+	codecs           *gent.CodecRegistry
+	runStateSnapshot []byte
+	batches          [][]byte
 }
 
-func (s *recoveryStore) Save(_ context.Context, batch *gent.SaveBatch) error {
+func (s *recoveryStore) Save(_ context.Context, batch *gent.SaveBatch,
+	capture func() (*gent.RunState, error),
+) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	next, err := gent.ApplyBatch(s.view, batch, s.codecs)
+	encoded, err := s.codecs.Marshal(batch)
 	if err != nil {
 		return err
 	}
-	s.view = next
+	var owned gent.SaveBatch
+	if err := s.codecs.Unmarshal(encoded, &owned); err != nil {
+		return err
+	}
+	if s.view.RunId == "" {
+		s.view = *gent.NewRunView(batch.RunId)
+	}
+	applied, err := s.view.Apply(&owned, s.codecs)
+	if err != nil {
+		return err
+	}
+	if applied.Status != gent.ApplyApplied {
+		return fmt.Errorf("save archive: %s", applied.Detail)
+	}
+	state, err := capture()
+	if err != nil {
+		return err
+	}
+	s.runStateSnapshot, err = s.codecs.MarshalRunState(state)
+	if err != nil {
+		return err
+	}
+	s.batches = append(s.batches, encoded)
 	stop := batch.Checkpoint != nil && batch.Checkpoint.Phase == s.phase
 	for _, event := range batch.Events {
 		stop = stop || event.Type == s.event
@@ -102,64 +118,39 @@ func (s *recoveryStore) Save(_ context.Context, batch *gent.SaveBatch) error {
 	return nil
 }
 
-func recoveryBindings(t *testing.T, agent *react.Agent[string]) gent.RestoreBindings {
-	t.Helper()
-	codecs := gent.NewCodecRegistry()
-	if !assert.NoError(t, agent.RegisterCodecs(codecs)) {
-		t.FailNow()
-	}
-	return gent.RestoreBindings{Codecs: codecs}
-}
-
-func resumeRecovery(agent *react.Agent[string], saved gent.RunView, bindings gent.RestoreBindings) (
+func resumeRecovery(t testing.TB, agent *react.Agent[string], saved []byte, config *gent.Config) (
 	*gent.ExecutionContext, *gent.ExecutionResult, error,
 ) {
-	var restored *gent.ExecutionContext
-	prepare := bindings.Configure
-	bindings.Configure = func(ctx *gent.ExecutionContext) error {
-		restored = ctx
-		if prepare != nil {
-			return prepare(ctx)
-		}
-		return nil
-	}
-	_, result, err := executor.NewRunner(agent, executor.DefaultConfig()).Resume(
-		context.Background(), saved, bindings)
-	return restored, result, err
+	t.Helper()
+	runner, execCtx := restoreTestExecution(t, agent, config, saved)
+	_, result, err := runner.Continue(execCtx)
+	return execCtx, result, err
 }
 
-func saveInterruptedRun(
-	t *testing.T, phase gent.ExecutionPhase, event string,
-) (gent.RunView, []*gent.ModelCallRequest, []gent.ToolIdentity) {
+func saveInterruptedRun(t *testing.T, phase gent.ExecutionPhase, event string,
+) ([]byte, []*gent.ModelCallRequest, []gent.ToolIdentity) {
 	t.Helper()
 	worker, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store := &recoveryStore{
 		codecs: gent.NewCodecRegistry(),
-		view:   gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "recovery"},
 		cancel: cancel,
 		phase:  phase,
 		event:  event,
 	}
 	model := &recoveryModel{}
 	var calls []gent.ToolIdentity
-	agent := newRecoveryAgent(model, &calls)
-	ctx := gent.NewExecutionContext(worker, "root", gent.NewBasicLoopData(
-		gent.NewTask(gent.TextContent{
-			Text: "Read policy P10 twice, then answer.",
-		})), gent.WithRunId("recovery"),
-		gent.WithRecorder(store), gent.WithCodecs(store.codecs))
-	ctx.SetLimits(nil)
-	_, _, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
+	agent, config := newRecoveryAgent(model, &calls)
+	config.Recorder, config.Codecs = store, store.codecs
+	runner, execCtx := newTestExecution(t, worker, agent, config)
+	_, result, err := runner.NewTurn(execCtx,
+		gent.NewTask(gent.TextPart("Read policy P10 twice, then answer.")))
 	if !assert.ErrorIs(t, err, context.Canceled) {
 		t.FailNow()
 	}
-	bundle, err := ctx.Export()
-	if !assert.NoError(t, err) || !assert.NoError(t, gent.ValidateBundle(bundle, ctx.Codecs())) {
-		t.FailNow()
-	}
-	assert.NotEqual(t, gent.PhaseTerminal, bundle.Checkpoint.Phase)
-	return bundle, model.requests, calls
+	assert.Nil(t, result)
+	assert.NotEqual(t, gent.PhaseTerminal, store.view.Checkpoint.Phase)
+	return store.runStateSnapshot, model.requests, calls
 }
 
 func TestHistoryRecovery_Boundaries(t *testing.T) {
@@ -167,12 +158,7 @@ func TestHistoryRecovery_Boundaries(t *testing.T) {
 		phase gent.ExecutionPhase
 		event string
 	}
-	type expected struct {
-		modelsBefore int
-		modelsAfter  int
-		toolsBefore  int
-		toolsAfter   int
-	}
+	type expected struct{ modelsBefore, modelsAfter, toolsBefore, toolsAfter int }
 	type testCase struct {
 		name     string
 		input    input
@@ -181,83 +167,58 @@ func TestHistoryRecovery_Boundaries(t *testing.T) {
 	cases := []testCase{
 		{"initial", input{phase: gent.PhaseInitial}, expected{0, 2, 0, 2}},
 		{"iteration ready", input{phase: gent.PhaseIterationReady}, expected{0, 2, 0, 2}},
-		{"saved response", input{event: "model_call_finished"}, expected{1, 1, 0, 0}},
-		{"decision ready", input{phase: gent.PhaseDecisionReady}, expected{1, 1, 0, 0}},
+		{"saved response at before tool", input{event: "model_call_finished"}, expected{1, 1, 0, 0}},
+		{"before tool", input{phase: gent.PhaseToolReady}, expected{1, 1, 0, 0}},
 		{"first tool completed", input{phase: gent.PhaseToolCompleted}, expected{1, 1, 1, 0}},
 		{"iteration completed", input{phase: gent.PhaseIterationCompleted}, expected{1, 1, 2, 0}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			bundle, requests, earlierCalls := saveInterruptedRun(
-				t,
-				test.input.phase,
-				test.input.event,
-			)
-			// JSON is the boundary: continuation receives no runtime pointers from the producer.
+			saved, requests, earlierCalls := saveInterruptedRun(t, test.input.phase, test.input.event)
+			// Only encoded state crosses the process boundary. Runtime pointers are not reused.
 			model := &recoveryModel{answer: len(requests) > 0}
 			var calls []gent.ToolIdentity
-			agent := newRecoveryAgent(model, &calls)
-			bindings := recoveryBindings(t, agent)
-			data, err := bindings.Codecs.Marshal(bundle)
-			assert.NoError(t, err)
-			var saved gent.RunView
-			assert.NoError(t, bindings.Codecs.Unmarshal(data, &saved))
-			ctx, result, err := resumeRecovery(agent, saved, bindings)
+			agent, config := newRecoveryAgent(model, &calls)
+			runner, execCtx := restoreTestExecution(t, agent, config, saved)
+			_, result, err := runner.Continue(execCtx)
 			if !assert.NoError(t, err) {
 				return
 			}
-			assert.Equal(t, []gent.ContentPart{gent.TextContent{Text: "Policy P10 permits it."}},
-				result.Output)
-			assert.Equal(t, test.expected, expected{len(requests), len(model.requests),
-				len(earlierCalls), len(calls)})
-			assert.Equal(t, int64(40), ctx.Stats().GetCounter(gent.SCTotalTokens))
-			assert.Equal(t, int64(test.expected.toolsBefore+test.expected.toolsAfter),
-				ctx.Stats().GetCounter(gent.SCToolCalls))
+			assert.Equal(t, []gent.ContentPart{gent.TextPart("Policy P10 permits it.")}, result.Output)
+			assert.Equal(t, test.expected, expected{
+				len(requests), len(model.requests), len(earlierCalls), len(calls)})
+			assert.Equal(t, int64(40), execCtx.Stats().GetCounter(gent.SCTotalTokens))
+			// A saved BeforeToolCall also counts the interrupted call, even if it never ran.
+			expectedTools := test.expected.toolsBefore + test.expected.toolsAfter
+			if test.input.phase == gent.PhaseToolReady || test.input.event != "" {
+				expectedTools++
+			}
+			assert.Equal(t, int64(expectedTools), execCtx.Stats().GetCounter(gent.SCToolCalls))
 			allCalls := append(earlierCalls, calls...)
 			if len(allCalls) == 2 {
 				assert.NotEqual(t, allCalls[0].ToolCallId, allCalls[1].ToolCallId)
 			}
-			terminal, err := ctx.Export()
+			value, out, err := runner.GetLastTurnResult(execCtx)
 			assert.NoError(t, err)
-			assert.NoError(t, gent.ValidateBundle(terminal, ctx.Codecs()))
-			assert.Greater(t, terminal.LastAppliedEventNumber, saved.LastAppliedEventNumber)
-			assert.Equal(t, saved.RunId, terminal.RunId)
-			// A terminal bundle needs no executable bindings, including model/tool implementations.
-			finished, err := gent.RestoreExecutionContext(context.Background(), terminal,
-				gent.RestoreBindings{Codecs: bindings.Codecs})
-			if assert.NoError(t, err) {
-				_, out, err := executor.NewRunner(agent, executor.DefaultConfig()).Continue(
-					finished,
-				)
-				assert.NoError(t, err)
-				assert.Equal(t, result.Output, out.Output)
-			}
+			assert.Equal(t, "Policy P10 permits it.", value)
+			assert.Equal(t, result, out)
+			value, out, err = runner.Continue(execCtx)
+			assert.NoError(t, err)
+			assert.Empty(t, value)
+			assert.Equal(t, &gent.ExecutionResult{Status: gent.ExecutionNoActiveTurn}, out)
 		})
 	}
 }
 
-type recoveryFile struct {
-	Bundle   json.RawMessage
-	Requests []gent.EncodedValue
-}
+type recoveryFile struct{ RunStateSnapshot []byte }
 
 func TestHistoryRecovery_FreshProcess(t *testing.T) {
 	mode := os.Getenv("GENT_HISTORY_PROCESS")
 	path := os.Getenv("GENT_HISTORY_BUNDLE")
 	if mode == "produce" {
-		bundle, requests, calls := saveInterruptedRun(t, gent.PhaseToolCompleted, "")
+		saved, _, calls := saveInterruptedRun(t, gent.PhaseToolCompleted, "")
 		assert.Len(t, calls, 1)
-		agent := newRecoveryAgent(&recoveryModel{}, new([]gent.ToolIdentity))
-		registry := recoveryBindings(t, agent).Codecs
-		encoded, err := registry.Marshal(bundle)
-		assert.NoError(t, err)
-		file := recoveryFile{Bundle: encoded}
-		for _, request := range requests {
-			value, err := gent.NewCodecRegistry().Encode(request)
-			assert.NoError(t, err)
-			file.Requests = append(file.Requests, value)
-		}
-		data, err := json.Marshal(file)
+		data, err := json.Marshal(recoveryFile{RunStateSnapshot: saved})
 		assert.NoError(t, err)
 		assert.NoError(t, os.WriteFile(path, data, 0600))
 		return
@@ -269,81 +230,73 @@ func TestHistoryRecovery_FreshProcess(t *testing.T) {
 		assert.NoError(t, json.Unmarshal(data, &file))
 		model := &recoveryModel{answer: true}
 		var calls []gent.ToolIdentity
-		agent := newRecoveryAgent(model, &calls)
-		bindings := recoveryBindings(t, agent)
-		var bundle gent.RunView
-		assert.NoError(t, bindings.Codecs.Unmarshal(file.Bundle, &bundle))
-		seq, err := trace.RestoreSequencer(bundle, trace.Config{Codecs: bindings.Codecs})
+		agent, config := newRecoveryAgent(model, &calls)
+		config = testConfig(t, agent, config)
+		seq, err := trace.NewSequencer("", trace.Config{Codecs: config.Codecs})
 		assert.NoError(t, err)
-		bindings.Observers = []gent.RecordedEventObserver{seq}
-		ctx, result, err := resumeRecovery(agent, bundle, bindings)
+		defer seq.Close()
+		config.Subscribers = []*gent.SubscriberRegistration{{Subscriber: seq}}
+		execCtx, result, err := resumeRecovery(t, agent, file.RunStateSnapshot, config)
 		if !assert.NoError(t, err) {
 			return
 		}
-		assert.Equal(
-			t,
-			[]gent.ContentPart{gent.TextContent{Text: "Policy P10 permits it."}},
-			result.Output,
-		)
+		assert.Equal(t, []gent.ContentPart{gent.TextPart("Policy P10 permits it.")}, result.Output)
 		assert.Empty(t, calls)
 		assert.Len(t, model.requests, 1)
-		assert.Equal(t, int64(40), ctx.Stats().GetCounter(gent.SCTotalTokens))
-		// A saved completed response is exact. The pending call reports NotStarted on resume.
+		assert.Equal(t, int64(40), execCtx.Stats().GetCounter(gent.SCTotalTokens))
 		baselineModel := &recoveryModel{}
 		var baselineCalls []gent.ToolIdentity
-		baselineAgent := newRecoveryAgent(baselineModel, &baselineCalls)
-		baseline := gent.NewExecutionContext(context.Background(), "root", gent.NewBasicLoopData(
-			gent.NewTask(gent.TextContent{Text: "Read policy P10 twice, then answer."})))
-		baseline.SetLimits(nil)
-		_, _, err = executor.NewRunner(baselineAgent, executor.DefaultConfig()).Execute(
-			baseline,
-		)
+		baselineAgent, baselineConfig := newRecoveryAgent(baselineModel, &baselineCalls)
+		runner, baseline := newTestExecution(t, context.Background(), baselineAgent, baselineConfig)
+		_, _, err = runner.NewTurn(baseline,
+			gent.NewTask(gent.TextPart("Read policy P10 twice, then answer.")))
 		assert.NoError(t, err)
-		wantMessages := baselineModel.requests[1].Messages
-		actualMessages := model.requests[0].Messages
-		assert.Equal(t, wantMessages[:3], actualMessages[:3])
-		reply := actualMessages[3].Parts[0].(*gent.ModelToolCallResponse)
+		want, actual := baselineModel.requests[1].Messages, model.requests[0].Messages
+		assert.Equal(t, want[0], actual[0])
+		// Physical model IDs differ between runs; tool request and reply content stays exact.
+		assert.Equal(t, gent.ContentText(want[1].Parts), gent.ContentText(actual[1].Parts))
+		assert.Equal(t, want[1].Parts[1:], actual[1].Parts[1:])
+		assert.Equal(t, want[2], actual[2])
+		reply := actual[3].Parts[0].(*gent.ModelToolCallResponse)
 		status, present := reply.RecoveryStatus()
 		assert.True(t, present)
 		assert.Equal(t, gent.ToolRecoveryNotStarted, status)
 		assert.Equal(t, baselineModel.requests[1].Options, model.requests[0].Options)
-		assert.Equal(t, seq.Snapshot().LastEventNumber, uint64(len(seq.Snapshot().RecentEvents)))
 		return
 	}
 	path = filepath.Join(t.TempDir(), "run.json")
 	for _, mode := range []string{"produce", "continue"} {
 		command := exec.Command(os.Args[0], "-test.run=^TestHistoryRecovery_FreshProcess$")
-		command.Env = append(
-			os.Environ(),
-			"GENT_HISTORY_PROCESS="+mode,
-			"GENT_HISTORY_BUNDLE="+path,
-		)
-		log, err := os.CreateTemp("/tmp", "gent-history-process-"+mode+"-*.log")
-		if !assert.NoError(t, err) {
-			return
-		}
-		command.Stdout, command.Stderr = log, log
-		err = command.Run()
-		assert.NoError(t, log.Close())
-		if !assert.NoError(t, err, "subprocess output: %s", log.Name()) {
+		command.Env = append(os.Environ(), "GENT_HISTORY_PROCESS="+mode, "GENT_HISTORY_BUNDLE="+path)
+		result, err := command.CombinedOutput()
+		if !assert.NoError(t, err, "%s", result) {
 			return
 		}
 	}
 }
 
-func recoveryChoice() *gent.ContentChoice {
-	return &gent.ContentChoice{Completion: gent.ModelCompletion{
-		Status: gent.ModelStatusToolCalls,
-	},
-		ToolCalls: []*gent.ModelToolCallRequest{
-			{ID: "policy-a", Type: "function",
-				FunctionCall: &gent.FunctionCall{Name: "policy", Arguments: `{"id":"P10"}`}},
-			{ID: "policy-b", Type: "function",
-				FunctionCall: &gent.FunctionCall{Name: "policy", Arguments: `{"id":"P10"}`}},
-		}}
+func recoveryAnswerChoice(text string) *gent.ContentChoice {
+	return &gent.ContentChoice{Completion: gent.ModelCompletion{Status: gent.ModelStatusAnswer},
+		CandidateSource: &gent.ContentSource{MessageIds: []string{"answer"}},
+		Parts: []gent.ContentPart{&gent.AssistantContent{MessageId: "answer",
+			Type:    gent.AssistantContentFinalAnswerCandidate,
+			Content: []gent.ContentPart{gent.TextPart(text)}}}}
 }
-func (m *recoveryModel) PrepareRequest(ctx *gent.ExecutionContext,
+
+func recoveryChoice() *gent.ContentChoice {
+	choice := &gent.ContentChoice{Completion: gent.ModelCompletion{Status: gent.ModelStatusToolCalls},
+		Parts: []gent.ContentPart{&gent.AssistantContent{MessageId: "plan",
+			Type:    gent.AssistantContentCommentary,
+			Content: []gent.ContentPart{gent.TextPart("Read the policy.")}}}}
+	for _, id := range []string{"policy-a", "policy-b"} {
+		choice.Parts = append(choice.Parts, &gent.ModelToolCallRequest{ID: id, Type: "function",
+			FunctionCall: &gent.FunctionCall{Name: "policy", Arguments: `{"id":"P10"}`}})
+	}
+	return choice
+}
+
+func (m *recoveryModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

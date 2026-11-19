@@ -6,7 +6,6 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/events"
 	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/internal/tt"
 	"github.com/rickchristie/gent/toolchain"
@@ -18,8 +17,13 @@ type selectedTools struct {
 	name string
 }
 
-func (c *selectedTools) NativeTools(ctx *gent.ExecutionContext) ([]*gent.ToolDefinition, error) {
-	tools, err := c.Registry.NativeTools(ctx)
+func (c *selectedTools) NativeTools(
+	execCtx *gent.ExecutionContext,
+) (
+	[]*gent.ToolDefinition,
+	error,
+) {
+	tools, err := c.Registry.NativeTools(execCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -32,10 +36,6 @@ func (c *selectedTools) NativeTools(ctx *gent.ExecutionContext) ([]*gent.ToolDef
 	return selected, nil
 }
 
-func (c *selectedTools) RecoveryConfig() any {
-	return map[string]any{"tools": c.Registry.RecoveryConfig(), "selected": c.name}
-}
-
 type selectedInput struct {
 	ID string `json:"id"`
 }
@@ -43,10 +43,11 @@ type selectedInput struct {
 type selectedHook struct{ calls int }
 
 func (h *selectedHook) OnBeforeToolCall(
-	_ *gent.ExecutionContext, event *gent.BeforeToolCallEvent,
-) {
+	_ context.Context, event *gent.BeforeToolCallEvent,
+) error {
 	h.calls++
 	event.Args = &selectedInput{ID: "checked"}
+	return nil
 }
 
 func TestCustomNativeSelectionKeepsExecutionHooks(t *testing.T) {
@@ -71,18 +72,21 @@ func TestCustomNativeSelectionKeepsExecutionHooks(t *testing.T) {
 				return capturedToolResponse("record", nil)
 			}).Description("Read a record").ParameterSchema(inputSchema).MustBuild())
 	}
-	model := tt.NewMockModel().AddToolCall("lookup", `{"id":"raw"}`, 1, 1).
-		AddResponse("Done.", 1, 1)
-	agent := react.NewAgent(model).WithToolChain(chain).WithRecoveryVersion("selection/v1")
+	model := tt.NewMockModel().AddToolCall("lookup", `{"id":"raw"}`, 1, 1).AddResponse("Done.", 1, 1)
+	agent := react.NewAgent(model)
 	hook := &selectedHook{}
-	ctx := gent.NewExecutionContext(context.Background(), "selected",
-		gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: "Read the record."})))
+	runner := executor.NewRunner(agent, &gent.Config{ToolChain: chain,
+		Hooks: &gent.Hooks{BeforeToolCall: hook.OnBeforeToolCall}})
+	ctx, err := runner.NewExecutionContext(context.Background(), "selected")
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer ctx.Release()
 	definitions, err := chain.Registry.NativeTools(ctx)
 	if !assert.NoError(t, err) {
 		return
 	}
-	_, result, err := executor.NewRunner(agent, executor.DefaultConfig()).
-		WithEvents(events.NewRegistry().Subscribe(hook)).Execute(ctx)
+	_, result, err := runner.NewTurn(ctx, gent.NewTask(gent.TextPart("Read the record.")))
 	if !assert.NoError(t, err) {
 		return
 	}

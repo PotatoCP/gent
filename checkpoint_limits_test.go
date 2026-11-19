@@ -2,24 +2,39 @@ package gent_test
 
 import (
 	"context"
-	"runtime"
-	"sync"
-	"sync/atomic"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/rickchristie/gent"
-	genttest "github.com/rickchristie/gent/internal/tt"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestCheckpointDeliveryCapacityAfterReceive(t *testing.T) {
-	previous := runtime.GOMAXPROCS(1)
-	defer runtime.GOMAXPROCS(previous)
+type capacitySubscriber struct {
+	holding  chan struct{}
+	stopped  chan *gent.SubscriberStop
+	observer contentObserver
+}
+
+func (subscriber *capacitySubscriber) OnEvent(
+	ctx context.Context,
+	event *gent.RecordedEvent,
+) error {
+	if event.EventName == "hold" {
+		close(subscriber.holding)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return subscriber.observer.OnEvent(ctx, event)
+}
+func (subscriber *capacitySubscriber) OnStop(_ context.Context, result *gent.SubscriberStop) {
+	subscriber.stopped <- result
+}
+
+func TestCheckpointSubscriberCapacityIncludesActiveCallback(t *testing.T) {
 	type input struct{ capacity int }
 	type expected struct {
-		numbers []uint64
-		err     error
+		reason gent.SubscriberStopReason
+		answer string
 	}
 	type testCase struct {
 		name     string
@@ -27,169 +42,130 @@ func TestCheckpointDeliveryCapacityAfterReceive(t *testing.T) {
 		expected expected
 	}
 	for _, test := range []testCase{
-		{"one slot", input{1}, expected{[]uint64{1, 2}, nil}},
-		{"two slots", input{2}, expected{[]uint64{1, 2}, nil}},
+		{"sixteen slots", input{16}, expected{gent.SubscriberOverflow, "Done."}},
+		{"thirty two slots", input{32}, expected{gent.SubscriberOverflow, "Done."}},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			ctx := gent.NewExecutionContext(context.Background(), "root", nil)
-			defer ctx.Release()
-			sub, err := ctx.SubscribeAllWithConfig(gent.DeliveryConfig{MaxEvents: test.input.capacity})
-			if !assert.NoError(t, err) {
-				return
-			}
-			defer sub.Close()
-			assert.NoError(t, ctx.EmitChunk(checkpointChunk("First.")))
-			// A consumer can publish its next event as soon as it receives the current event.
-			runtime.Gosched()
-			first := checkpointReceive(t, sub.Chunks())
-			assert.NoError(t, ctx.EmitChunk(checkpointChunk("Later.")))
-			ctx.CloseStreams()
-			numbers := []uint64{first.EventNumber}
-			for chunk := range sub.Chunks() {
-				numbers = append(numbers, chunk.EventNumber)
-			}
-			<-sub.Done()
-			assert.Equal(t, test.expected, expected{numbers, sub.Err()})
-		})
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				subscriber := &capacitySubscriber{
+					holding: make(
+						chan struct{},
+					),
+					stopped: make(
+						chan *gent.SubscriberStop,
+						1,
+					),
+				}
+				loop := contentLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+					execCtx.PublishCommonEvent("hold", "Keep one callback active.", nil)
+					checkpointSignal(t, subscriber.holding)
+					// The active callback uses one slot. The last event must overflow this queue.
+					for range test.input.capacity {
+						execCtx.PublishCommonEvent("queued", "Progress", nil)
+					}
+					return acceptRootOutput(execCtx, "Done.")
+				})
+				store := newCheckpointStore()
+				runner, execCtx := newTestExecution(
+					t,
+					context.Background(),
+					loop,
+					&gent.Config{
+
+						Codecs:   store.codecs,
+						Recorder: store,
+						Subscribers: []*gent.SubscriberRegistration{
+							{
+								Subscriber: subscriber,
+								Delivery:   gent.SubscriberLive,
+								Buffer: &gent.DeliveryConfig{
+									MaxEvents: test.input.capacity,
+								},
+							},
+						},
+					},
+				)
+				answer, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Answer.")))
+				if !assert.NoError(t, err) {
+					return
+				}
+				stop := checkpointReceive(t, subscriber.stopped)
+				assert.Equal(t, test.expected, expected{stop.Reason, answer})
+				assert.Equal(t, gent.ExecutionFinished, result.Status)
+				assert.Equal(t, gent.PhaseTerminal, store.view.Checkpoint.Phase)
+				assert.Len(t, acceptedContent(store.view.Activity), 1)
+				assert.Less(t, stop.LastDeliveredEventSequenceNumber, store.view.LastAppliedEventSequenceNumber)
+				assert.Equal(t, execCtx.RunId(), stop.RunId)
+			},
+		)
 	}
 }
 
-func TestCheckpointPendingLimitsDuringSave(t *testing.T) {
-	type input struct {
-		terminal bool
-		policy   gent.CheckpointPolicy
-	}
+func TestCheckpointPendingLimitsDoNotAddSavepoints(t *testing.T) {
+	type input struct{ recording *gent.RecordingConfig }
 	type expected struct {
-		completedBeforeSave bool
-		newEvents           uint64
-		err                 error
+		phases []gent.ExecutionPhase
+		answer string
 	}
 	type testCase struct {
 		name     string
 		input    input
 		expected expected
 	}
-	countLimit := gent.CheckpointPolicy{MaxEvents: 2}
-	byteLimit := gent.CheckpointPolicy{MaxBytes: 1}
-	want := expected{false, 34, nil}
+	want := expected{[]gent.ExecutionPhase{gent.PhaseInitial, gent.PhaseIterationReady}, ""}
 	for _, test := range []testCase{
-		{"progress count", input{false, countLimit}, want},
-		{"terminal count", input{true, countLimit}, want},
-		{"progress bytes", input{false, byteLimit}, want},
-		{"terminal bytes", input{true, byteLimit}, want},
+		{"events", input{&gent.RecordingConfig{MaxPendingEvents: 16}}, want},
+		{"bytes", input{&gent.RecordingConfig{MaxPendingBytes: 16 * 1024}}, want},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			entered, release := make(chan struct{}, 1), make(chan struct{})
-			unblock := sync.OnceFunc(func() { close(release) })
-			var block atomic.Bool
-			store := newCheckpointStore("pending-limit")
-			store.before = func(*gent.SaveBatch) error {
-				if block.CompareAndSwap(true, false) {
-					entered <- struct{}{}
-					<-release
-				}
-				return nil
-			}
-			root := gent.NewExecutionContext(context.Background(), "root", nil,
-				gent.WithRunId("pending-limit"), gent.WithRecorder(store),
-				gent.WithCheckpointPolicy(test.input.policy))
-			defer root.Release()
-			child := root.SpawnChild("child", nil)
-			assert.NoError(t, root.CommitCheckpoint(gent.PhaseInitial))
-			initial, err := root.Export()
-			if !assert.NoError(t, err) {
-				return
-			}
-			events, err := root.SubscribeEvents(gent.DeliveryConfig{})
-			if !assert.NoError(t, err) {
-				return
-			}
-			defer events.Close()
-			chunks, err := root.SubscribeAllWithConfig(gent.DeliveryConfig{})
-			if !assert.NoError(t, err) {
-				return
-			}
-			defer chunks.Close()
-			var workers sync.WaitGroup
-			defer func() { unblock(); workers.Wait() }()
-			if test.input.terminal {
-				child.SetTermination(gent.TerminationSuccess,
-					[]gent.ContentPart{gent.TextContent{Text: "Accepted."}}, nil)
-				child.SetAcceptedValue(genttest.Value("Accepted."))
-				child.PublishAfterExecution(gent.TerminationSuccess, nil)
-			}
-			block.Store(true)
-			saveDone := make(chan error, 1)
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				if test.input.terminal {
-					saveDone <- child.CommitCheckpoint(gent.PhaseTerminal)
-					return
-				}
-				for range 2 {
-					if err := child.EmitChunk(checkpointChunk("Before save.")); err != nil {
-						saveDone <- err
-						return
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				store := newCheckpointStore()
+				emitted := 0
+				loop := contentLoop(func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+					for range 256 {
+						if err := execCtx.EmitChunk(checkpointChunk(strings.Repeat("x", 1024))); err != nil {
+							return nil, err
+						}
+						emitted++
 					}
+					t.Error("the recording allowance must stop this attempt")
+					return acceptRootOutput(execCtx, "unexpected")
+				})
+				runner, execCtx := newTestExecution(
+					t,
+					context.Background(),
+					loop,
+					&gent.Config{
+						Codecs:    store.codecs,
+						Recorder:  store,
+						Recording: test.input.recording,
+					},
+				)
+				answer, result, err := runner.NewTurn(
+					execCtx,
+					gent.NewTask(
+						gent.TextPart(
+							"Emit bounded progress.",
+						),
+					),
+				)
+				assert.Error(t, err)
+				assert.Nil(t, result)
+				actual := expected{answer: answer}
+				for _, batch := range store.batches {
+					actual.phases = append(actual.phases, batch.Checkpoint.Phase)
 				}
-				saveDone <- nil
-			}()
-			checkpointReceive(t, entered)
-			producerDone := make(chan error, 1)
-			workers.Add(1)
-			go func() {
-				defer workers.Done()
-				for range 32 {
-					if err := root.EmitChunk(checkpointChunk("Concurrent progress.")); err != nil {
-						producerDone <- err
-						return
-					}
-				}
-				producerDone <- nil
-			}()
-			actual := expected{}
-			select {
-			case actual.err = <-producerDone:
-				actual.completedBeforeSave = true
-			case <-time.After(100 * time.Millisecond):
-			}
-			if test.input.terminal {
-				select {
-				case event := <-events.Events():
-					t.Fatalf("event passed the terminal save: %v", event)
-				default:
-				}
-				select {
-				case chunk := <-chunks.Chunks():
-					t.Fatalf("chunk passed the terminal save: %v", chunk)
-				default:
-				}
-			}
-			unblock()
-			assert.NoError(t, checkpointReceive(t, saveDone))
-			if !actual.completedBeforeSave {
-				actual.err = checkpointReceive(t, producerDone)
-			}
-			assert.NoError(t, root.FlushProgress())
-			view, err := root.Export()
-			assert.NoError(t, err)
-			assert.NoError(t, gent.ValidateBundle(view))
-			actual.newEvents = view.LastAppliedEventNumber - initial.LastAppliedEventNumber
-			assert.Equal(t, test.expected, actual)
-			root.CloseStreams()
-			var liveEvents []*gent.RecordedEvent
-			for event := range events.Events() {
-				liveEvents = append(liveEvents, event)
-			}
-			var liveChunks []gent.StreamChunk
-			for chunk := range chunks.Chunks() {
-				liveChunks = append(liveChunks, chunk)
-			}
-			assert.Equal(t, view.Activity[initial.LastAppliedEventNumber:], liveEvents)
-			assert.Equal(t, contentChunks(t, view.Activity, root.Codecs()), liveChunks)
-			assert.NoError(t, events.Err())
-			assert.NoError(t, chunks.Err())
-		})
+				assert.Equal(t, test.expected, actual)
+				assert.Greater(t, emitted, 0)
+				assert.Less(t, emitted, 256)
+				assert.Empty(t, contentChunks(t, store.view.Activity, store.codecs))
+				// The failed handle cannot accept more work over its rejected provisional state.
+				_, next, err := runner.Continue(execCtx)
+				assert.Error(t, err)
+				assert.Nil(t, next)
+			},
+		)
 	}
 }

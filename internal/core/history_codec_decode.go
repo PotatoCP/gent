@@ -1,0 +1,371 @@
+package gent
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+)
+
+func sortEncodedItems[T any](items []encodedMapItem[T]) {
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Key.Type != items[j].Key.Type {
+			return items[i].Key.Type < items[j].Key.Type
+		}
+		return bytes.Compare(items[i].Key.Data, items[j].Key.Data) < 0
+	})
+}
+
+func (r *valueDecoder) resolveType(name string, depth int) (reflect.Type, error) {
+	if depth > 100 {
+		return nil, errors.New("gent: type nesting exceeds 100")
+	}
+	switch name {
+	case "any":
+		return reflect.TypeFor[any](), nil
+	case "content":
+		return reflect.TypeFor[ContentPart](), nil
+	case "error-interface":
+		return reflect.TypeFor[error](), nil
+	}
+	if value, ok := r.lookupId(name); ok {
+		return value.typ, nil
+	}
+	if strings.HasPrefix(name, "*") {
+		typ, err := r.resolveType(name[1:], depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return reflect.PointerTo(typ), nil
+	}
+	if strings.HasPrefix(name, "[]") {
+		typ, err := r.resolveType(name[2:], depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return reflect.SliceOf(typ), nil
+	}
+	if strings.HasPrefix(name, "[") {
+		end := strings.Index(name, "]")
+		if end < 2 {
+			return nil, errors.New("gent: invalid array type")
+		}
+		length, err := strconv.Atoi(name[1:end])
+		if err != nil || length < 0 || length > 1000000 {
+			return nil, errors.New("gent: invalid array size")
+		}
+		element, err := r.resolveType(name[end+1:], depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return reflect.ArrayOf(length, element), nil
+	}
+	if strings.HasPrefix(name, "map:") {
+		var pair []string
+		if err := json.Unmarshal([]byte(name[4:]), &pair); err != nil {
+			return nil, err
+		}
+		if len(pair) != 2 {
+			return nil, errors.New("gent: invalid map type")
+		}
+		key, err := r.resolveType(pair[0], depth+1)
+		if err != nil {
+			return nil, err
+		}
+		if !key.Comparable() {
+			return nil, errors.New("gent: map key is not comparable")
+		}
+		element, err := r.resolveType(pair[1], depth+1)
+		if err != nil {
+			return nil, err
+		}
+		return reflect.MapOf(key, element), nil
+	}
+	r.status = valueDecodeIncompatible
+	return nil, fmt.Errorf("gent: unknown codec %q", name)
+}
+
+func (r *valueDecoder) decode(value decodingValue, depth int) (reflect.Value, error) {
+	return r.decodeExpected(value, depth, nil)
+}
+
+// A declared anonymous struct has no stable Go name. Use the current field type to decode its
+// saved fields. DeclaredType is checked by the containing struct before this path is reached.
+func (r *valueDecoder) decodeExpected(value decodingValue, depth int,
+	expected reflect.Type,
+) (reflect.Value, error) {
+	if depth > 100 {
+		return reflect.Value{}, errors.New("gent: value nesting exceeds 100")
+	}
+	if len(value.Data.bytes()) == 0 {
+		return reflect.Value{}, errors.New("gent: invalid encoded JSON")
+	}
+	registration, registered := r.lookupId(value.Type)
+	if expected != nil && expected.Kind() == reflect.Struct && expected.Name() == "" {
+		registration, registered = r.lookupType(expected)
+	}
+	wantVersion := 1
+	if registered {
+		wantVersion = registration.version
+	}
+	if value.Version != wantVersion {
+		r.status = valueDecodeIncompatible
+		return reflect.Value{}, fmt.Errorf(
+			"gent: unsupported %s version %d",
+			value.Type,
+			value.Version,
+		)
+	}
+	switch value.Type {
+	case "bytes":
+		data, err := r.decodeBytes(value.Data.bytes())
+		return reflect.ValueOf(data), err
+	case "encoded-value":
+		var saved EncodedValue
+		err := json.Unmarshal(value.Data.bytes(), &saved)
+		return reflect.ValueOf(saved), err
+	case "raw-json-bytes":
+		var data []byte
+		if err := json.Unmarshal(value.Data.bytes(), &data); err != nil {
+			return reflect.Value{}, err
+		}
+		if !json.Valid(data) {
+			return reflect.Value{}, errors.New("gent: invalid raw JSON")
+		}
+		return reflect.ValueOf(json.RawMessage(data)), nil
+	case "raw-json-nil":
+		if string(value.Data.bytes()) != "null" {
+			return reflect.Value{}, errors.New("gent: invalid nil JSON encoding")
+		}
+		return reflect.ValueOf(json.RawMessage(nil)), nil
+	case "nil":
+		if string(value.Data.bytes()) != "null" {
+			return reflect.Value{}, errors.New("gent: invalid nil encoding")
+		}
+		return reflect.Value{}, nil
+	case "time":
+		var t time.Time
+		err := json.Unmarshal(value.Data.bytes(), &t)
+		return reflect.ValueOf(t), err
+	case "error":
+		var saved *SavedError
+		if err := json.Unmarshal(value.Data.bytes(), &saved); err != nil {
+			return reflect.Value{}, err
+		}
+		if saved == nil {
+			return reflect.Value{}, nil
+		}
+		return reflect.ValueOf(saved), nil
+	case "pointer", "slice", "array", "map":
+		return r.decodeContainer(value, depth, expected)
+	}
+	if !registered {
+		r.status = valueDecodeIncompatible
+		return reflect.Value{}, fmt.Errorf("gent: unknown codec %q", value.Type)
+	}
+	if registration.codec != nil {
+		v, err := r.decodeCodec(registration.codec, value.Data, depth)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		if reflect.TypeOf(v) != registration.typ {
+			r.status = valueDecodeOperationFailed
+			return reflect.Value{}, fmt.Errorf(
+				"gent: codec %s decoded %T, expected %s",
+				value.Type,
+				v,
+				registration.typ,
+			)
+		}
+		return reflect.ValueOf(v), nil
+	}
+	result := reflect.New(registration.typ).Elem()
+	switch result.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map, reflect.Pointer:
+		container, err := value.Data.envelope()
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		decoded, err := r.decodeExpected(container, depth+1, result.Type())
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		if !decoded.IsValid() || !decoded.Type().ConvertibleTo(result.Type()) {
+			return reflect.Value{}, fmt.Errorf("gent: invalid named container %s", value.Type)
+		}
+		return decoded.Convert(result.Type()), nil
+	}
+	if result.Kind() != reflect.Struct {
+		err := json.Unmarshal(value.Data.bytes(), result.Addr().Interface())
+		return result, err
+	}
+	fields, err := value.Data.fields()
+	if err != nil {
+		return reflect.Value{}, err
+	}
+	for name, field := range fields {
+		target := result.FieldByName(name)
+		if !target.IsValid() || !target.CanSet() {
+			continue
+		}
+		if field.DeclaredType != r.declaredFieldType(target.Type()) {
+			r.status = valueDecodeIncompatible
+			return reflect.Value{}, fmt.Errorf("gent: changed declared type for %s.%s", value.Type, name)
+		}
+		decoded, err := r.decodeExpected(field, depth+1, target.Type())
+		if err != nil {
+			return reflect.Value{}, fmt.Errorf("%s.%s: %w", value.Type, name, err)
+		}
+		if err := setDecoded(target, decoded); err != nil {
+			return reflect.Value{}, err
+		}
+	}
+	return result, nil
+}
+
+func setDecoded(target, value reflect.Value) error {
+	if !value.IsValid() {
+		switch target.Kind() {
+		case reflect.Interface, reflect.Pointer, reflect.Slice, reflect.Map:
+			target.SetZero()
+			return nil
+		default:
+			return fmt.Errorf("gent: nil is not assignable to %s", target.Type())
+		}
+	}
+	if !value.Type().AssignableTo(target.Type()) {
+		return fmt.Errorf("gent: %s is not assignable to %s", value.Type(), target.Type())
+	}
+	target.Set(value)
+	return nil
+}
+
+func (r *valueDecoder) decodeContainer(value decodingValue, depth int,
+	expected reflect.Type,
+) (reflect.Value, error) {
+	c, err := value.Data.container()
+	if err != nil {
+		return reflect.Value{}, err
+	}
+	var element reflect.Type
+	if expected != nil && (expected.Kind() == reflect.Pointer || expected.Kind() == reflect.Slice ||
+		expected.Kind() == reflect.Array || expected.Kind() == reflect.Map) {
+		element = expected.Elem()
+	} else {
+		var err error
+		element, err = r.resolveType(c.Element, depth+1)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+	}
+	if c.Nil && (len(c.Values) != 0 || len(c.Items) != 0) {
+		return reflect.Value{}, errors.New("gent: nil container has content")
+	}
+	var result reflect.Value
+	switch value.Type {
+	case "pointer":
+		if c.Nil {
+			return reflect.Zero(reflect.PointerTo(element)), nil
+		}
+		if len(c.Values) != 1 {
+			return reflect.Value{}, errors.New("gent: invalid pointer encoding")
+		}
+		result = reflect.New(element)
+		v, err := r.decodeExpected(c.Values[0], depth+1, element)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		return result, setDecoded(result.Elem(), v)
+	case "map":
+		var key reflect.Type
+		if expected != nil && expected.Kind() == reflect.Map {
+			key = expected.Key()
+		} else {
+			var err error
+			key, err = r.resolveType(c.Key, depth+1)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+		}
+		if !key.Comparable() {
+			return reflect.Value{}, errors.New("gent: map key is not comparable")
+		}
+		typ := reflect.MapOf(key, element)
+		if c.Nil {
+			return reflect.Zero(typ), nil
+		}
+		result = reflect.MakeMapWithSize(typ, len(c.Items))
+		for _, item := range c.Items {
+			k, err := r.decodeExpected(item.Key, depth+1, key)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			v, err := r.decodeExpected(item.Value, depth+1, element)
+			if err != nil {
+				return reflect.Value{}, err
+			}
+			mapKey, mapValue := reflect.New(key).Elem(), reflect.New(element).Elem()
+			if err := setDecoded(mapKey, k); err != nil {
+				return reflect.Value{}, err
+			}
+			if err := setDecoded(mapValue, v); err != nil {
+				return reflect.Value{}, err
+			}
+			if !mapKey.Comparable() {
+				return reflect.Value{}, errors.New("gent: unhashable map key")
+			}
+			if result.MapIndex(mapKey).IsValid() {
+				return reflect.Value{}, errors.New("gent: duplicate map key")
+			}
+			result.SetMapIndex(mapKey, mapValue)
+		}
+		return result, nil
+	case "array":
+		result = reflect.New(reflect.ArrayOf(len(c.Values), element)).Elem()
+	default:
+		if c.Nil {
+			return reflect.Zero(reflect.SliceOf(element)), nil
+		}
+		result = reflect.MakeSlice(reflect.SliceOf(element), len(c.Values), len(c.Values))
+	}
+	for i, item := range c.Values {
+		v, err := r.decodeExpected(item, depth+1, element)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		if err := setDecoded(result.Index(i), v); err != nil {
+			return reflect.Value{}, err
+		}
+	}
+	return result, nil
+}
+
+// Named types retain identity while their exported fields can evolve. Container declarations
+// remain exact. In particular, replacing string with any must not pass by assignability alone.
+func (r *CodecRegistry) declaredFieldType(t reflect.Type) string {
+	if registration, ok := r.lookupType(t); ok && t.Name() != "" {
+		return registration.id
+	}
+	if t.Name() != "" {
+		return valueTypeId(t)
+	}
+	switch t.Kind() {
+	case reflect.Struct:
+		return "struct"
+	case reflect.Pointer:
+		return "*" + r.declaredFieldType(t.Elem())
+	case reflect.Slice:
+		return "[]" + r.declaredFieldType(t.Elem())
+	case reflect.Array:
+		return fmt.Sprintf("[%d]%s", t.Len(), r.declaredFieldType(t.Elem()))
+	case reflect.Map:
+		return "map[" + r.declaredFieldType(t.Key()) + "]" + r.declaredFieldType(t.Elem())
+	default:
+		return t.String()
+	}
+}

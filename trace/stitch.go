@@ -6,65 +6,74 @@ import "github.com/rickchristie/gent"
 var ErrReplayUnavailable = gent.ErrReplayUnavailable
 
 // CanStitch reports whether the first buffered event could stitch to a snapshot.
-func CanStitch(snapshotLastEventNumber uint64, firstBufferedEventNumber uint64) bool {
-	return firstBufferedEventNumber <= snapshotLastEventNumber+1
+func CanStitch(
+	snapshotLastEventSequenceNumber uint64,
+	firstBufferedEventSequenceNumber uint64,
+) bool {
+	return firstBufferedEventSequenceNumber <= snapshotLastEventSequenceNumber+1
 }
 
 // StitchStatus describes whether buffered events can be applied to a snapshot.
 type StitchStatus string
 
 const (
-	StitchStatusOK       StitchStatus = "ok"
-	StitchStatusGap      StitchStatus = "gap"
+	// StitchStatusOK means buffered events can follow the saved cursor without a gap.
+	StitchStatusOK StitchStatus = "ok"
+	// StitchStatusGap means an event is missing between the saved cursor and buffered events.
+	StitchStatusGap StitchStatus = "gap"
+	// StitchStatusUnsorted means buffered event sequence numbers are not strictly increasing.
 	StitchStatusUnsorted StitchStatus = "unsorted"
 )
 
 // StitchResult describes the result of validating buffered trace events.
+// EventSequenceNumber fields refer to the same ordered positions as Event.EventSequenceNumber.
+// Missing positions are greater than MissingAfterEventSequenceNumber and less than
+// MissingBeforeEventSequenceNumber.
 type StitchResult struct {
-	Status             StitchStatus `json:"status"`
-	SnapshotLastEvent  uint64       `json:"snapshotLastEvent"`
-	FirstBufferedEvent uint64       `json:"firstBufferedEvent,omitempty"`
-	MissingAfterEvent  uint64       `json:"missingAfterEvent,omitempty"`
-	MissingBeforeEvent uint64       `json:"missingBeforeEvent,omitempty"`
+	Status                           StitchStatus `json:"status"`
+	SnapshotLastEventSequenceNumber  uint64       `json:"snapshotLastEventSequenceNumber"`
+	FirstBufferedEventSequenceNumber uint64       `json:"firstBufferedEventSequenceNumber,omitempty"`
+	MissingAfterEventSequenceNumber  uint64       `json:"missingAfterEventSequenceNumber,omitempty"`
+	MissingBeforeEventSequenceNumber uint64       `json:"missingBeforeEventSequenceNumber,omitempty"`
 }
 
 // ValidateStitch validates that events are sorted, contiguous, and can apply to a snapshot.
-func ValidateStitch(snapshotLastEventNumber uint64, events []*Event) StitchResult {
+func ValidateStitch(snapshotLastEventSequenceNumber uint64, events []*Event) StitchResult {
 	result := StitchResult{
-		Status:            StitchStatusOK,
-		SnapshotLastEvent: snapshotLastEventNumber,
+		Status:                          StitchStatusOK,
+		SnapshotLastEventSequenceNumber: snapshotLastEventSequenceNumber,
 	}
 	if len(events) == 0 {
 		return result
 	}
-	result.FirstBufferedEvent = events[0].EventNumber
+	result.FirstBufferedEventSequenceNumber = events[0].EventSequenceNumber
 
 	var previous uint64
 	for i, event := range events {
 		if event == nil {
 			continue
 		}
-		if i > 0 && event.EventNumber <= previous {
+		if i > 0 && event.EventSequenceNumber <= previous {
 			result.Status = StitchStatusUnsorted
 			return result
 		}
-		if i > 0 && event.EventNumber != previous+1 {
+		if i > 0 && event.EventSequenceNumber != previous+1 {
 			result.Status = StitchStatusGap
-			result.MissingAfterEvent = previous
-			result.MissingBeforeEvent = event.EventNumber
+			result.MissingAfterEventSequenceNumber = previous
+			result.MissingBeforeEventSequenceNumber = event.EventSequenceNumber
 			return result
 		}
-		previous = event.EventNumber
+		previous = event.EventSequenceNumber
 	}
 
 	for _, event := range events {
-		if event == nil || event.EventNumber <= snapshotLastEventNumber {
+		if event == nil || event.EventSequenceNumber <= snapshotLastEventSequenceNumber {
 			continue
 		}
-		if event.EventNumber != snapshotLastEventNumber+1 {
+		if event.EventSequenceNumber != snapshotLastEventSequenceNumber+1 {
 			result.Status = StitchStatusGap
-			result.MissingAfterEvent = snapshotLastEventNumber
-			result.MissingBeforeEvent = event.EventNumber
+			result.MissingAfterEventSequenceNumber = snapshotLastEventSequenceNumber
+			result.MissingBeforeEventSequenceNumber = event.EventSequenceNumber
 		}
 		return result
 	}

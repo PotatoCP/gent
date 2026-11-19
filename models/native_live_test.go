@@ -8,7 +8,6 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/output"
 	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
@@ -28,11 +27,11 @@ type liveProgramCall struct {
 	err    error
 }
 
-func liveProgramCalls(ctx *gent.ExecutionContext) ([][]liveProgramCall, error) {
+func liveProgramCalls(execCtx *gent.ExecutionContext) ([][]liveProgramCall, error) {
 	var programs [][]liveProgramCall
 	var calls []liveProgramCall
 	collecting := false
-	for _, event := range ctx.Events() {
+	for _, event := range providerEvents(execCtx) {
 		if before, ok := event.(*gent.BeforeToolCallEvent); ok && before.ToolName == "run_code" {
 			collecting = true
 			calls = nil
@@ -56,7 +55,7 @@ func liveProgramCalls(ctx *gent.ExecutionContext) ([][]liveProgramCall, error) {
 		var input any
 		if record.Input() != nil {
 			var err error
-			input, err = ctx.Codecs().Decode(*record.Input())
+			input, err = execCtx.Codecs().Decode(*record.Input())
 			if err != nil {
 				return nil, err
 			}
@@ -64,7 +63,7 @@ func liveProgramCalls(ctx *gent.ExecutionContext) ([][]liveProgramCall, error) {
 		calls = append(calls, liveProgramCall{record.Name(), input,
 			gent.ContentTextData(record.Response().Parts()), after.Error})
 	}
-	return programs, ctx.RecordingError()
+	return programs, execCtx.RecordingError()
 }
 
 func liveToolChain(calls *[]string, withSearch bool) (*toolchain.JsToolChainWrapper, error) {
@@ -160,45 +159,43 @@ The program and its tool calls are complete. Do not run them again.`)}}, nil
 					}
 					return &gent.OutputValidationResult{Accepted: true}, nil
 				})
-			agent := react.NewWithOutput(model, out).WithToolChain(program).
-				WithRecoveryVersion("live-native/v1").WithCallOptions(gent.WithMaxTokens(3000))
+			agent := react.NewWithOutput(model, out).WithCallOptions(gent.WithMaxTokens(3000))
 			worker, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
-			ctx := gent.NewExecutionContext(worker, "live native",
-				gent.NewBasicLoopData(gent.NewTask(gent.TextContent{Text: task})))
+			runner, execCtx := newModelExecution(t, worker, agent, &gent.Config{ToolChain: program,
+				Limits: []gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 6}}})
 			t.Cleanup(func() {
 				if !t.Failed() {
 					return
 				}
 				// Show only fixture calls. Provider continuation items and credentials stay private.
-				for _, event := range ctx.Events() {
+				for _, event := range providerEvents(execCtx) {
 					after, ok := event.(*gent.AfterModelCallEvent)
 					if !ok || after.Response == nil {
 						continue
 					}
 					for _, choice := range after.Response.Choices {
-						for _, call := range choice.ToolCalls {
+						for _, call := range choice.ToolCalls() {
 							t.Logf("native call: %s %s", call.FunctionCall.Name, call.FunctionCall.Arguments)
 						}
 					}
 				}
 			})
-			ctx.SetLimits([]gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 6}})
-			value, result, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
+			value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart(task)))
 			if !assert.NoError(t, err) {
 				return
 			}
 			assert.Equal(t, gent.TerminationSuccess, result.TerminationReason)
 			assert.Equal(t, "record-finished", value)
 			assert.Equal(t, "record-finished", gent.ContentText(result.Output))
-			programs, err := liveProgramCalls(ctx)
+			programs, err := liveProgramCalls(execCtx)
 			if !assert.NoError(t, err) {
 				return
 			}
 			assert.Equal(t, test.expected, expected{calls, programs})
 			if test.input.search {
 				var catalogs [][]string
-				for _, event := range ctx.Events() {
+				for _, event := range providerEvents(execCtx) {
 					if before, ok := event.(*gent.BeforeModelCallEvent); ok {
 						var names []string
 						for _, tool := range before.Request.Options.Tools {
@@ -210,8 +207,7 @@ The program and its tool calls are complete. Do not run them again.`)}}, nil
 				if assert.GreaterOrEqual(t, len(catalogs), 3) {
 					// Shared search returns definitions in its result. Native exposure stays fixed.
 					for _, catalog := range catalogs {
-						assert.Equal(t, []string{"tool_registry_search", "execute_tool", "ping", "run_code"},
-							catalog)
+						assert.Equal(t, []string{"tool_registry_search", "execute_tool", "ping", "run_code"}, catalog)
 					}
 				}
 			}

@@ -41,41 +41,35 @@ func testCalls(content string) []*gent.ModelToolCallRequest {
 	return result
 }
 
-func executeTestCalls(chain gent.ToolChain, ctx *gent.ExecutionContext,
+func executeTestCalls(chain gent.ToolChain, execCtx *gent.ExecutionContext,
 	content string, format gent.TextFormat,
 ) ([]*gent.ToolCallRecord, error) {
-	if ctx == nil {
-		ctx = newExecCtx()
-	}
-	return executeToolPlan(ctx, chain, testCalls(content), format)
+	return executeToolPlan(execCtx, chain, testCalls(content), format)
 }
 
-func executeTestCode(chain *JsToolChainWrapper, ctx *gent.ExecutionContext,
+func executeTestCode(chain *JsToolChainWrapper, execCtx *gent.ExecutionContext,
 	code string, format gent.TextFormat,
 ) ([]*gent.ToolCallRecord, error) {
-	if ctx == nil {
-		ctx = newExecCtx()
-	}
 	args, err := json.Marshal(map[string]string{"code": code})
 	if err != nil {
 		return nil, err
 	}
 	calls := []*gent.ModelToolCallRequest{nativeCall("run_code", string(args))}
-	result, err := executeToolPlan(ctx, chain, calls, format)
+	result, err := executeToolPlan(execCtx, chain, calls, format)
 	if err != nil {
 		return nil, err
 	}
 	return result, nil
 }
 
-func executeToolPlan(ctx *gent.ExecutionContext, chain gent.ToolChain,
+func executeToolPlan(execCtx *gent.ExecutionContext, chain gent.ToolChain,
 	calls []*gent.ModelToolCallRequest, format gent.TextFormat) ([]*gent.ToolCallRecord, error) {
-	plan, err := chain.PrepareCalls(ctx, calls)
+	plan, err := chain.PrepareCalls(execCtx, calls)
 	if err != nil {
 		return nil, err
 	}
 	for plan.NextCall < len(plan.Calls) {
-		if _, err := chain.ExecuteNext(ctx, plan, format); err != nil {
+		if _, err := chain.ExecuteNext(execCtx, plan, format); err != nil {
 			return nil, fmt.Errorf("execute tool %d: %w", plan.NextCall, err)
 		}
 	}

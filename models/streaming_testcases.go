@@ -75,21 +75,11 @@ func NewChunkWriterWithConfig(w io.Writer, config StreamOutputConfig) *ChunkWrit
 
 // Write writes a chunk and flushes immediately.
 func (w *ChunkWriter) Write(chunk gent.StreamChunk) {
-	if len(gent.ContentText(chunk.Content)) > 0 {
-		content := gent.ContentText(chunk.Content)
-		if w.config.EscapeNewlines {
-			content = strings.ReplaceAll(content, "\n", "\\n")
+	for _, part := range chunk.Content {
+		item, ok := part.(*gent.AssistantContent)
+		if !ok {
+			continue
 		}
-		if w.config.ShowChunkBoundaries {
-			fmt.Fprintf(w.bw, "|%s", content)
-		} else {
-			fmt.Fprint(w.bw, content)
-		}
-		w.flush()
-		w.contentLen += len(gent.ContentText(chunk.Content))
-		w.chunkCount++
-	}
-	for _, item := range chunk.MetaContent {
 		content := gent.ContentText(item.Content)
 		if w.config.EscapeNewlines {
 			content = strings.ReplaceAll(content, "\n", "\\n")
@@ -100,7 +90,7 @@ func (w *ChunkWriter) Write(chunk gent.StreamChunk) {
 			fmt.Fprint(w.bw, content)
 		}
 		w.flush()
-		if item.Type == gent.MetaContentReasoning {
+		if item.Type == gent.AssistantContentReasoning {
 			w.reasoningLen += len(gent.ContentText(item.Content))
 		} else {
 			w.contentLen += len(gent.ContentText(item.Content))
@@ -213,10 +203,8 @@ func RunStreamingBasic(ctx context.Context, w io.Writer, config StreamOutputConf
 		return err
 	}
 
-	execCtx := gent.NewExecutionContext(ctx, "streaming-test", nil)
-	stream, err := execCtx.GenerateContentStream(
-		model,
-		gent.ModelCall{StreamId: "", StreamTopicId: ""},
+	stream, err := model.GenerateContentStream(
+		ctx,
 		gent.NewModelCallRequest([]*gent.ModelMessage{
 			gent.TextParts(
 				gent.ChatMessageTypeHuman,
@@ -235,9 +223,7 @@ func RunStreamingBasic(ctx context.Context, w io.Writer, config StreamOutputConf
 
 	cw := NewChunkWriterWithConfig(w, config)
 	for chunk := range stream.Chunks() {
-		if chunk.Err != nil {
-			return fmt.Errorf("stream error: %w", chunk.Err)
-		}
+
 		cw.Write(chunk)
 	}
 	cw.End()
@@ -268,10 +254,8 @@ func RunStreamingWithReasoning(ctx context.Context, w io.Writer, config StreamOu
 		return err
 	}
 
-	execCtx := gent.NewExecutionContext(ctx, "streaming-test", nil)
-	stream, err := execCtx.GenerateContentStream(
-		model,
-		gent.ModelCall{StreamId: "", StreamTopicId: ""},
+	stream, err := model.GenerateContentStream(
+		ctx,
 		gent.NewModelCallRequest([]*gent.ModelMessage{
 			gent.TextParts(
 				gent.ChatMessageTypeHuman,
@@ -290,9 +274,7 @@ func RunStreamingWithReasoning(ctx context.Context, w io.Writer, config StreamOu
 
 	cw := NewChunkWriterWithConfig(w, config)
 	for chunk := range stream.Chunks() {
-		if chunk.Err != nil {
-			return fmt.Errorf("stream error: %w", chunk.Err)
-		}
+
 		cw.Write(chunk)
 	}
 	cw.End()
@@ -323,10 +305,8 @@ func RunStreamingSlowConsumer(ctx context.Context, w io.Writer, config StreamOut
 		return err
 	}
 
-	execCtx := gent.NewExecutionContext(ctx, "streaming-test", nil)
-	stream, err := execCtx.GenerateContentStream(
-		model,
-		gent.ModelCall{StreamId: "", StreamTopicId: ""},
+	stream, err := model.GenerateContentStream(
+		ctx,
 		gent.NewModelCallRequest([]*gent.ModelMessage{
 			gent.TextParts(
 				gent.ChatMessageTypeHuman,
@@ -349,10 +329,8 @@ func RunStreamingSlowConsumer(ctx context.Context, w io.Writer, config StreamOut
 	startTime := time.Now()
 
 	for chunk := range stream.Chunks() {
-		if chunk.Err != nil {
-			return fmt.Errorf("stream error: %w", chunk.Err)
-		}
-		if len(chunk.MetaContent) > 0 {
+
+		if len(chunk.Content) > 0 {
 			time.Sleep(50 * time.Millisecond)
 			cw.Write(chunk)
 		}
@@ -386,10 +364,8 @@ func RunStreamingNoListener(ctx context.Context, w io.Writer, _ StreamOutputConf
 		return err
 	}
 
-	execCtx := gent.NewExecutionContext(ctx, "streaming-test", nil)
-	stream, err := execCtx.GenerateContentStream(
-		model,
-		gent.ModelCall{StreamId: "", StreamTopicId: ""},
+	stream, err := model.GenerateContentStream(
+		ctx,
 		gent.NewModelCallRequest([]*gent.ModelMessage{
 			gent.TextParts(gent.ChatMessageTypeHuman, "Say hello in one word."),
 		}),
@@ -406,11 +382,10 @@ func RunStreamingNoListener(ctx context.Context, w io.Writer, _ StreamOutputConf
 		return fmt.Errorf("failed to get response: %w", err)
 	}
 
-	fmt.Fprintf(w, "Response received: %q\n", response.Choices[0].CandidateContent)
-
-	if len(response.Choices) == 0 || len(response.Choices[0].CandidateContent) == 0 {
+	if len(response.Choices) == 0 || len(response.Choices[0].CandidateContent()) == 0 {
 		return fmt.Errorf("expected non-empty response")
 	}
+	fmt.Fprintf(w, "Response received: %q\n", gent.ContentText(response.Choices[0].CandidateContent()))
 
 	return nil
 }
@@ -433,9 +408,7 @@ func runStreamingCancellation(base context.Context, w io.Writer, config StreamOu
 	defer stop()
 	worker, cancel := context.WithCancel(deadline)
 	defer cancel()
-	execCtx := gent.NewExecutionContext(worker, "streaming-test", nil)
-	defer execCtx.Release()
-	stream, err := execCtx.GenerateContentStream(model, gent.ModelCall{},
+	stream, err := model.GenerateContentStream(worker,
 		gent.NewModelCallRequest([]*gent.ModelMessage{
 			gent.TextParts(gent.ChatMessageTypeHuman,
 				"Write a very long story about a programmer. Make it at least 500 words."),
@@ -472,14 +445,9 @@ func runStreamingCancellation(base context.Context, w io.Writer, config StreamOu
 				cw.PrintStats()
 				return nil
 			}
-			if chunk.Err != nil {
-				if !cancelled || !streamCancellationOnly(chunk.Err) {
-					return fmt.Errorf("unexpected stream error: %w", chunk.Err)
-				}
-				continue
-			}
+
 			cw.Write(chunk)
-			if len(chunk.MetaContent) == 0 {
+			if len(chunk.Content) == 0 {
 				continue
 			}
 			chunks++
@@ -541,10 +509,8 @@ func RunStreamingConcurrent(ctx context.Context, w io.Writer, _ StreamOutputConf
 		go func(idx int, p string) {
 			defer wg.Done()
 
-			execCtx := gent.NewExecutionContext(ctx, "streaming-test", nil)
-			stream, err := execCtx.GenerateContentStream(
-				model,
-				gent.ModelCall{StreamId: "", StreamTopicId: ""},
+			stream, err := model.GenerateContentStream(
+				ctx,
 				gent.NewModelCallRequest([]*gent.ModelMessage{
 					gent.TextParts(gent.ChatMessageTypeHuman, p),
 				}),
@@ -557,11 +523,8 @@ func RunStreamingConcurrent(ctx context.Context, w io.Writer, _ StreamOutputConf
 			var content strings.Builder
 			chunks := 0
 			for chunk := range stream.Chunks() {
-				if chunk.Err != nil {
-					results[idx].err = chunk.Err
-					return
-				}
-				content.WriteString(gent.MetaText(chunk.MetaContent, gent.MetaContentIntermediary))
+
+				content.WriteString(gent.ContentText(chunk.Content))
 				chunks++
 			}
 
@@ -599,10 +562,8 @@ func RunStreamingResponseInfo(ctx context.Context, w io.Writer, config StreamOut
 		return err
 	}
 
-	execCtx := gent.NewExecutionContext(ctx, "streaming-test", nil)
-	stream, err := execCtx.GenerateContentStream(
-		model,
-		gent.ModelCall{StreamId: "", StreamTopicId: ""},
+	stream, err := model.GenerateContentStream(
+		ctx,
 		gent.NewModelCallRequest([]*gent.ModelMessage{
 			gent.TextParts(gent.ChatMessageTypeHuman, "What is 2+2?"),
 		}),
@@ -618,9 +579,7 @@ func RunStreamingResponseInfo(ctx context.Context, w io.Writer, config StreamOut
 
 	cw := NewChunkWriterWithConfig(w, config)
 	for chunk := range stream.Chunks() {
-		if chunk.Err != nil {
-			return fmt.Errorf("stream error: %w", chunk.Err)
-		}
+
 		cw.Write(chunk)
 	}
 	cw.End()

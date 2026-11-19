@@ -2,204 +2,116 @@ package gent
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"time"
+	core "github.com/rickchristie/gent/internal/core"
 )
 
 // ModelMessage is the provider-neutral request message. Continuation contains the exact ordered
 // provider items for an assistant turn. An adapter must preserve them or reject the request.
-type ModelMessage struct {
-	Role         ChatMessageType
-	Parts        []ContentPart
-	Continuation *ProviderContinuation
-}
+type ModelMessage = core.ModelMessage
 
-type ProviderContinuation struct {
-	Provider string
-	Items    []json.RawMessage
-}
+type ProviderContinuation = core.ProviderContinuation
 
-type ChatMessageType string
+type ChatMessageType = core.ChatMessageType
 
-const (
-	ChatMessageTypeSystem ChatMessageType = "system"
-	ChatMessageTypeHuman  ChatMessageType = "human"
-	ChatMessageTypeAI     ChatMessageType = "ai"
-	ChatMessageTypeTool   ChatMessageType = "tool"
-)
+// ChatMessageTypeSystem identifies system instructions outside compacted conversation input.
+const ChatMessageTypeSystem ChatMessageType = core.ChatMessageTypeSystem
+
+// ChatMessageTypeHuman identifies a user-role message; saved origin determines user authorship.
+const ChatMessageTypeHuman ChatMessageType = core.ChatMessageTypeHuman
+
+// ChatMessageTypeAI identifies an assistant response or continuation.
+const ChatMessageTypeAI ChatMessageType = core.ChatMessageTypeAI
+
+// ChatMessageTypeTool identifies prepared tool results supplied to the model.
+const ChatMessageTypeTool ChatMessageType = core.ChatMessageTypeTool
 
 // ContentPart is implemented by the supported text, media, and native call values.
-type ContentPart interface{ isContentPart() }
+type ContentPart = core.ContentPart
 
-type TextContent struct{ Text string }
+type TextContent = core.TextContent
 
-func (TextContent) isContentPart()   {}
-func (p TextContent) String() string { return p.Text }
+type ImageURLContent = core.ImageURLContent
 
-type ImageURLContent struct {
-	URL    string
-	Detail string
-}
+type BinaryContent = core.BinaryContent
 
-func (ImageURLContent) isContentPart()   {}
-func (p ImageURLContent) String() string { return p.URL }
+type FunctionCall = core.FunctionCall
 
-type BinaryContent struct {
-	MIMEType string
-	Data     []byte
-}
+type ModelToolCallRequest = core.ModelToolCallRequest
 
-func (BinaryContent) isContentPart() {}
-func (p BinaryContent) String() string {
-	return "data:" + p.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(p.Data)
-}
+type ToolDefinition = core.ToolDefinition
 
-type FunctionCall struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
+type FunctionDefinition = core.FunctionDefinition
 
-type ModelToolCallRequest struct {
-	ID           string        `json:"id"`
-	Type         string        `json:"type"`
-	FunctionCall *FunctionCall `json:"function,omitempty"`
-}
+type ToolChoice = core.ToolChoice
 
-func (ModelToolCallRequest) isContentPart() {}
+type FunctionReference = core.FunctionReference
 
-type ToolDefinition struct {
-	Type     string              `json:"type"`
-	Function *FunctionDefinition `json:"function,omitempty"`
-}
+type CacheControl = core.CacheControl
 
-type FunctionDefinition struct {
-	Name         string         `json:"name"`
-	Description  string         `json:"description"`
-	Parameters   any            `json:"parameters,omitempty"`
-	OutputSchema map[string]any `json:"output_schema,omitempty"`
-	Strict       bool           `json:"strict,omitempty"`
-}
-
-type ToolChoice struct {
-	Type     string             `json:"type"`
-	Function *FunctionReference `json:"function,omitempty"`
-}
-type FunctionReference struct {
-	Name string `json:"name"`
-}
-
-type CacheControl struct {
-	Type     string
-	Duration time.Duration
-}
-type CachedContent struct {
-	ContentPart
-	CacheControl *CacheControl
-}
-
-func (CachedContent) isContentPart() {}
+type CachedContent = core.CachedContent
 
 func TextParts(role ChatMessageType, texts ...string) *ModelMessage {
-	message := &ModelMessage{Role: role, Parts: []ContentPart{}}
-	for _, text := range texts {
-		message.Parts = append(message.Parts, TextContent{Text: text})
-	}
-	return message
+	return core.TextParts(role, texts...)
 }
 
 // ImageURLPart retains a remote reference. The caller owns URL expiry and content changes,
 // including changes between requests or after recovery. Use BytesPart to preserve content.
 // Adapters send the URL when supported, otherwise load the image for that request. A load
 // failure becomes safe steering text; Gent does not repeat the source tool.
-func ImageURLPart(url string) ContentPart { return ImageURLContent{URL: url} }
+func ImageURLPart(url string) ContentPart {
+	return core.ImageURLPart(url)
+}
+
 func BinaryPart(mime string, data []byte) BinaryContent {
-	return BinaryContent{MIMEType: mime, Data: data}
+	return core.BinaryPart(mime, data)
 }
 
 // CallOptions describes provider controls independently of an SDK. Unsupported settings must
 // produce an adapter error; silently dropping a setting can change execution behavior.
 // Temperature and TopP are optional. A pointer preserves an explicit zero.
-type CallOptions struct {
-	SteeringMessages       SteeringMessages
-	Model                  string
-	CandidateCount         int
-	MaxTokens              int
-	Temperature            *float64
-	StopWords              []string
-	TopK                   int
-	TopP                   *float64
-	Seed                   int
-	MinLength              int
-	MaxLength              int
-	N                      int
-	RepetitionPenalty      float64
-	FrequencyPenalty       float64
-	PresencePenalty        float64
-	JSONMode               bool
-	Tools                  []*ToolDefinition
-	ToolChoice             any
-	Metadata               map[string]any
-	ResponseMIMEType       string
-	ResponseSchema         map[string]any
-	ResponseModalities     []string
-	ImageMaxWidth          int
-	ImageMaxHeight         int
-	ImageMaxFileSizeBytes  int64
-	ImageMIMETypes         []string
-	StreamingFunc          func(context.Context, []byte) error         `json:"-"`
-	StreamingReasoningFunc func(context.Context, []byte, []byte) error `json:"-"`
-}
+type CallOptions = core.CallOptions
 
-type CallOption func(*CallOptions)
+type CallOption = core.CallOption
 
 func WithModel(model string) CallOption {
-	return func(o *CallOptions) { o.Model = model }
+	return core.WithModel(model)
 }
+
 func WithMaxTokens(n int) CallOption {
-	return func(o *CallOptions) { o.MaxTokens = n }
+	return core.WithMaxTokens(n)
 }
+
 func WithTemperature(n float64) CallOption {
-	return func(o *CallOptions) { o.Temperature = &n }
+	return core.WithTemperature(n)
 }
+
 func WithTopP(n float64) CallOption {
-	return func(o *CallOptions) { o.TopP = &n }
+	return core.WithTopP(n)
 }
+
 func WithTools(tools []*ToolDefinition) CallOption {
-	return func(o *CallOptions) { o.Tools = tools }
+	return core.WithTools(tools)
 }
+
 func WithOptions(options *CallOptions) CallOption {
-	return func(o *CallOptions) { *o = *options }
+	return core.WithOptions(options)
 }
 
 // WithStreamingFunc receives answer or unlabelled text. Read Stream.Chunks for all channels,
 // including provider-labelled commentary, without mixing them into the answer callback.
 func WithStreamingFunc(f func(context.Context, []byte) error) CallOption {
-	return func(o *CallOptions) { o.StreamingFunc = f }
-}
-func WithStreamingReasoningFunc(f func(context.Context, []byte, []byte) error) CallOption {
-	return func(o *CallOptions) { o.StreamingReasoningFunc = f }
+	return core.WithStreamingFunc(f)
 }
 
-type ThinkingMode string
-type ThinkingConfig struct {
-	Mode               ThinkingMode
-	BudgetTokens       int
-	ReturnThinking     bool
-	StreamThinking     bool
-	InterleaveThinking bool
+func WithStreamingReasoningFunc(f func(context.Context, []byte, []byte) error) CallOption {
+	return core.WithStreamingReasoningFunc(f)
 }
+
+// ThinkingMode passes an open provider-native mode name. It is not a closed Gent enum.
+type ThinkingMode = core.ThinkingMode
+
+type ThinkingConfig = core.ThinkingConfig
 
 func WithStreamThinking(enabled bool) CallOption {
-	return func(o *CallOptions) {
-		if o.Metadata == nil {
-			o.Metadata = map[string]any{}
-		}
-		config, ok := o.Metadata["thinking_config"].(*ThinkingConfig)
-		if !ok {
-			config = &ThinkingConfig{Mode: "auto"}
-			o.Metadata["thinking_config"] = config
-		}
-		config.StreamThinking = enabled
-	}
+	return core.WithStreamThinking(enabled)
 }

@@ -9,13 +9,12 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestProgramParallelOverlapAndOrder(t *testing.T) {
 	base, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ctx := gent.NewExecutionContext(base, "parallel", gent.NewBasicLoopData(nil))
-	defer ctx.Release()
 	var started, active, peak atomic.Int32
 	ready := make(chan struct{})
 	tool := gent.DefineTool("read", func(ctx context.Context, input validationInput) (
@@ -38,10 +37,21 @@ func TestProgramParallelOverlapAndOrder(t *testing.T) {
 		}
 		return capturedToolResponse(input.ID, nil)
 	}).MustBuild()
-	records, err := executeTestCode(NewJsToolChainWrapper(New().RegisterTool(tool)), ctx,
-		`const results=tool.parallelCall([{tool:"read",args:{id:"first"}},
+	wrapper := NewJsToolChainWrapper(New().RegisterTool(tool))
+	var records []*gent.ToolCallRecord
+	loop := &toolTestLoop{next: func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		var err error
+		records, err = executeTestCode(wrapper, execCtx,
+			`const results=tool.parallelCall([{tool:"read",args:{id:"first"}},
 {tool:"read",args:{id:"second"}}]);
 console.log(results.map(r=>r.parts[0].text).join(","));`, testFormat())
+		if err != nil {
+			return nil, err
+		}
+		return toolTestDone(execCtx)
+	}}
+	runner, ctx, _ := newToolTestRun(t, base, loop, &gent.Config{ToolChain: wrapper})
+	_, _, err := runner.NewTurn(ctx, gent.NewTask(gent.TextPart("Read two records in parallel.")))
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -72,8 +82,6 @@ func TestInterruptedProgramNeverRestarts(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			base, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			ctx := gent.NewExecutionContext(base, "program", gent.NewBasicLoopData(nil))
-			defer ctx.Release()
 			var started, active, checks atomic.Int32
 			build := func() *JsToolChainWrapper {
 				tool := gent.DefineTool("book", func(callCtx context.Context, input validationInput) (
@@ -100,27 +108,26 @@ func TestInterruptedProgramNeverRestarts(t *testing.T) {
 				code = `tool.parallelCall([{tool:"book",args:{id:"first"}},
 {tool:"book",args:{id:"second"}}]);tool.call({tool:"book",args:{id:"later"}});`
 			}
-			_, err := executeTestCode(build(), ctx, code, testFormat())
+			chain := build()
+			loop := &toolTestLoop{next: func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+				if _, err := executeTestCode(chain, execCtx, code, testFormat()); err != nil {
+					return nil, err
+				}
+				return toolTestDone(execCtx)
+			}}
+			runner, ctx, store := newToolTestRun(t, base, loop, &gent.Config{ToolChain: chain})
+			_, _, err := runner.NewTurn(ctx, gent.NewTask(gent.TextPart("Book the requested items.")))
 			assert.ErrorIs(t, err, context.Canceled)
 			assert.Equal(t, int32(0), active.Load())
-			saved, err := ctx.Export()
-			assert.NoError(t, err)
-			chain := build()
-			codecs := gent.NewCodecRegistry()
-			assert.NoError(t, chain.RegisterCodecs(codecs))
-			fresh, err := gent.RestoreExecutionContext(context.Background(), saved,
-				gent.RestoreBindings{Codecs: codecs})
-			if !assert.NoError(t, err) {
-				return
-			}
-			defer fresh.Release()
-			plan, found, err := fresh.SavedToolPlan()
-			assert.NoError(t, err)
-			assert.True(t, found)
-			result, err := chain.ExecuteNext(fresh, plan, testFormat())
-			if !assert.NoError(t, err) {
-				return
-			}
+			freshChain := build()
+			var plan *gent.ToolPlan
+			freshLoop := planTestLoop(freshChain, nil, &plan)
+			freshRunner, fresh := restoreToolTest(t, freshLoop, &gent.Config{
+				Codecs: gent.NewCodecRegistry(), ToolChain: freshChain}, store.runStateSnapshot)
+			_, completed, err := freshRunner.Continue(fresh)
+			require.NoError(t, err)
+			require.Equal(t, gent.ExecutionFinished, completed.Status)
+			result := plan.Results[0]
 			assert.Equal(t, test.expected, expected{started.Load(), checks.Load()})
 			assert.Equal(t, gent.ToolResponseRecovery, result.Kind())
 			assert.Equal(t, gent.ToolRecoveryUnresolved, result.Recovery().Status)
@@ -131,10 +138,10 @@ func TestInterruptedProgramNeverRestarts(t *testing.T) {
 	}
 }
 
-func assertProgramStateCleared(t *testing.T, ctx *gent.ExecutionContext) {
+func assertProgramStateCleared(t *testing.T, execCtx *gent.ExecutionContext) {
 	t.Helper()
 	for _, key := range []string{"gent:program", "gent:program_calls"} {
-		value, found, err := ctx.CheckpointState(key)
+		value, found, err := execCtx.CheckpointState(key)
 		assert.NoError(t, err)
 		assert.False(t, found)
 		assert.Nil(t, value)
@@ -151,26 +158,28 @@ func TestParallelRequiresExplicitSupport(t *testing.T) {
 		wrap func(gent.ToolChain) gent.ToolChain
 	}
 	type expected struct {
-		calls int
-		err   string
+		calls  int
+		output string
 	}
 	type testCase struct {
 		name     string
 		input    input
 		expected expected
 	}
+	output := `<output>
+TypeError: tool.parallelCall requires a ParallelToolChain
+
+</output>`
 	cases := []testCase{
 		{"no interface",
 			input{func(c gent.ToolChain) gent.ToolChain { return &sequentialProgramChain{c} }},
-			expected{0, "tool.parallelCall requires a ParallelToolChain"}},
+			expected{0, output}},
 		{"disabled",
 			input{func(c gent.ToolChain) gent.ToolChain { return &disabledParallelProgramChain{c} }},
-			expected{0, "tool.parallelCall requires a ParallelToolChain"}},
+			expected{0, output}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := newExecCtx()
-			defer ctx.Release()
 			calls := 0
 			chain := New().RegisterTool(gent.DefineTool("read", func(context.Context, struct{}) (
 				*gent.ToolExecutionResponse, error,
@@ -178,14 +187,18 @@ func TestParallelRequiresExplicitSupport(t *testing.T) {
 				calls++
 				return capturedToolResponse("read", nil)
 			}).MustBuild())
-			records, err := executeTestCode(NewJsToolChainWrapper(test.input.wrap(chain)), ctx,
-				`tool.parallelCall([{tool:"read",args:{}},{tool:"read",args:{}}]);`, testFormat())
-			assert.NoError(t, err)
-			assert.Equal(t, gent.ToolResponseCallError, records[0].Kind())
-			diagnostic, err := ctx.Codecs().Decode(*records[0].Error())
-			assert.NoError(t, err)
-			assert.EqualError(t, diagnostic.(error), test.expected.err)
-			assert.Equal(t, test.expected.calls, calls)
+			wrapper := NewJsToolChainWrapper(test.input.wrap(chain))
+			runToolScenario(t, wrapper, &gent.Config{}, func(execCtx *gent.ExecutionContext) {
+				records, err := executeTestCode(wrapper, execCtx,
+					`tool.parallelCall([{tool:"read",args:{}},{tool:"read",args:{}}]);`, testFormat())
+				if !assert.NoError(t, err) {
+					return
+				}
+				assert.Equal(t, gent.ToolResponseExecution, records[0].Kind())
+				assert.Equal(t, &gent.ToolExecutionResponse{Status: gent.ToolExecuted,
+					Parts: []gent.ContentPart{gent.TextPart(test.expected.output)}}, records[0].Execution())
+				assert.Equal(t, test.expected.calls, calls)
+			})
 		})
 	}
 }
@@ -193,8 +206,6 @@ func TestParallelRequiresExplicitSupport(t *testing.T) {
 func TestParallelPanicStopsAndJoinsWorkers(t *testing.T) {
 	base, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ctx := gent.NewExecutionContext(base, "panic", gent.NewBasicLoopData(nil))
-	defer ctx.Release()
 	ready := make(chan struct{})
 	var active atomic.Int32
 	chain := New()
@@ -217,14 +228,20 @@ func TestParallelPanicStopsAndJoinsWorkers(t *testing.T) {
 		}
 		panic("tool failed")
 	}).MustBuild())
-	assert.PanicsWithValue(t, "tool failed", func() {
-		_, err := executeTestCode(NewJsToolChainWrapper(chain), ctx,
+	wrapper := NewJsToolChainWrapper(chain)
+	loop := &toolTestLoop{next: func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+		_, err := executeTestCode(wrapper, execCtx,
 			`tool.parallelCall([{tool:"wait",args:{}},{tool:"fail",args:{}}]);`, testFormat())
+		return nil, err
+	}}
+	runner, ctx, _ := newToolTestRun(t, base, loop, &gent.Config{ToolChain: wrapper})
+	assert.PanicsWithValue(t, "tool failed", func() {
+		_, _, err := runner.NewTurn(ctx, gent.NewTask(gent.TextPart("Run parallel tools.")))
 		if err != nil && !errors.Is(err, context.Canceled) {
 			t.Error(err)
 		}
 	})
 	assert.Equal(t, int32(0), active.Load())
-	assert.True(t, ctx.IsWorkerInterrupted())
-	assert.EqualError(t, context.Cause(ctx.Context()), "gent: parallel tool call panicked")
+	assert.ErrorIs(t, ctx.Context().Err(), context.Canceled)
+	assert.EqualError(t, context.Cause(ctx.Context()), "gent: execution pause requested")
 }

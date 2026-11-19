@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/rickchristie/gent"
-	"github.com/rickchristie/gent/events"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -122,47 +121,67 @@ func TestCustomInputRepresentationValidation(t *testing.T) {
 			expected{details: "args.items[1]: must satisfy maximum (10/1)."}},
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			var received customWireInput
-			calls := 0
-			tool := gent.DefineTool("read", func(_ context.Context, request customWireInput) (
-				*gent.ToolExecutionResponse, error,
-			) {
-				received = request
-				calls++
-				return &gent.ToolExecutionResponse{Status: gent.ToolExecuted}, nil
-			}).ParameterSchema(map[string]any{
-				"type": "object", "properties": map[string]any{
-					"items": map[string]any{"type": "array", "items": map[string]any{
-						"type": "integer", "maximum": 10}},
-					"delays": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-					"window": map[string]any{"type": "object", "properties": map[string]any{
-						"delay": map[string]any{"type": "integer", "maximum": 10}}},
-					"delay": map[string]any{"type": "string"},
-				},
-			}).MustBuild()
-			chain := New().RegisterTool(tool)
-			ctx := newExecCtx()
-			defer ctx.Release()
-			if test.input.hook != nil {
-				ctx.SetEventPublisher(events.NewRegistry().Subscribe(&replaceInput{value: *test.input.hook}))
-			}
-			record := executeNativeTestCall(t, chain, ctx, nativeCall("read", test.input.arguments))
-			assert.Equal(t, test.expected.calls, calls)
-			assert.Equal(t, test.expected.received, received)
-			want := &gent.ToolExecutionResponse{Status: gent.ToolExecuted}
-			if test.expected.details != "" {
-				want.Status = gent.ToolInvalidArguments
-				want.Instructions = chain.GetToolSchema("read").Correction("read", test.expected.details)
-			}
-			assert.Equal(t, want, record.Execution())
-			assert.Equal(t, gent.PrepareExecutionParts(want, gent.DefaultSteeringMessages()),
-				record.Response().Parts())
-			if calls == 1 {
-				restored, err := ctx.Codecs().Decode(*record.Input())
-				assert.NoError(t, err)
-				assert.Equal(t, test.expected.received, restored)
-			}
-		})
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				var received customWireInput
+				calls := 0
+				tool := gent.DefineTool("read", func(_ context.Context, request customWireInput) (
+					*gent.ToolExecutionResponse, error,
+				) {
+					received = request
+					calls++
+					return &gent.ToolExecutionResponse{Status: gent.ToolExecuted}, nil
+				}).ParameterSchema(map[string]any{
+					"type": "object", "properties": map[string]any{
+						"items": map[string]any{"type": "array", "items": map[string]any{
+							"type": "integer", "maximum": 10}},
+						"delays": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+						"window": map[string]any{"type": "object", "properties": map[string]any{
+							"delay": map[string]any{"type": "integer", "maximum": 10}}},
+						"delay": map[string]any{"type": "string"},
+					},
+				}).MustBuild()
+				chain := New().RegisterTool(tool)
+				var hooks *gent.Hooks
+				if test.input.hook != nil {
+					hooks = replacementInputHooks(*test.input.hook)
+				}
+				var hookError string
+				if test.input.hook != nil {
+					hookError = test.expected.details
+				}
+				record, execCtx := runNativeTestCallWithHookError(
+					t,
+					chain,
+					&gent.Config{
+						Hooks: hooks,
+					},
+					nativeCall(
+						"read",
+						test.input.arguments,
+					),
+					hookError,
+				)
+				assert.Equal(t, test.expected.calls, calls)
+				assert.Equal(t, test.expected.received, received)
+				if hookError != "" {
+					return
+				}
+				want := &gent.ToolExecutionResponse{Status: gent.ToolExecuted}
+				if test.expected.details != "" {
+					want.Status = gent.ToolInvalidArguments
+					want.Instructions = chain.GetToolSchema("read").Correction("read", test.expected.details)
+				}
+				assert.Equal(t, want, record.Execution())
+				assert.Equal(t, gent.PrepareExecutionParts(want, gent.DefaultSteeringMessages()),
+					record.Response().Parts())
+				if calls == 1 {
+					restored, err := execCtx.Codecs().Decode(*record.Input())
+					assert.NoError(t, err)
+					assert.Equal(t, test.expected.received, restored)
+				}
+			},
+		)
 	}
 }

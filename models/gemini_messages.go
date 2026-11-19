@@ -83,7 +83,11 @@ func geminiMessages(messages []*gent.ModelMessage, provider string, nativeMedia 
 			return nil, nil, nil, err
 		}
 		var parts []any
-		for _, part := range message.Parts {
+		readable, err := readableAssistantParts(message.Parts)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		for _, part := range readable {
 			if reply, ok := part.(*gent.ModelToolCallResponse); ok {
 				values, err := geminiToolResponse(reply, callIDs)
 				if err != nil {

@@ -40,10 +40,6 @@ func NewOpenRouter(config *Config) *Chat {
 
 func (m *Chat) ModelName() string { return m.config.Model }
 func (m *Chat) Provider() string  { return m.provider }
-func (m *Chat) RecoveryConfig() any {
-	return map[string]any{"api": "chat", "provider": m.provider,
-		"baseURL": m.config.BaseURL, "model": m.config.Model}
-}
 
 func (m *Chat) GenerateContentStream(ctx context.Context,
 	request *gent.ModelCallRequest,
@@ -161,8 +157,7 @@ func (m *Chat) requestBody(request *gent.ModelCallRequest) (
 	if decision.Native {
 		body["response_format"] = chatSchemaFormat(o.ResponseSchema)
 		if m.provider == "llamacpp" {
-			body["response_format"] = map[string]any{"type": "json_schema",
-				"schema": o.ResponseSchema}
+			body["response_format"] = map[string]any{"type": "json_schema", "schema": o.ResponseSchema}
 		}
 	} else if wantsJSONObject(o) {
 		body["response_format"] = map[string]any{"type": "json_object"}

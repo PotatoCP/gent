@@ -47,10 +47,8 @@ func TestBleveIndex_SnippetContainsHighlightedTerms(t *testing.T) {
 	defer idx.Close()
 
 	ctx := context.Background()
-	require.NoError(t, idx.Add(ctx, "billing",
-		"billing payment invoice ledger entries"))
-	require.NoError(t, idx.Add(ctx, "notify",
-		"send notification email sms message"))
+	require.NoError(t, idx.Add(ctx, "billing", "billing payment invoice ledger entries"))
+	require.NoError(t, idx.Add(ctx, "notify", "send notification email sms message"))
 
 	results, err := idx.Search(ctx, "payment invoice", 5)
 	require.NoError(t, err)
@@ -150,9 +148,9 @@ func TestFlatIndex_SnippetIsBestMatchingChunk(t *testing.T) {
 	// When a document has multiple chunks, the snippet is the text of the
 	// highest-scoring chunk — not just its ID or any other chunk.
 	embedder := newMockEmbedder(map[string][]float32{
-		"find refund policy":    l2norm([]float32{1, 0, 0}),
-		"section about billing": l2norm([]float32{0.1, 0.9, 0}),
-		"section about refunds": l2norm([]float32{0.9, 0.1, 0}),
+		"find refund policy":     l2norm([]float32{1, 0, 0}),
+		"section about billing":  l2norm([]float32{0.1, 0.9, 0}),
+		"section about refunds":  l2norm([]float32{0.9, 0.1, 0}),
 		"section about shipping": l2norm([]float32{0, 0, 1}),
 	})
 

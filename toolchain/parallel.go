@@ -2,9 +2,11 @@ package toolchain
 
 import (
 	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/rickchristie/gent"
+	core "github.com/rickchristie/gent/internal/core"
 )
 
 // SupportsParallelCalls permits concurrent execution of independent plans.
@@ -13,7 +15,7 @@ func (c *Registry) SupportsParallelCalls() bool { return true }
 // SupportsParallelCalls permits concurrent execution with separate search state for each plan.
 func (c *SearchChain) SupportsParallelCalls() bool { return true }
 
-func executeParallelToolPlans(ctx *gent.ExecutionContext, chain gent.ToolChain,
+func executeParallelToolPlans(execCtx *gent.ExecutionContext, chain gent.ToolChain,
 	plans []*gent.ToolPlan, format gent.TextFormat,
 ) ([]*gent.ToolCallRecord, error) {
 	// Each worker owns its plan. The VM and result collector remain on the caller goroutine.
@@ -32,13 +34,19 @@ func executeParallelToolPlans(ctx *gent.ExecutionContext, chain gent.ToolChain,
 				if value := recover(); value != nil {
 					firstPanic.Do(func() {
 						panicValue = value
-						ctx.Interrupt(errors.New("gent: parallel tool call panicked"))
+						execCtx.Stop()
 					})
 				}
 			}()
 			for plan.NextCall < len(plan.Calls) {
-				if _, err := chain.ExecuteNext(ctx, plan, format); err != nil {
-					errorsByPlan[i] = err
+				call := plan.Calls[plan.NextCall]
+				if _, err := chain.ExecuteNext(execCtx, plan, format); err != nil {
+					// A returned operation error ends the attempt. Ordinary Tool.Call failures
+					// are handled records and do not take this path. Cancel before joining so
+					// a cooperative peer cannot keep the failed operation alive.
+					err = fmt.Errorf("gent: parallel ToolChain.ExecuteNext for tool %q call %q: %w",
+						call.Name, call.Id, err)
+					errorsByPlan[i] = core.FailAttempt(execCtx, err)
 					return
 				}
 			}

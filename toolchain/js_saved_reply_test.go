@@ -7,43 +7,41 @@ import (
 	"testing"
 
 	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/executor"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type programReplyStore struct {
-	view     gent.RunView
-	codecs   *gent.CodecRegistry
-	accepted *gent.ToolCallRecord
-	snapshot gent.RunView
-	failure  error
+	*toolTestRecorder
+	accepted         *gent.ToolCallRecord
+	runStateSnapshot []byte
+	failure          error
 }
 
-func (s *programReplyStore) Save(_ context.Context, batch *gent.SaveBatch) error {
-	next, err := gent.ApplyBatch(s.view, batch, s.codecs)
-	if err != nil {
+func (store *programReplyStore) Save(ctx context.Context, batch *gent.SaveBatch,
+	capture func() (*gent.RunState, error),
+) error {
+	if err := store.toolTestRecorder.Save(ctx, batch, capture); err != nil {
 		return err
 	}
-	s.view = next
 	for _, event := range batch.Events {
-		if event.Type != "tool_call_finished" {
+		finished, ok := event.Payload.(*gent.AfterToolCallEvent)
+		if !ok || finished.ToolName != nativeCodeTool {
 			continue
 		}
-		value, err := s.codecs.DecodeEvent(event)
+		store.accepted = finished.Output.(*gent.ToolCallRecord)
+		state, err := capture()
 		if err != nil {
 			return err
 		}
-		finished := value.(*gent.AfterToolCallEvent)
-		if finished.ToolName != nativeCodeTool {
-			continue
-		}
-		s.accepted = finished.Output.(*gent.ToolCallRecord)
-		// Preserve the progress/control gap even when the original worker later completes.
-		value, err = s.codecs.Clone(next)
+		store.runStateSnapshot, err = store.codecs.MarshalRunState(state)
 		if err != nil {
 			return err
 		}
-		s.snapshot = value.(gent.RunView)
-		return s.failure
+		// The after-tool save accepts the reply, plan cursor, and cleared program together.
+		// Storage can commit it even when its acknowledgment does not reach the worker.
+		return store.failure
 	}
 	return nil
 }
@@ -57,8 +55,8 @@ func TestProgramReusesAcceptedOuterReply(t *testing.T) {
 		expected expected
 	}
 	cases := []testCase{
-		{"progress before control checkpoint", input{}, expected{1, 0}},
-		{"lost acknowledgement", input{errors.New("outer reply acknowledgement lost")}, expected{1, 0}},
+		{"after tool before iteration completion", input{}, expected{1, 0}},
+		{"lost acknowledgment", input{errors.New("outer reply acknowledgment lost")}, expected{1, 0}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -80,70 +78,56 @@ func TestProgramReusesAcceptedOuterReply(t *testing.T) {
 			}
 			chain := build()
 			codecs := gent.NewCodecRegistry()
-			assert.NoError(t, chain.RegisterCodecs(codecs))
-			store := &programReplyStore{codecs: codecs, failure: test.input.saveError,
-				view: gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "saved-program"}}
-			ctx := gent.NewExecutionContext(context.Background(), "program", gent.NewBasicLoopData(nil),
-				gent.WithRunId("saved-program"), gent.WithCodecs(codecs), gent.WithRecorder(store),
-				gent.WithCheckpointPolicy(gent.CheckpointPolicy{MaxEvents: 1}))
-			defer ctx.Release()
-			// Normal loop setup records this gauge. Restore also computes it from saved history.
-			ctx.Stats().SetGauge(gent.SGScratchpadLength, 0)
+			store := &programReplyStore{toolTestRecorder: &toolTestRecorder{codecs: codecs},
+				failure: test.input.saveError}
 			raw, err := json.Marshal(codeInput{Code: `const reply=tool.call({tool:"fetch",args:{}});
 tool.forward(reply.parts.filter(p=>p.kind==="bytes")); console.log("computed value");`})
-			assert.NoError(t, err)
-			plan, err := chain.PrepareCalls(ctx,
-				[]*gent.ModelToolCallRequest{nativeCall(nativeCodeTool, string(raw))})
-			if !assert.NoError(t, err) {
-				return
-			}
-			_, err = chain.ExecuteNext(ctx, plan, testFormat())
+			require.NoError(t, err)
+			var plan *gent.ToolPlan
+			loop := planTestLoop(chain,
+				[]*gent.ModelToolCallRequest{nativeCall(nativeCodeTool, string(raw))}, &plan)
+			runner := executor.NewRunner[string](loop, &gent.Config{Codecs: codecs,
+				Recorder: store, ToolChain: chain})
+			execCtx, err := runner.NewExecutionContext(context.Background(), "program")
+			require.NoError(t, err)
+			defer execCtx.Release()
+			_, _, err = runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Fetch and display the PDF.")))
 			assert.ErrorIs(t, err, test.input.saveError)
-			if !assert.NotNil(t, store.accepted) {
-				return
-			}
-			parts := store.accepted.Response().Parts()
+			require.NotNil(t, store.accepted)
 			assert.Equal(t, []gent.ContentPart{
-				gent.TextPart("Tool fetch (call saved-program:root:tool:2):"),
+				gent.TextPart("Tool fetch (call " + execCtx.ContextId() + ":tool:2):"),
 				gent.PDFPart([]byte("%PDF-test")), gent.TextPart(`<output>
 computed value
 </output>`),
-			}, parts)
-			// Restore with a new chain and registry, as another server would do.
-			chain, codecs = build(), gent.NewCodecRegistry()
-			assert.NoError(t, chain.RegisterCodecs(codecs))
-			fresh, err := gent.RestoreExecutionContext(context.Background(), store.snapshot,
-				gent.RestoreBindings{Codecs: codecs})
-			if !assert.NoError(t, err) {
-				return
-			}
-			defer fresh.Release()
+			}, store.accepted.Response().Parts())
+			// A fresh chain and registry must reuse the accepted outer reply. In particular,
+			// rebuilding recovery output must not lose console output or forwarded bytes.
+			freshChain, freshCodecs := build(), gent.NewCodecRegistry()
+			freshStore := &toolTestRecorder{codecs: freshCodecs, capture: true}
+			var resumed *gent.ToolPlan
+			freshLoop := planTestLoop(freshChain, nil, &resumed)
+			freshRunner, fresh := restoreToolTest(t, freshLoop, &gent.Config{Codecs: freshCodecs,
+				Recorder: freshStore, ToolChain: freshChain}, store.runStateSnapshot)
 			_, found, err := fresh.CheckpointState("gent:program")
-			assert.NoError(t, err)
-			assert.True(t, found, "the saved control checkpoint must still contain the program")
-			saved, found, err := fresh.SavedToolPlan()
-			if !assert.NoError(t, err) || !assert.True(t, found) {
-				return
-			}
-			actual, err := chain.ExecuteNext(fresh, saved, testFormat())
-			if !assert.NoError(t, err) {
-				return
-			}
-			assert.Equal(t, store.accepted, actual)
+			require.NoError(t, err)
+			require.False(t, found)
+			_, completed, err := freshRunner.Continue(fresh)
+			require.NoError(t, err)
+			require.Equal(t, gent.ExecutionFinished, completed.Status)
 			assert.Equal(t, test.expected, expected{calls, recoveries})
+			assert.Equal(t, []*gent.ToolCallRecord{store.accepted}, resumed.Results)
 			assertProgramStateCleared(t, fresh)
-			view, err := fresh.Export()
-			assert.NoError(t, err)
-			assert.Equal(t, store.snapshot.Runtime, view.Runtime)
-			assert.Equal(t, store.snapshot.Activity, view.Activity[:len(store.snapshot.Activity)])
-			var newToolEvents []string
-			for _, event := range view.Activity[len(store.snapshot.Activity):] {
-				if event.ToolCallId != "" {
-					newToolEvents = append(newToolEvents, event.Type)
+			var toolEvents []string
+			for _, data := range freshStore.batches {
+				var batch gent.SaveBatch
+				require.NoError(t, freshCodecs.Unmarshal(data, &batch))
+				for _, event := range batch.Events {
+					if event.ToolCallId != "" {
+						toolEvents = append(toolEvents, event.Type)
+					}
 				}
 			}
-			assert.Nil(t, newToolEvents)
-			assert.Equal(t, []*gent.ToolCallRecord{store.accepted}, saved.Results)
+			assert.Nil(t, toolEvents)
 		})
 	}
 }

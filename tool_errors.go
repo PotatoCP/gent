@@ -1,10 +1,13 @@
 package gent
 
-import "errors"
-
-var (
-	ErrInvalidJSON     = errors.New("invalid JSON")
-	ErrMissingToolName = errors.New("tool call has no function name")
-	ErrUnknownTool     = errors.New("unknown tool")
-	ErrInvalidToolArgs = errors.New("invalid tool arguments")
+import (
+	core "github.com/rickchristie/gent/internal/core"
 )
+
+var ErrInvalidJSON = core.ErrInvalidJSON
+
+var ErrMissingToolName = core.ErrMissingToolName
+
+var ErrUnknownTool = core.ErrUnknownTool
+
+var ErrInvalidToolArgs = core.ErrInvalidToolArgs

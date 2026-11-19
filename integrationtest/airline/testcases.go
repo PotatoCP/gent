@@ -15,43 +15,12 @@ func RunRescheduleScenario(
 	w io.Writer,
 	config testutil.TestConfig,
 ) error {
-	fixture := NewAirlineFixture(nil, config.Embedder)
-	tp := fixture.TimeProvider()
-
+	chat := NewChatConfig(config)
 	return testutil.RunScenario(ctx, w, config, testutil.ScenarioConfig{
-		Name:        "airline-reschedule",
-		HeaderTitle: "AIRLINE RESCHEDULE SCENARIO",
-		CustomerRequest: `Hi, I'm John Smith and my email is ` +
-			`john.smith@email.com.
-I have a flight booked for tomorrow (flight AA100 from ` +
-			`JFK to LAX) but my meeting is running late.
-Can you help me reschedule to a later flight on the same ` +
-			`day? I'd prefer an evening flight if possible.`,
-		MaxIterations:   15,
-		RegisterTools:   fixture.RegisterAllTools,
-		PolicySuggester: fixture.PolicySuggestionPrompt,
-		SystemPrompt: fmt.Sprintf(`## Task Description
-
-You are a helpful airline customer service agent for SkyWings `+
-			`Airlines.
-Your role is to assist customers with their flight bookings, `+
-			`including checking flight information,
-rescheduling flights, and answering policy questions.
-
-Today is %s (%s).
-
-Always be polite and professional. When rescheduling, make `+
-			`sure to:
-1. Verify the customer's identity and booking
-2. Check the airline's change policy
-3. Search for available alternative flights
-4. Inform the customer of any fees before making changes
-5. Confirm the change and provide updated booking details
-
-SkyWings is an international airline. Reply with customer's `+
-			`language.
-`, tp.Today(), tp.Weekday()),
-		CriticalRules: testutil.CriticalRules(config),
+		Name: "airline-reschedule", HeaderTitle: "AIRLINE RESCHEDULE SCENARIO",
+		CustomerRequest: CustomerRequest, SystemPrompt: chat.SystemPrompt,
+		CriticalRules: chat.CriticalRules, MaxIterations: chat.MaxIterations,
+		RegisterTools: chat.RegisterTools, PolicySuggester: chat.PolicySuggester,
 	})
 }
 
@@ -134,38 +103,7 @@ func NewAirlineInteractiveChat(
 	w io.Writer,
 	config testutil.TestConfig,
 ) (*testutil.InteractiveChat, error) {
-	fixture := NewAirlineFixture(nil, config.Embedder)
-	tp := fixture.TimeProvider()
-
-	return testutil.NewInteractiveChat(w, config, testutil.ChatConfig{
-		Name: "airline",
-		SystemPrompt: fmt.Sprintf(`## Task Description
-
-You are a helpful airline customer service agent for SkyWings `+
-			`Airlines.
-Your role is to assist customers with their flight bookings, `+
-			`including checking flight information,
-rescheduling flights, and answering policy questions.
-
-Today is %s (%s).
-
-Always be polite and professional. When rescheduling, make `+
-			`sure to:
-1. Verify the customer's identity and booking
-2. Check the airline's change policy
-3. Search for available alternative flights
-4. Inform the customer of any fees before making changes
-5. Confirm the change and provide updated booking details
-
-SkyWings is an international airline. Reply with customer's `+
-			`language.
-`, tp.Today(), tp.Weekday()),
-		CriticalRules: testutil.CriticalRules(config),
-
-		MaxIterations:   15,
-		RegisterTools:   fixture.RegisterAllTools,
-		PolicySuggester: fixture.PolicySuggestionPrompt,
-	})
+	return testutil.NewInteractiveChat(w, config, NewChatConfig(config))
 }
 
 // NewAirlineInteractiveChatSearch creates an interactive

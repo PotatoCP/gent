@@ -11,12 +11,35 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
+type tensorElementType string
+
 const (
-	onnxFloat = 1
-	onnxUint8 = 2
-	onnxInt8  = 3
-	onnxInt64 = 7
+	// onnxFloat selects FLOAT tensor elements in this ONNX fixture.
+	onnxFloat tensorElementType = "float"
+	// onnxUint8 selects UINT8 elements for unsigned quantized activations.
+	onnxUint8 tensorElementType = "uint8"
+	// onnxInt8 selects INT8 elements for signed quantized weights.
+	onnxInt8 tensorElementType = "int8"
+	// onnxInt64 selects INT64 elements for input IDs and dimensions.
+	onnxInt64 tensorElementType = "int64"
 )
+
+// ONNX stores a numeric protobuf enum. Keep that protocol representation at the wire boundary;
+// the generator's own enum remains a named string type.
+func (kind tensorElementType) wire() uint64 {
+	switch kind {
+	case onnxFloat:
+		return 1
+	case onnxUint8:
+		return 2
+	case onnxInt8:
+		return 3
+	case onnxInt64:
+		return 7
+	default:
+		panic("unknown tensor element type: " + kind)
+	}
+}
 
 func main() {
 	if len(os.Args) != 2 {
@@ -28,14 +51,14 @@ func main() {
 	// the first dimension. Input-dependent activations prevent constant folding.
 	var graph message
 	graph.bytes(1, node("Mul", []string{"input_ids", "gain"}, "scaled"))
-	graph.bytes(1, node("Cast", []string{"scaled"}, "unsigned", intAttribute("to", onnxUint8)))
+	graph.bytes(1, node("Cast", []string{"scaled"}, "unsigned", intAttribute("to", onnxUint8.wire())))
 	graph.bytes(1, node("Unsqueeze", []string{"unsigned", "axes"}, "column"))
 	graph.bytes(1, node("Concat", []string{"column", "column"}, "activation", intAttribute("axis", 2)))
 	graph.bytes(1, node(
 		"MatMulInteger", []string{"activation", "weights", "a_zero", "b_zero"}, "product",
 	))
 	graph.bytes(1, node(
-		"Cast", []string{"product"}, "last_hidden_state", intAttribute("to", onnxFloat),
+		"Cast", []string{"product"}, "last_hidden_state", intAttribute("to", onnxFloat.wire()),
 	))
 	graph.text(2, "quantized-matmul") // GraphProto.name
 	graph.bytes(5, tensor("gain", onnxInt64, nil, []uint64{255}))
@@ -79,12 +102,12 @@ func intAttribute(name string, value uint64) message {
 	return a
 }
 
-func tensor(name string, dataType uint64, dimensions, values []uint64) message {
+func tensor(name string, dataType tensorElementType, dimensions, values []uint64) message {
 	var t message
 	for _, size := range dimensions {
 		t.integer(1, size)
 	}
-	t.integer(2, dataType)
+	t.integer(2, dataType.wire())
 	dataField := protowire.Number(5) // TensorProto.int32_data also stores INT8/UINT8.
 	if dataType == onnxInt64 {
 		dataField = 7 // TensorProto.int64_data
@@ -99,7 +122,7 @@ func tensor(name string, dataType uint64, dimensions, values []uint64) message {
 }
 
 // A zero dimension denotes the symbolic sequence length, shared by input and output.
-func valueInfo(name string, dataType uint64, dimensions ...uint64) message {
+func valueInfo(name string, dataType tensorElementType, dimensions ...uint64) message {
 	var shape message
 	for _, size := range dimensions {
 		var dim message
@@ -111,7 +134,7 @@ func valueInfo(name string, dataType uint64, dimensions ...uint64) message {
 		shape.bytes(1, dim)
 	}
 	var tensorType message
-	tensorType.integer(1, dataType)
+	tensorType.integer(1, dataType.wire())
 	tensorType.bytes(2, shape)
 	var valueType message
 	valueType.bytes(1, tensorType) // TypeProto.tensor_type

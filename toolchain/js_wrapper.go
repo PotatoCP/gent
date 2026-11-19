@@ -14,6 +14,7 @@ import (
 // JsToolChainWrapper adds native programmatic tool calls. Inner calls use the wrapped registry's
 // validation, events, limits, and recovery. Each script gets an isolated JavaScript runtime.
 type JsToolChainWrapper struct {
+	integerMode        gent.PTCIntegerMode
 	wrapped            gent.ToolChain
 	codeTimeout        time.Duration
 	codeGuidance       string
@@ -31,6 +32,14 @@ func NewJsToolChainWrapper(
 		codeTimeout: 30 * time.Second,
 	}
 
+	return w
+}
+
+// WithIntegerMode selects how program tool results represent integer values. Configure it
+// before use, like the wrapper's timeout. Saved tool evidence keeps its original numeric types;
+// this setting affects only a newly executed script's JavaScript view.
+func (w *JsToolChainWrapper) WithIntegerMode(mode gent.PTCIntegerMode) *JsToolChainWrapper {
+	w.integerMode = mode
 	return w
 }
 
@@ -80,17 +89,17 @@ func (w *JsToolChainWrapper) RegisterTool(tool any) gent.ToolChain {
 
 // executeCode runs one script. Tool responses are collected automatically; console output
 // contains only values the script explicitly computed or selected.
-func (w *JsToolChainWrapper) executeCode(ctx *gent.ExecutionContext, code string,
+func (w *JsToolChainWrapper) executeCode(execCtx *gent.ExecutionContext, code string,
 	textFormat gent.TextFormat,
 ) (*gent.ToolExecutionResponse, error) {
-	if ctx.PTCIntegerMode() != gent.PTCIntegerNumber && ctx.PTCIntegerMode() != gent.PTCIntegerBigInt {
-		return nil, fmt.Errorf("invalid PTC integer mode %d", ctx.PTCIntegerMode())
+	if w.integerMode != gent.PTCIntegerNumber && w.integerMode != gent.PTCIntegerBigInt {
+		return nil, fmt.Errorf("invalid PTC integer mode %q", w.integerMode)
 	}
-	ctx.Stats().IncrCounter(gent.SCCodeExecutions, 1)
+	execCtx.Stats().IncrCounter(gent.SCCodeExecutions, 1)
 	preErrors, parseErr := jsruntime.PreValidate(code, w.wrapped.GetToolSchema)
 	if parseErr == nil && len(preErrors) > 0 {
-		ctx.Stats().IncrCounter(gent.SCCodeExecutionsError, 1)
-		ctx.Stats().IncrGauge(gent.SGCodeExecutionsErrorConsecutive, 1)
+		execCtx.Stats().IncrCounter(gent.SCCodeExecutionsError, 1)
+		execCtx.Stats().IncrGauge(gent.SGCodeExecutionsErrorConsecutive, 1)
 		return &gent.ToolExecutionResponse{Status: gent.ToolInvalidArguments,
 			Instructions: jsruntime.FormatPreValidationErrors(code, preErrors)}, nil
 	}
@@ -99,28 +108,38 @@ func (w *JsToolChainWrapper) executeCode(ctx *gent.ExecutionContext, code string
 	bridge := jsruntime.RegisterToolBridge(rt, func(calls []*gent.ModelToolCallRequest) (
 		[]*gent.ToolCallRecord, error,
 	) {
-		records, err := w.executeProgramCalls(ctx, calls, textFormat)
+		if len(calls) > 1 {
+			parallel, ok := w.wrapped.(gent.ParallelToolChain)
+			if !ok || !parallel.SupportsParallelCalls() {
+				// An unsupported script operation is model guidance. A returned chain-operation
+				// error below has a separate application-error contract.
+				panic(rt.VM().NewTypeError("tool.parallelCall requires a ParallelToolChain"))
+			}
+		}
+		records, err := w.executeProgramCalls(execCtx, calls, textFormat)
 		if err != nil {
 			callErr = err
 		}
 		return records, err
-	}, ctx.PTCIntegerMode())
-	result, err := rt.Execute(ctx.Context(), code)
+	}, w.integerMode)
+	result, err := rt.Execute(execCtx.Context(), code)
+	// The bridge interrupts on an operation failure. Preserve its original Go cause instead of
+	// the VM's formatted script error. Only model-authored script failures become feedback below.
 	if callErr != nil {
 		return nil, callErr
 	}
-	if ctx.Context().Err() != nil {
-		return nil, ctx.Context().Err()
+	if execCtx.Context().Err() != nil {
+		return nil, execCtx.Context().Err()
 	}
-	parts := bridge.Parts(ctx.SteeringMessages())
+	parts := bridge.Parts(execCtx.SteeringMessages())
 	message := "Code executed successfully."
 	if err != nil {
-		ctx.Stats().IncrCounter(gent.SCCodeExecutionsError, 1)
-		ctx.Stats().IncrGauge(gent.SGCodeExecutionsErrorConsecutive, 1)
+		execCtx.Stats().IncrCounter(gent.SCCodeExecutionsError, 1)
+		execCtx.Stats().IncrGauge(gent.SGCodeExecutionsErrorConsecutive, 1)
 		// This is a script syntax/runtime error. Tool Go errors never enter the VM.
 		message = err.Error()
 	} else {
-		ctx.Stats().ResetGauge(gent.SGCodeExecutionsErrorConsecutive)
+		execCtx.Stats().ResetGauge(gent.SGCodeExecutionsErrorConsecutive)
 		if len(result.ConsoleLog) > 0 {
 			message = strings.Join(result.ConsoleLog, "\n")
 		}

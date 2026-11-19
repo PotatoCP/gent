@@ -41,8 +41,11 @@ func (m *MockModel) AddResponse(content string, inputTokens, outputTokens int) *
 	m.responses = append(m.responses, &gent.ModelCallResponse{
 		Choices: []*gent.ContentChoice{
 			{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: content}},
+				Completion: gent.ModelCompletion{Status: gent.ModelStatusAnswer},
+				Parts: []gent.ContentPart{&gent.AssistantContent{
+					Type: gent.AssistantContentFinalAnswerCandidate, MessageId: "answer",
+					Content: []gent.ContentPart{gent.TextContent{Text: content}}}},
+				CandidateSource: &gent.ContentSource{MessageIds: []string{"answer"}},
 			},
 		},
 		Info: &gent.GenerationInfo{
@@ -95,8 +98,11 @@ func (m *MockModel) GenerateContentStream(
 	response := &gent.ModelCallResponse{
 		Choices: []*gent.ContentChoice{
 			{
-				Completion:       gent.ModelCompletion{Status: gent.ModelStatusAnswer},
-				CandidateContent: []gent.ContentPart{gent.TextContent{Text: "done"}},
+				Completion: gent.ModelCompletion{Status: gent.ModelStatusAnswer},
+				Parts: []gent.ContentPart{&gent.AssistantContent{
+					Type: gent.AssistantContentFinalAnswerCandidate, MessageId: "answer",
+					Content: []gent.ContentPart{gent.TextContent{Text: "done"}}}},
+				CandidateSource: &gent.ContentSource{MessageIds: []string{"answer"}},
 			},
 		},
 		Info: &gent.GenerationInfo{InputTokens: 10, OutputTokens: 5},
@@ -184,7 +190,7 @@ var _ gent.CompactionTrigger = (*MockCompactionTrigger)(nil)
 // MockCompactionStrategy is a configurable mock that
 // implements gent.CompactionStrategy.
 type MockCompactionStrategy struct {
-	compactFunc func(*gent.ExecutionContext, gent.CompactionInput) (gent.HistoryUpdate, error)
+	compactFunc func(*gent.ExecutionContext, *gent.CompactionInput) (*gent.HistoryUpdate, error)
 	callCount   int
 }
 
@@ -196,7 +202,7 @@ func NewMockCompactionStrategy() *MockCompactionStrategy {
 
 // WithCompactFunc sets the Compact implementation.
 func (s *MockCompactionStrategy) WithCompactFunc(
-	fn func(*gent.ExecutionContext, gent.CompactionInput) (gent.HistoryUpdate, error),
+	fn func(*gent.ExecutionContext, *gent.CompactionInput) (*gent.HistoryUpdate, error),
 ) *MockCompactionStrategy {
 	s.compactFunc = fn
 	return s
@@ -208,22 +214,22 @@ func (s *MockCompactionStrategy) WithError(
 	err error,
 ) *MockCompactionStrategy {
 	s.compactFunc = func(
-		_ *gent.ExecutionContext, _ gent.CompactionInput,
-	) (gent.HistoryUpdate, error) {
-		return gent.HistoryUpdate{}, err
+		_ *gent.ExecutionContext, _ *gent.CompactionInput,
+	) (*gent.HistoryUpdate, error) {
+		return nil, err
 	}
 	return s
 }
 
 // Compact implements gent.CompactionStrategy.
 func (s *MockCompactionStrategy) Compact(
-	execCtx *gent.ExecutionContext, input gent.CompactionInput,
-) (gent.HistoryUpdate, error) {
+	execCtx *gent.ExecutionContext, input *gent.CompactionInput,
+) (*gent.HistoryUpdate, error) {
 	s.callCount++
 	if s.compactFunc != nil {
 		return s.compactFunc(execCtx, input)
 	}
-	return gent.HistoryUpdate{ExpectedDraftRevision: input.Revision, Active: input.EntryIds()}, nil
+	return &gent.HistoryUpdate{ExpectedDraftRevision: input.Revision, Active: input.EntryIds()}, nil
 }
 
 // CallCount returns how many times Compact was called.
@@ -240,14 +246,14 @@ func (m *MockModel) AddToolCall(name, arguments string, inputTokens, outputToken
 		Choices: []*gent.ContentChoice{{Completion: gent.ModelCompletion{
 			Status: gent.ModelStatusToolCalls,
 		},
-			ToolCalls: []*gent.ModelToolCallRequest{{
+			Parts: []gent.ContentPart{&gent.ModelToolCallRequest{
 				ID: "test-call", Type: "function",
 				FunctionCall: &gent.FunctionCall{Name: name, Arguments: arguments}}}}},
 		Info: &gent.GenerationInfo{InputTokens: inputTokens, OutputTokens: outputTokens}})
 	return m
 }
-func (m *MockModel) PrepareRequest(ctx *gent.ExecutionContext,
+func (m *MockModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

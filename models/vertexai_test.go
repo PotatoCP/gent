@@ -49,11 +49,11 @@ func checkVertexResponse(t *testing.T, model *VertexAI, request *gent.ModelCallR
 		t.FailNow()
 	}
 	assert.Equal(t, []gent.ContentPart{gent.TextPart(`{"value":3}`)},
-		response.Choices[0].CandidateContent)
+		response.Choices[0].CandidateContent())
 	assert.Equal(t, "vertexai", response.Choices[0].Continuation.Provider)
 }
 
-func TestVertexAIEndpointsAndRecovery(t *testing.T) {
+func TestVertexAIEndpoints(t *testing.T) {
 	type input struct{ location, baseURL, selected string }
 	type expected struct{ root, location, model string }
 	type testCase struct {
@@ -92,16 +92,13 @@ func TestVertexAIEndpointsAndRecovery(t *testing.T) {
 			checkVertexResponse(t, model, request)
 			base := test.expected.root + "/projects/test-project/locations/" +
 				test.expected.location + "/publishers/google"
-			assert.Equal(t, base+"/models/"+test.expected.model+":streamGenerateContent?alt=sse",
-				actualURL)
+			assert.Equal(t, base+"/models/"+test.expected.model+":streamGenerateContent?alt=sse", actualURL)
 			assert.Equal(t, http.Header{"Authorization": {"Bearer test-token"},
 				"Accept": {"text/event-stream"}, "Content-Type": {"application/json"},
 				"X-Goog-User-Project": {"quota-project"}}, actualHeaders)
 			assert.Equal(t, "configured", model.ModelName())
 			assert.Equal(t, "vertexai", model.Provider())
-			assert.Equal(t, map[string]any{"api": "generateContent", "provider": "vertexai",
-				"baseURL": base, "model": "configured", "project": "test-project",
-				"location": test.expected.location}, model.RecoveryConfig())
+
 		})
 	}
 }

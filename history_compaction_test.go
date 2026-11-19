@@ -7,8 +7,8 @@ import (
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
 	"github.com/rickchristie/gent/compaction"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/format"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -28,7 +28,7 @@ func (m *historySequenceModel) GenerateContentStream(
 	if len(m.choices) > 0 {
 		choice = m.choices[len(m.requests)]
 	} else {
-		choice.CandidateContent = []gent.ContentPart{gent.TextContent{Text: m.texts[len(m.requests)]}}
+		choice = recoveryAnswerChoice(m.texts[len(m.requests)])
 	}
 	m.requests = append(m.requests, request)
 	return gent.NewCompletedStream(&gent.ModelCallResponse{
@@ -42,7 +42,6 @@ func TestHistoryCompaction_PreservesBothSummariesAndResumes(t *testing.T) {
 	defer cancel()
 	store := &recoveryStore{
 		codecs: gent.NewCodecRegistry(),
-		view:   gent.RunView{SchemaVersion: gent.RunSchemaVersion, RunId: "summaries"},
 		cancel: cancel,
 		phase:  gent.PhaseCompactionCompleted,
 		after:  2,
@@ -51,35 +50,37 @@ func TestHistoryCompaction_PreservesBothSummariesAndResumes(t *testing.T) {
 	summaries := &historySequenceModel{texts: []string{
 		"Policy P10 permits refunds within 30 days.", "Two policy lookups were completed.",
 	}}
-	newAgent := func(model gent.Model) *react.Agent[string] {
-		return react.NewAgent(model).WithRecoveryVersion("summaries/v1").RegisterTool(
-			gent.DefineTool("policy", func(context.Context, recoveryInput) (
-				*gent.ToolExecutionResponse, error,
-			) {
-				return capturedToolResponse("Policy P10 permits refunds within 30 days.", nil)
-			}).Description("Read policy text").ParameterSchema(nil).MustBuild())
-	}
-	configure := func(ctx *gent.ExecutionContext, model gent.Model) {
-		ctx.SetLimits(nil)
-		ctx.SetCompaction(
-			compaction.NewStatThresholdTrigger().OnCounter(gent.SCIterations.Self(), 1),
-			compaction.NewSummarization(model, format.NewXML()).WithKeepRecent(0),
+	newAgent := func(model gent.Model, summary gent.Model) (*react.Agent[string], *gent.Config) {
+		chain := toolchain.New().RegisterTool(
+			gent.DefineTool(
+				"policy",
+				func(
+					context.Context,
+					recoveryInput,
+				) (
+					*gent.ToolExecutionResponse,
+					error,
+				) {
+					return capturedToolResponse("Policy P10 permits refunds within 30 days.", nil)
+				},
+			).MustBuild(),
 		)
+		return react.NewAgent(model), &gent.Config{ToolChain: chain,
+			CompactionTrigger:  compaction.NewStatThresholdTrigger().OnCounter(gent.SCIterations, 1),
+			CompactionStrategy: compaction.NewSummarization(summary, format.NewXML()).WithKeepRecent(0)}
 	}
-	agent := newAgent(model)
-	ctx := gent.NewExecutionContext(worker, "root", gent.NewBasicLoopData(
-		gent.NewTask(gent.TextContent{Text: "Check the policy twice."})), gent.WithRunId("summaries"),
-		gent.WithRecorder(store), gent.WithCodecs(store.codecs))
-	configure(ctx, summaries)
-	_, _, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
+	agent, config := newAgent(model, summaries)
+	config.Codecs, config.Recorder = store.codecs, store
+	runner, execCtx := newTestExecution(t, worker, agent, config)
+	_, _, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Check the policy twice.")))
 	assert.ErrorIs(t, err, context.Canceled)
-	bundle, err := ctx.Export()
-	assert.NoError(t, err)
-	assert.NoError(t, gent.ValidateBundle(bundle, ctx.Codecs()))
+	bundle := store.view
 	assert.Equal(t, gent.PhaseCompactionCompleted, bundle.Checkpoint.Phase)
 	var summaryEntries []*gent.HistoryEntry
 	var markers []*gent.CompactionRecord
 	var originals []*gent.HistoryEntry
+	var users []*gent.HistoryEntry
+	var retained []*gent.HistoryEntry
 	for _, entry := range bundle.History.Entries {
 		switch entry.Kind {
 		case gent.HistorySummary:
@@ -87,16 +88,32 @@ func TestHistoryCompaction_PreservesBothSummariesAndResumes(t *testing.T) {
 		case gent.HistoryCompaction:
 			markers = append(markers, entry.Compaction)
 		case gent.HistoryMessages:
-			originals = append(originals, entry)
+			if entry.Origin == gent.RecordUserInput {
+				users = append(users, entry)
+			} else if entry.Origin == gent.RecordCompactedModified {
+				retained = append(retained, entry)
+			} else {
+				originals = append(originals, entry)
+			}
 		}
 	}
 	if !assert.Len(t, summaryEntries, 2) || !assert.Len(t, markers, 2) ||
 		!assert.Len(t, originals, 2) {
 		return
 	}
-	assert.Equal(t, []gent.EntryId{originals[0].Id}, markers[0].InputIds)
-	assert.Equal(t, []gent.EntryId{summaryEntries[0].Id, originals[1].Id}, markers[1].InputIds)
-	assert.Equal(t, []gent.EntryId{summaryEntries[1].Id}, markers[1].Active)
+	assert.Len(t, users, 1)
+	assert.Len(t, retained, 2)
+	assert.Equal(t, []gent.EntryId{users[0].Id, originals[0].Id}, markers[0].InputIds)
+	assert.Equal(
+		t,
+		[]gent.EntryId{
+			retained[0].Id,
+			summaryEntries[0].Id,
+			originals[1].Id,
+		},
+		markers[1].InputIds,
+	)
+	assert.Equal(t, []gent.EntryId{retained[1].Id, summaryEntries[1].Id}, markers[1].Active)
 	assert.Len(t, markers[0].ModelCallIds, 1)
 	assert.Len(t, markers[1].ModelCallIds, 1)
 	// The first summary remains fully decodable even though the second summary lost the fact.
@@ -110,13 +127,8 @@ Two policy lookups were completed.
 	assert.NotEqual(t, summaries.requests[0].Messages, summaries.requests[1].Messages)
 	freshModel := &historySequenceModel{texts: []string{"Done."}}
 	freshSummary := &historySequenceModel{}
-	freshAgent := newAgent(freshModel)
-	bindings := recoveryBindings(t, freshAgent)
-	bindings.Configure = func(ctx *gent.ExecutionContext) error {
-		configure(ctx, freshSummary)
-		return nil
-	}
-	fresh, _, err := resumeRecovery(freshAgent, bundle, bindings)
+	freshAgent, freshConfig := newAgent(freshModel, freshSummary)
+	fresh, _, err := resumeRecovery(t, freshAgent, store.runStateSnapshot, freshConfig)
 	if !assert.NoError(t, err) {
 		return
 	}
@@ -125,8 +137,8 @@ Two policy lookups were completed.
 	assert.Equal(t, int64(2), fresh.Stats().GetCounter(gent.SCCompactions))
 	assert.Equal(t, 3, fresh.Iteration())
 }
-func (m *historySequenceModel) PrepareRequest(ctx *gent.ExecutionContext,
+func (m *historySequenceModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
-	return gent.PrepareModelRequest(ctx, request, chain)
+	return gent.PrepareModelRequest(execCtx, request, chain)
 }

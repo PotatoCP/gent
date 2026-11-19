@@ -1,7 +1,8 @@
 package compaction
 
 import (
-	"context"
+	"github.com/rickchristie/gent/internal/tt"
+
 	"testing"
 
 	"github.com/rickchristie/gent"
@@ -10,21 +11,17 @@ import (
 
 // newTestExecCtx creates an ExecutionContext with no limits
 // for trigger testing.
-func newTestExecCtx() *gent.ExecutionContext {
-	data := gent.NewBasicLoopData(nil)
-	ctx := gent.NewExecutionContext(
-		context.Background(), "test", data,
-	)
-	ctx.SetLimits(nil)
-	return ctx
+func newTestExecCtx(t *testing.T) *gent.ExecutionContext {
+	execCtx := tt.NewContext(t, &gent.Config{})
+	return execCtx
 }
 
 func TestStatThresholdTrigger_Counter(t *testing.T) {
 	type input struct {
 		trigger    *StatThresholdTrigger
-		setupStats func(ctx *gent.ExecutionContext)
+		setupStats func(execCtx *gent.ExecutionContext)
 		preCompact bool // call NotifyCompacted before check
-		postSetup  func(ctx *gent.ExecutionContext)
+		postSetup  func(execCtx *gent.ExecutionContext)
 	}
 
 	type expected struct {
@@ -39,12 +36,11 @@ func TestStatThresholdTrigger_Counter(t *testing.T) {
 		{
 			name: "counter below delta returns false",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnCounter("myapp:calls", 10),
+				trigger: NewStatThresholdTrigger().OnCounter("myapp:calls", 10),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:calls", 5,
 					)
 				},
@@ -54,12 +50,11 @@ func TestStatThresholdTrigger_Counter(t *testing.T) {
 		{
 			name: "counter equals delta returns true",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnCounter("myapp:calls", 10),
+				trigger: NewStatThresholdTrigger().OnCounter("myapp:calls", 10),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:calls", 10,
 					)
 				},
@@ -69,12 +64,11 @@ func TestStatThresholdTrigger_Counter(t *testing.T) {
 		{
 			name: "counter exceeds delta returns true",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnCounter("myapp:calls", 10),
+				trigger: NewStatThresholdTrigger().OnCounter("myapp:calls", 10),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:calls", 15,
 					)
 				},
@@ -85,22 +79,21 @@ func TestStatThresholdTrigger_Counter(t *testing.T) {
 			name: "counter delta after compaction resets " +
 				"snapshot",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnCounter("myapp:calls", 10),
+				trigger: NewStatThresholdTrigger().OnCounter("myapp:calls", 10),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
 					// Bring to 10 (triggers)
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:calls", 10,
 					)
 				},
 				preCompact: true,
 				postSetup: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
 					// Only 5 more after compaction
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:calls", 5,
 					)
 				},
@@ -111,21 +104,20 @@ func TestStatThresholdTrigger_Counter(t *testing.T) {
 			name: "counter delta after compaction " +
 				"re-triggers at full delta",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnCounter("myapp:calls", 10),
+				trigger: NewStatThresholdTrigger().OnCounter("myapp:calls", 10),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:calls", 10,
 					)
 				},
 				preCompact: true,
 				postSetup: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
 					// Another full delta after snapshot
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:calls", 10,
 					)
 				},
@@ -135,14 +127,12 @@ func TestStatThresholdTrigger_Counter(t *testing.T) {
 		{
 			name: "multiple counter thresholds one fires",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnCounter("myapp:a", 10).
-					OnCounter("myapp:b", 100),
+				trigger: NewStatThresholdTrigger().OnCounter("myapp:a", 10).OnCounter("myapp:b", 100),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().IncrCounter("myapp:a", 5)
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter("myapp:a", 5)
+					execCtx.Stats().IncrCounter(
 						"myapp:b", 100,
 					)
 				},
@@ -152,14 +142,12 @@ func TestStatThresholdTrigger_Counter(t *testing.T) {
 		{
 			name: "multiple counter thresholds none fire",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnCounter("myapp:a", 10).
-					OnCounter("myapp:b", 100),
+				trigger: NewStatThresholdTrigger().OnCounter("myapp:a", 10).OnCounter("myapp:b", 100),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().IncrCounter("myapp:a", 5)
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter("myapp:a", 5)
+					execCtx.Stats().IncrCounter(
 						"myapp:b", 50,
 					)
 				},
@@ -170,17 +158,17 @@ func TestStatThresholdTrigger_Counter(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := newTestExecCtx()
-			tc.input.setupStats(ctx)
+			execCtx := newTestExecCtx(t)
+			tc.input.setupStats(execCtx)
 
 			if tc.input.preCompact {
-				tc.input.trigger.NotifyCompacted(ctx)
+				tc.input.trigger.NotifyCompacted(execCtx)
 			}
 			if tc.input.postSetup != nil {
-				tc.input.postSetup(ctx)
+				tc.input.postSetup(execCtx)
 			}
 
-			result, err := tc.input.trigger.ShouldCompact(ctx)
+			result, err := tc.input.trigger.ShouldCompact(execCtx)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.expected.shouldCompact, result)
 		})
@@ -190,7 +178,7 @@ func TestStatThresholdTrigger_Counter(t *testing.T) {
 func TestStatThresholdTrigger_Gauge(t *testing.T) {
 	type input struct {
 		trigger    *StatThresholdTrigger
-		setupStats func(ctx *gent.ExecutionContext)
+		setupStats func(execCtx *gent.ExecutionContext)
 	}
 
 	type expected struct {
@@ -205,12 +193,11 @@ func TestStatThresholdTrigger_Gauge(t *testing.T) {
 		{
 			name: "gauge below value returns false",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnGauge("myapp:size", 20),
+				trigger: NewStatThresholdTrigger().OnGauge("myapp:size", 20),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().SetGauge("myapp:size", 15)
+					execCtx.Stats().SetGauge("myapp:size", 15)
 				},
 			},
 			expected: expected{shouldCompact: false},
@@ -218,12 +205,11 @@ func TestStatThresholdTrigger_Gauge(t *testing.T) {
 		{
 			name: "gauge equals value returns true",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnGauge("myapp:size", 20),
+				trigger: NewStatThresholdTrigger().OnGauge("myapp:size", 20),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().SetGauge("myapp:size", 20)
+					execCtx.Stats().SetGauge("myapp:size", 20)
 				},
 			},
 			expected: expected{shouldCompact: true},
@@ -231,12 +217,11 @@ func TestStatThresholdTrigger_Gauge(t *testing.T) {
 		{
 			name: "gauge exceeds value returns true",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnGauge("myapp:size", 20),
+				trigger: NewStatThresholdTrigger().OnGauge("myapp:size", 20),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().SetGauge("myapp:size", 25)
+					execCtx.Stats().SetGauge("myapp:size", 25)
 				},
 			},
 			expected: expected{shouldCompact: true},
@@ -245,14 +230,13 @@ func TestStatThresholdTrigger_Gauge(t *testing.T) {
 			name: "gauge decreased below threshold " +
 				"returns false",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnGauge("myapp:size", 20),
+				trigger: NewStatThresholdTrigger().OnGauge("myapp:size", 20),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().SetGauge("myapp:size", 25)
+					execCtx.Stats().SetGauge("myapp:size", 25)
 					// Simulate compaction reducing it
-					ctx.Stats().SetGauge("myapp:size", 10)
+					execCtx.Stats().SetGauge("myapp:size", 10)
 				},
 			},
 			expected: expected{shouldCompact: false},
@@ -261,10 +245,10 @@ func TestStatThresholdTrigger_Gauge(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := newTestExecCtx()
-			tc.input.setupStats(ctx)
+			execCtx := newTestExecCtx(t)
+			tc.input.setupStats(execCtx)
 
-			result, err := tc.input.trigger.ShouldCompact(ctx)
+			result, err := tc.input.trigger.ShouldCompact(execCtx)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.expected.shouldCompact, result)
 		})
@@ -274,7 +258,7 @@ func TestStatThresholdTrigger_Gauge(t *testing.T) {
 func TestStatThresholdTrigger_Prefix(t *testing.T) {
 	type input struct {
 		trigger    *StatThresholdTrigger
-		setupStats func(ctx *gent.ExecutionContext)
+		setupStats func(execCtx *gent.ExecutionContext)
 	}
 
 	type expected struct {
@@ -290,15 +274,14 @@ func TestStatThresholdTrigger_Prefix(t *testing.T) {
 			name: "counter prefix matches one key " +
 				"returns true",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnCounterPrefix("myapp:tok:", 1000),
+				trigger: NewStatThresholdTrigger().OnCounterPrefix("myapp:tok:", 1000),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:tok:gpt4", 500,
 					)
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:tok:claude", 1000,
 					)
 				},
@@ -309,15 +292,14 @@ func TestStatThresholdTrigger_Prefix(t *testing.T) {
 			name: "counter prefix matches no keys " +
 				"returns false",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnCounterPrefix("myapp:tok:", 1000),
+				trigger: NewStatThresholdTrigger().OnCounterPrefix("myapp:tok:", 1000),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:tok:gpt4", 500,
 					)
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:tok:claude", 500,
 					)
 				},
@@ -328,15 +310,14 @@ func TestStatThresholdTrigger_Prefix(t *testing.T) {
 			name: "gauge prefix matches one key " +
 				"returns true",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnGaugePrefix("myapp:err:", 3),
+				trigger: NewStatThresholdTrigger().OnGaugePrefix("myapp:err:", 3),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().SetGauge(
+					execCtx.Stats().SetGauge(
 						"myapp:err:format", 1,
 					)
-					ctx.Stats().SetGauge(
+					execCtx.Stats().SetGauge(
 						"myapp:err:tool", 3,
 					)
 				},
@@ -347,15 +328,14 @@ func TestStatThresholdTrigger_Prefix(t *testing.T) {
 			name: "gauge prefix matches no keys " +
 				"returns false",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnGaugePrefix("myapp:err:", 3),
+				trigger: NewStatThresholdTrigger().OnGaugePrefix("myapp:err:", 3),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().SetGauge(
+					execCtx.Stats().SetGauge(
 						"myapp:err:format", 1,
 					)
-					ctx.Stats().SetGauge(
+					execCtx.Stats().SetGauge(
 						"myapp:err:tool", 2,
 					)
 				},
@@ -366,10 +346,10 @@ func TestStatThresholdTrigger_Prefix(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := newTestExecCtx()
-			tc.input.setupStats(ctx)
+			execCtx := newTestExecCtx(t)
+			tc.input.setupStats(execCtx)
 
-			result, err := tc.input.trigger.ShouldCompact(ctx)
+			result, err := tc.input.trigger.ShouldCompact(execCtx)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.expected.shouldCompact, result)
 		})
@@ -379,7 +359,7 @@ func TestStatThresholdTrigger_Prefix(t *testing.T) {
 func TestStatThresholdTrigger_NotifyCompacted(t *testing.T) {
 	type input struct {
 		trigger    *StatThresholdTrigger
-		setupStats func(ctx *gent.ExecutionContext)
+		setupStats func(execCtx *gent.ExecutionContext)
 	}
 
 	type expected struct {
@@ -394,12 +374,11 @@ func TestStatThresholdTrigger_NotifyCompacted(t *testing.T) {
 		{
 			name: "exact counter snapshot updated",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnCounter("myapp:calls", 10),
+				trigger: NewStatThresholdTrigger().OnCounter("myapp:calls", 10),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:calls", 15,
 					)
 				},
@@ -414,15 +393,14 @@ func TestStatThresholdTrigger_NotifyCompacted(t *testing.T) {
 			name: "prefix counter snapshot updated " +
 				"for all matching keys",
 			input: input{
-				trigger: NewStatThresholdTrigger().
-					OnCounterPrefix("myapp:tok:", 1000),
+				trigger: NewStatThresholdTrigger().OnCounterPrefix("myapp:tok:", 1000),
 				setupStats: func(
-					ctx *gent.ExecutionContext,
+					execCtx *gent.ExecutionContext,
 				) {
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:tok:gpt4", 500,
 					)
-					ctx.Stats().IncrCounter(
+					execCtx.Stats().IncrCounter(
 						"myapp:tok:claude", 1200,
 					)
 				},
@@ -438,12 +416,12 @@ func TestStatThresholdTrigger_NotifyCompacted(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := newTestExecCtx()
-			tc.input.setupStats(ctx)
+			execCtx := newTestExecCtx(t)
+			tc.input.setupStats(execCtx)
 
-			tc.input.trigger.NotifyCompacted(ctx)
+			tc.input.trigger.NotifyCompacted(execCtx)
 
-			saved, ok, err := ctx.CheckpointState("gent:compaction_baseline")
+			saved, ok, err := execCtx.CheckpointState("gent:compaction_baseline")
 			assert.NoError(t, err)
 			assert.True(t, ok)
 			assert.Equal(t, tc.expected.lastValues, saved)
@@ -455,38 +433,36 @@ func TestStatThresholdTrigger_NotifyCompacted(t *testing.T) {
 // real-world example from the design doc: iteration + token
 // triggers together over multiple compaction cycles.
 func TestStatThresholdTrigger_CombinedScenario(t *testing.T) {
-	trigger := NewStatThresholdTrigger().
-		OnCounter("myapp:iterations", 10).
+	trigger := NewStatThresholdTrigger().OnCounter("myapp:iterations", 10).
 		OnCounter("myapp:input_tokens", 100000)
 
-	ctx := newTestExecCtx()
+	execCtx := newTestExecCtx(t)
 
 	// Iteration 5, 120K tokens → token fires
-	ctx.Stats().IncrCounter("myapp:iterations", 5)
-	ctx.Stats().IncrCounter("myapp:input_tokens", 120000)
-	assert.True(t, testShouldCompact(t, trigger, ctx),
-		"should fire: 120K tokens >= 100K delta")
-	trigger.NotifyCompacted(ctx)
+	execCtx.Stats().IncrCounter("myapp:iterations", 5)
+	execCtx.Stats().IncrCounter("myapp:input_tokens", 120000)
+	assert.True(t, testShouldCompact(t, trigger, execCtx), "should fire: 120K tokens >= 100K delta")
+	trigger.NotifyCompacted(execCtx)
 
 	// Iteration 10, 200K tokens → neither fires
 	// delta iterations = 5 (10-5), delta tokens = 80K
-	ctx.Stats().IncrCounter("myapp:iterations", 5)
-	ctx.Stats().IncrCounter("myapp:input_tokens", 80000)
-	assert.False(t, testShouldCompact(t, trigger, ctx),
+	execCtx.Stats().IncrCounter("myapp:iterations", 5)
+	execCtx.Stats().IncrCounter("myapp:input_tokens", 80000)
+	assert.False(t, testShouldCompact(t, trigger, execCtx),
 		"should not fire: delta 5 iter < 10, "+
 			"delta 80K tokens < 100K")
 
 	// Iteration 15, 250K tokens → iteration fires
 	// delta iterations = 10 (15-5), delta tokens = 130K
-	ctx.Stats().IncrCounter("myapp:iterations", 5)
-	ctx.Stats().IncrCounter("myapp:input_tokens", 50000)
-	assert.True(t, testShouldCompact(t, trigger, ctx),
+	execCtx.Stats().IncrCounter("myapp:iterations", 5)
+	execCtx.Stats().IncrCounter("myapp:input_tokens", 50000)
+	assert.True(t, testShouldCompact(t, trigger, execCtx),
 		"should fire: delta 10 iterations >= 10 delta")
-	trigger.NotifyCompacted(ctx)
+	trigger.NotifyCompacted(execCtx)
 
 	// After second compaction: both snapshots reset
 	// delta iterations = 0, delta tokens = 0
-	assert.False(t, testShouldCompact(t, trigger, ctx),
+	assert.False(t, testShouldCompact(t, trigger, execCtx),
 		"should not fire: both deltas are 0 after "+
 			"compaction")
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type integerToolInput struct {
@@ -39,7 +40,6 @@ func TestProgramExecutionSettingsAndTypedNumbers(t *testing.T) {
 	) {
 		return capturedToolResponse(value, nil)
 	}).MustBuild())
-	wrapper := NewJsToolChainWrapper(chain)
 	const code = `const reply = tool.call({tool:"fetch",args:{}});
 tool.forward(reply.parts.filter(p=>p.kind==="bytes"));
 tool.call({tool:"consume",args:{id:reply.parts[0].data.id}});`
@@ -57,16 +57,25 @@ tool.call({tool:"consume",args:{id:reply.parts[0].data.id}});`
 			t.Parallel()
 			steering := gent.SteeringMessages{PTCBytesOmitted: "Custom byte guidance.",
 				ToolError: "Custom operation guidance."}
-			ctx := gent.NewExecutionContext(context.Background(), "numbers", gent.NewBasicLoopData(nil),
-				gent.WithPTCIntegerMode(test.input.mode), gent.WithSteeringMessages(steering))
-			defer ctx.Release()
-			records, err := executeTestCode(wrapper, ctx, test.input.code, testFormat())
+			wrapper := NewJsToolChainWrapper(chain).WithIntegerMode(test.input.mode)
+			var records []*gent.ToolCallRecord
+			loop := &toolTestLoop{next: func(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
+				var err error
+				records, err = executeTestCode(wrapper, execCtx, test.input.code, testFormat())
+				if err != nil {
+					return nil, err
+				}
+				return toolTestDone(execCtx)
+			}}
+			runner, ctx, store := newToolTestRun(t, context.Background(), loop, &gent.Config{
+				ToolChain: wrapper, SteeringMessages: &steering})
+			_, _, err := runner.NewTurn(ctx, gent.NewTask(gent.TextPart("Process typed numbers.")))
 			if !assert.NoError(t, err) {
 				return
 			}
 			var consumed *gent.ToolCallRecord
-			for _, event := range ctx.Events() {
-				if after, ok := event.(*gent.AfterToolCallEvent); ok && after.ToolName == "consume" {
+			for _, event := range toolEvents(t, ctx) {
+				if after, ok := event.Payload.(*gent.AfterToolCallEvent); ok && after.ToolName == "consume" {
 					consumed = after.Output.(*gent.ToolCallRecord)
 				}
 			}
@@ -83,16 +92,11 @@ tool.call({tool:"consume",args:{id:reply.parts[0].data.id}});`
 			if actual.status == gent.ToolExecuted {
 				assert.Equal(t, gent.PDFPart([]byte("%PDF-fixture")), records[0].Response().Parts()[2])
 			}
-			saved, err := ctx.Export()
-			assert.NoError(t, err)
-			// Completed records need neither tool registrations nor the former typed input.
-			fresh, err := gent.RestoreExecutionContext(context.Background(), saved, gent.RestoreBindings{})
-			if !assert.NoError(t, err) {
-				return
-			}
-			defer fresh.Release()
-			assert.Equal(t, test.input.mode, fresh.PTCIntegerMode())
-			assert.Equal(t, steering.Resolved(), fresh.SteeringMessages())
+			// Completed records need neither the old wrapper nor its typed input registrations.
+			// Current settings belong to the new Runner; they are not restored configuration.
+			_, fresh := restoreToolTest(t, &toolTestLoop{}, &gent.Config{
+				Codecs: gent.NewCodecRegistry(), SteeringMessages: &steering}, store.runStateSnapshot)
+			require.Equal(t, steering.Resolved(), fresh.SteeringMessages())
 			plan, found, err := fresh.SavedToolPlan()
 			assert.NoError(t, err)
 			assert.True(t, found)

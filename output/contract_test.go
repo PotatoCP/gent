@@ -70,8 +70,8 @@ func mutableJSONValidator[T any](
 		change(value)
 		return &gent.OutputValidationResult{Accepted: true}, nil
 	})
-	return func(ctx *gent.ExecutionContext) (any, error) {
-		return out.Process(ctx, text(candidate))
+	return func(execCtx *gent.ExecutionContext) (any, error) {
+		return out.Process(execCtx, text(candidate))
 	}
 }
 
@@ -104,18 +104,18 @@ func TestCustomValidatorCannotChangeAcceptedValues(t *testing.T) {
 		{"map", input{mutableJSONValidator(t, `{"quantity":2}`,
 			func(value map[string]int) { value["quantity"] = 3 })}, want},
 		{"slice", input{mutableJSONValidator(t, `[2]`, func(value []int) { value[0] = 3 })}, want},
-		{"image bytes", input{func(ctx *gent.ExecutionContext) (any, error) {
-			return imageOutput.Process(ctx, []gent.ContentPart{image})
+		{"image bytes", input{func(execCtx *gent.ExecutionContext) (any, error) {
+			return imageOutput.Process(execCtx, []gent.ContentPart{image})
 		}}, want},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			ctx := execution(t)
-			result, err := test.input.process(ctx)
+			execCtx := execution(t)
+			result, err := test.input.process(execCtx)
 			assert.Nil(t, result)
 			assert.EqualError(t, err, test.expected.err)
 			assert.Equal(t, test.expected.rejections,
-				ctx.Stats().GetCounter(gent.SCOutputCustomRejectedBy+"read-only"))
+				execCtx.Stats().GetCounter(gent.SCOutputCustomRejectedBy+"read-only"))
 			assert.Equal(t, original, []gent.ContentPart{image})
 		})
 	}

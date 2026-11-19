@@ -11,8 +11,8 @@ import (
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/agents/react"
-	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/output"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -98,85 +98,106 @@ func TestProvidersTypedOutputCorrection(t *testing.T) {
 		}})
 	}
 	for _, test := range cases {
-		t.Run(test.name, func(t *testing.T) {
-			var requests []map[string]any
-			client := &http.Client{Transport: responseTransport(func(request *http.Request) (
-				*http.Response, error,
-			) {
-				if request.Method == http.MethodGet {
-					assert.Equal(t, "/v1/models/fixture/model/endpoints", request.URL.Path)
-					return fixtureHTTP(routerFixture, "application/json"), nil
-				}
-				var body map[string]any
-				if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
-					return nil, err
-				}
-				requests = append(requests, body)
-				if len(requests) > 4 {
-					return nil, fmt.Errorf("unexpected correction request %d", len(requests))
-				}
-				return fixtureHTTP(providerResponse(test.input.provider, len(requests)-1),
-					"application/json"), nil
-			})}
-			out, err := output.NewSchemaOutput[providerOutputValue](providerOutputSchema())
-			if !assert.NoError(t, err) {
-				return
-			}
-			var validations []providerOutputValue
-			out.SetCustomValidator("value-three", func(_ *gent.ExecutionContext,
-				value providerOutputValue,
-			) (*gent.OutputValidationResult, error) {
-				validations = append(validations, value)
-				if value.Value != 3 {
-					return &gent.OutputValidationResult{Steering: []gent.ContentPart{
-						gent.TextContent{Text: "Use value 3."}}}, nil
-				}
-				return &gent.OutputValidationResult{Accepted: true}, nil
-			})
-			var calls []providerLookupInput
-			agent := react.NewWithOutput(fixtureModel(test.input.provider, client), out).RegisterTool(
-				gent.DefineTool("lookup", func(_ context.Context, input providerLookupInput) (
-					*gent.ToolExecutionResponse, error,
+		t.Run(
+			test.name,
+			func(t *testing.T) {
+				var requests []map[string]any
+				client := &http.Client{Transport: responseTransport(func(request *http.Request) (
+					*http.Response, error,
 				) {
-					calls = append(calls, input)
-					return capturedToolResponse("record-seven", nil)
-				}).Description("Read the record").MustBuild())
-			ctx := gent.NewExecutionContext(context.Background(), test.name,
-				gent.NewBasicLoopData(&gent.Task{Messages: []*gent.ModelMessage{
-					gent.TextParts(gent.ChatMessageTypeSystem, "Read records and return JSON."),
-					gent.TextParts(gent.ChatMessageTypeHuman, "Read record seven."),
-				}}))
-			value, result, err := executor.NewRunner(agent, executor.DefaultConfig()).Execute(ctx)
-			if !assert.NoError(t, err) {
-				return
-			}
-			var native bool
-			for _, event := range ctx.Events() {
-				if after, ok := event.(*gent.AfterModelCallEvent); ok {
-					fields := after.Response.Info.RawGenerationInfo["output_schema"].(map[string]any)
-					native = fields["native"].(bool)
+					if request.Method == http.MethodGet {
+						assert.Equal(t, "/v1/models/fixture/model/endpoints", request.URL.Path)
+						return fixtureHTTP(routerFixture, "application/json"), nil
+					}
+					var body map[string]any
+					if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+						return nil, err
+					}
+					requests = append(requests, body)
+					if len(requests) > 4 {
+						return nil, fmt.Errorf("unexpected correction request %d", len(requests))
+					}
+					return fixtureHTTP(providerResponse(test.input.provider, len(requests)-1),
+						"application/json"), nil
+				})}
+				out, err := output.NewSchemaOutput[providerOutputValue](providerOutputSchema())
+				if !assert.NoError(t, err) {
+					return
 				}
-			}
-			actual := expected{value: value, calls: calls, validations: validations,
-				requests: len(requests), local: ctx.Stats().GetCounter(gent.SCOutputLocalRejectedTotal),
-				custom:   ctx.Stats().GetCounter(gent.SCOutputCustomRejectedTotal),
-				rejected: ctx.Stats().GetCounter(gent.SCOutputRejectedTotal),
-				reason:   result.TerminationReason, native: native}
-			assert.Equal(t, test.expected, actual)
-			assert.Equal(t, &gent.ExecutionResult{TerminationReason: gent.TerminationSuccess,
-				Output: []gent.ContentPart{gent.TextContent{Text: `{"value":3}`}}}, ctx.Result())
-			assertProviderCorrectionHistory(t, ctx)
-		})
+				var validations []providerOutputValue
+				out.SetCustomValidator("value-three", func(_ *gent.ExecutionContext,
+					value providerOutputValue,
+				) (*gent.OutputValidationResult, error) {
+					validations = append(validations, value)
+					if value.Value != 3 {
+						return &gent.OutputValidationResult{Steering: []gent.ContentPart{
+							gent.TextContent{Text: "Use value 3."}}}, nil
+					}
+					return &gent.OutputValidationResult{Accepted: true}, nil
+				})
+				var calls []providerLookupInput
+				agent := react.NewWithOutput(fixtureModel(test.input.provider, client), out)
+				chain := toolchain.New().RegisterTool(
+					gent.DefineTool("lookup", func(_ context.Context, input providerLookupInput) (
+						*gent.ToolExecutionResponse, error,
+					) {
+						calls = append(calls, input)
+						return capturedToolResponse("record-seven", nil)
+					}).Description("Read the record").MustBuild())
+				runner, execCtx := newModelExecution(
+					t,
+					context.Background(),
+					agent,
+					&gent.Config{
+						ToolChain: chain,
+					},
+				)
+				value, result, err := runner.NewTurn(execCtx,
+					liveTask("Read records and return JSON.", "Read record seven."))
+				if !assert.NoError(t, err) {
+					return
+				}
+				var native bool
+				for _, event := range providerEvents(execCtx) {
+					if after, ok := event.(*gent.AfterModelCallEvent); ok {
+						fields := after.Response.Info.RawGenerationInfo["output_schema"].(map[string]any)
+						native = fields["native"].(bool)
+					}
+				}
+				actual := expected{value: value, calls: calls, validations: validations,
+					requests: len(requests), local: execCtx.Stats().GetCounter(gent.SCOutputLocalRejectedTotal),
+					custom:   execCtx.Stats().GetCounter(gent.SCOutputCustomRejectedTotal),
+					rejected: execCtx.Stats().GetCounter(gent.SCOutputRejectedTotal),
+					reason:   result.TerminationReason, native: native}
+				assert.Equal(t, test.expected, actual)
+				assert.Equal(
+					t,
+					&gent.ExecutionResult{
+						Status:            gent.ExecutionFinished,
+						TurnId:            execCtx.TurnId(),
+						TerminationReason: gent.TerminationSuccess,
+						Output: []gent.ContentPart{
+							gent.TextContent{
+								Text: `{"value":3}`,
+							},
+						},
+					},
+					execCtx.Result(),
+				)
+				assertProviderCorrectionHistory(t, execCtx)
+			},
+		)
 	}
 }
 
-func assertProviderCorrectionHistory(t *testing.T, ctx *gent.ExecutionContext) {
+func assertProviderCorrectionHistory(t *testing.T, execCtx *gent.ExecutionContext) {
 	t.Helper()
 	var candidates []string
-	for _, entry := range ctx.History().Entries {
+	for _, entry := range execCtx.History().Entries {
 		for _, message := range entry.Messages {
 			if message.Role == gent.ChatMessageTypeAI {
-				text := gent.ContentText(message.Parts)
+				text := gent.ContentText(gent.AssistantParts(message.Parts,
+					gent.AssistantContentFinalAnswerCandidate))
 				if text != "" {
 					candidates = append(candidates, text)
 				}
