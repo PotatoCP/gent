@@ -13,7 +13,7 @@ import (
 type anthropicStream struct {
 	envelope *anthropicEnvelope
 	ctx      context.Context
-	stream   *gent.StreamWithDuration
+	stream   *providerStream
 	options  *gent.CallOptions
 	blocks   []*anthropicBlock
 	started  bool
@@ -40,7 +40,7 @@ func (state *anthropicStream) consume(data []byte) (bool, error) {
 		Message anthropicEnvelope          `json:"message"`
 		Block   map[string]json.RawMessage `json:"content_block"`
 		Delta   map[string]json.RawMessage `json:"delta"`
-		Usage   map[string]int             `json:"usage"`
+		Usage   json.RawMessage            `json:"usage"`
 		Error   struct {
 			Type    string `json:"type"`
 			Message string `json:"message"`
@@ -85,6 +85,18 @@ func (state *anthropicStream) consume(data []byte) (bool, error) {
 					return false, err
 				}
 				block.append(field, value)
+				if value != "" && field != "signature" {
+					state.stream.observeContent()
+				}
+			}
+		}
+		if raw := event.Block["name"]; len(raw) > 0 {
+			var name string
+			if err := json.Unmarshal(raw, &name); err != nil {
+				return false, err
+			}
+			if name != "" {
+				state.stream.observeContent()
 			}
 		}
 		state.blocks = append(state.blocks, block)
@@ -119,6 +131,9 @@ func (state *anthropicStream) consume(data []byte) (bool, error) {
 			return false, err
 		}
 		block.append(field, value)
+		if field == "partial_json" && value != "" {
+			state.stream.observeContent()
+		}
 		meta := gent.AssistantContentUnspecified
 		if field == "text" {
 			meta = gent.AssistantContentIntermediary
@@ -142,17 +157,11 @@ func (state *anthropicStream) consume(data []byte) (bool, error) {
 				return false, err
 			}
 		}
-		usage := &state.envelope.Usage
-		for name, value := range event.Usage {
-			switch name {
-			case "input_tokens":
-				usage.Input = value
-			case "output_tokens":
-				usage.Output = value
-			case "cache_read_input_tokens":
-				usage.CacheRead = value
-			case "cache_creation_input_tokens":
-				usage.CacheWrite = value
+		// Usage updates are cumulative and can include strings or nested provider data.
+		// Decode into the current value to replace supplied fields and keep omitted fields.
+		if len(event.Usage) > 0 {
+			if err := json.Unmarshal(event.Usage, &state.envelope.Usage); err != nil {
+				return false, err
 			}
 		}
 	case "message_stop":

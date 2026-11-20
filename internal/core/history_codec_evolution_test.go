@@ -76,6 +76,7 @@ func TestSavedStructEvolution(t *testing.T) {
 				actual.err = err.Error()
 			}
 			assert.Equal(t, test.expected, actual)
+			checkDocumentEvolution(t, old, fresh, encoded, test.expected.value, test.expected.err)
 			after, err := json.Marshal(encoded)
 			assert.NoError(t, err)
 			assert.Equal(t, before, after, "typed decoding must retain the saved evidence")
@@ -132,6 +133,7 @@ func TestSavedAnonymousStructEvolution(t *testing.T) {
 				actual.err = err.Error()
 			}
 			assert.Equal(t, test.expected, actual)
+			checkDocumentEvolution(t, old, fresh, encoded, test.expected.value, test.expected.err)
 		})
 	}
 }
@@ -189,6 +191,31 @@ func TestSavedStructMapKeyEvolution(t *testing.T) {
 				actual.err = err.Error()
 			}
 			assert.Equal(t, test.expected, actual)
+			checkDocumentEvolution(t, old, fresh, encoded, test.expected.value, test.expected.err)
 		})
 	}
+}
+
+func checkDocumentEvolution(t *testing.T, old, fresh *CodecRegistry, encoded EncodedValue,
+	want any, errorText string,
+) {
+	t.Helper()
+	original, err := old.Decode(encoded)
+	if !assert.NoError(t, err) {
+		return
+	}
+	data, err := old.Marshal(original)
+	if !assert.NoError(t, err) {
+		return
+	}
+	before := append([]byte(nil), data...)
+	var value any
+	err = fresh.Unmarshal(data, &value)
+	if errorText == "" {
+		assert.NoError(t, err)
+	} else {
+		assert.EqualError(t, err, errorText)
+	}
+	assert.Equal(t, want, value)
+	assert.Equal(t, before, data)
 }

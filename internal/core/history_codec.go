@@ -19,7 +19,9 @@ type EncodedValue struct {
 	Data         json.RawMessage `json:"data,omitempty"`
 }
 
-// ValueCodec supplies a versioned representation for an application-owned value.
+// ValueCodec supplies a versioned representation for an application-owned value. Decode must
+// return an owned value and enforce its own allocation limits. Gent supplies a separate input
+// buffer for each Decode call; do not return shared mutable results across calls.
 type ValueCodec interface {
 	Type() string
 	Version() int
@@ -95,14 +97,18 @@ func NewCodecRegistry(options ...CodecOption) *CodecRegistry {
 	return r
 }
 
-// Marshal preserves concrete content and metadata types in portable JSON. Use it for saved runs
-// and batches; plain JSON cannot restore interface-valued content without this type information.
+// Marshal preserves concrete content and metadata types in a self-contained JSON document.
+// Document-local type, layout, and shared-value tables remove repeated descriptions and values.
+// A version and digest cover the saved representation. Use this method for RunView and SaveBatch;
+// plain JSON cannot restore interface-valued content without this type information.
 func (r *CodecRegistry) Marshal(value any) ([]byte, error) {
 	encoder := newValueEncoder(r)
 	return encoder.marshal(value)
 }
 
-// Unmarshal restores a Marshal result using the same versioned type registrations.
+// Unmarshal restores a Marshal result using the same versioned type registrations. It validates
+// document integrity, references, and expansion limits before decoding typed values. Each use of
+// a shared wire value creates an independent mutable Go value. A failed load leaves target intact.
 func (r *CodecRegistry) Unmarshal(data []byte, target any) error {
 	if err := r.checkEncodedSize(len(data)); err != nil {
 		return err
@@ -111,11 +117,8 @@ func (r *CodecRegistry) Unmarshal(data []byte, target any) error {
 	if destination.Kind() != reflect.Pointer || destination.IsNil() {
 		return errors.New("gent: decode target must be a non-nil pointer")
 	}
-	var encoded EncodedValue
-	if err := json.Unmarshal(data, &encoded); err != nil {
-		return err
-	}
-	decoded, err := r.Decode(encoded)
+	decoder := valueDecoder{CodecRegistry: r, status: valueDecodeInvalid}
+	decoded, err := decoder.document(data)
 	if err != nil {
 		return err
 	}
@@ -124,7 +127,7 @@ func (r *CodecRegistry) Unmarshal(data []byte, target any) error {
 		destination.Elem().SetZero()
 		return nil
 	}
-	if value.Kind() == reflect.Pointer && value.Type() != destination.Elem().Type() {
+	if value.Kind() == reflect.Pointer && !value.Type().AssignableTo(destination.Elem().Type()) {
 		if value.IsNil() {
 			return errors.New("gent: cannot decode nil into a value")
 		}
@@ -206,8 +209,10 @@ func (r *CodecRegistry) lookupId(id string) (registeredValue, bool) {
 	return value, ok
 }
 
-// Encode takes ownership by returning newly allocated bytes. Cyclic values are rejected rather
-// than retained as pointers into caller-owned state.
+// Encode returns a component's typed envelope with owned bytes. Use Encode/Decode for explicit
+// EncodedValue fields and custom checkpoint components. Marshal/Unmarshal own the complete storage
+// document and its tables; json.Marshal on an EncodedValue is not that document format.
+// Cyclic values are rejected rather than retained as pointers into caller-owned state.
 func (r *CodecRegistry) Encode(value any) (EncodedValue, error) {
 	encoder := newValueEncoder(r)
 	return encoder.value(value, 0)
@@ -219,6 +224,27 @@ func encoded(id string, value any) (encodingValue, error) {
 		return encodingValue{}, err
 	}
 	return encodingValue{Type: id, Version: 1, Data: json.RawMessage(data)}, nil
+}
+
+func (r *valueEncoder) encodeBytes(data []byte) (encodingValue, error) {
+	// Repeated media buffers need one base64 conversion per document. The string key owns its
+	// bytes, so this cache cannot depend on a caller changing a buffer after encoding returns.
+	if len(data) >= 256 {
+		if saved, ok := r.buffers[string(data)]; ok {
+			return encodingValue{Type: "bytes", Version: 1, Data: saved}, nil
+		}
+	}
+	value, err := encoded("bytes", data)
+	if err != nil {
+		return encodingValue{}, err
+	}
+	if len(data) >= 256 {
+		if r.buffers == nil {
+			r.buffers = make(map[string]json.RawMessage)
+		}
+		r.buffers[string(data)] = value.Data.(json.RawMessage)
+	}
+	return value, nil
 }
 
 type encodedMapItem[T any] struct {
@@ -280,7 +306,7 @@ func (r *valueEncoder) encode(v reflect.Value, depth int) (encodingValue, error)
 		return encodingValue{
 			Type:    registration.id,
 			Version: registration.version,
-			Data:    append(json.RawMessage(nil), data...),
+			Data:    data,
 		}, nil
 	}
 	if v.Kind() == reflect.Pointer || v.Kind() == reflect.Map || v.Kind() == reflect.Slice {
@@ -351,6 +377,25 @@ func (r *valueEncoder) encode(v reflect.Value, depth int) (encodingValue, error)
 			r.status = valueEncodeIncompatible
 			return encodingValue{}, fmt.Errorf("gent: no codec for %s", v.Type())
 		}
+		// Large built-in strings recur in effective requests and archive projections. Their
+		// JSON is immutable, so one per-call buffer avoids encoding the same text repeatedly.
+		// Named values and application codecs keep their own encoding behavior.
+		if v.Type() == reflect.TypeFor[string]() && v.Len() >= 256 {
+			text := v.String()
+			if data, ok := r.strings[text]; ok {
+				return encodingValue{Type: registration.id, Version: registration.version, Data: data}, nil
+			}
+			value, err := encoded(registration.id, text)
+			if err != nil {
+				return encodingValue{}, err
+			}
+			if r.strings == nil {
+				r.strings = make(map[string]json.RawMessage)
+			}
+			r.strings[text] = value.Data.(json.RawMessage)
+			value.Version = registration.version
+			return value, nil
+		}
 		value, err := encoded(registration.id, v.Interface())
 		value.Version = registration.version
 		return value, err
@@ -411,7 +456,7 @@ func (r *valueEncoder) encodeContainer(v reflect.Value, depth int) (encodingValu
 		if err := r.checkBinarySize(v.Len()); err != nil {
 			return encodingValue{}, err
 		}
-		return encoded("bytes", v.Bytes())
+		return r.encodeBytes(v.Bytes())
 	}
 	name, err := r.typeName(v.Type().Elem())
 	if err != nil {

@@ -277,6 +277,9 @@ ExecutionContext represents one conversation. NewTurn adds user input to the sam
 - Example: `go test ./... -count=1 -timeout 300s`
 - Portable suite: `CGO_ENABLED=0 go test ./... -count=1 -timeout 300s`
 - Race suite: `go test -race ./... -count=1 -timeout 300s`
+- Repeat these suites in each module: root, `docs`, `examples`, `examples/chat`, and `scripts`.
+  Nested module boundaries exclude teaching material and release tools from the library ZIP.
+  Root `./...` does not test those modules. See `development/releasing.md` for the release gate.
 
 **Release Verification**
 - Before releasing a version, run all required tests, including live tests for configured providers.

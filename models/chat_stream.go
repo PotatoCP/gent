@@ -14,7 +14,10 @@ import (
 )
 
 type chatEnvelope struct {
-	Choices []struct {
+	ID          string `json:"id"`
+	Model       string `json:"model"`
+	ServiceTier string `json:"service_tier"`
+	Choices     []struct {
 		Index   int                        `json:"index"`
 		Message json.RawMessage            `json:"message"`
 		Delta   map[string]json.RawMessage `json:"delta"`
@@ -32,7 +35,8 @@ type chatUsage struct {
 	Total       int `json:"total_tokens"`
 	CacheHit    int `json:"prompt_cache_hit_tokens"`
 	InputDetail struct {
-		Cached int `json:"cached_tokens"`
+		Cached     int `json:"cached_tokens"`
+		CacheWrite int `json:"cache_write_tokens"`
 	} `json:"prompt_tokens_details"`
 	OutputDetail struct {
 		Reasoning int `json:"reasoning_tokens"`
@@ -40,7 +44,7 @@ type chatUsage struct {
 }
 
 func (m *Chat) readResponse(ctx context.Context, response *http.Response,
-	stream *gent.StreamWithDuration, options *gent.CallOptions,
+	stream *providerStream, options *gent.CallOptions,
 ) (*gent.ModelCallResponse, error) {
 	if !strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") {
 		var envelope chatEnvelope
@@ -58,12 +62,16 @@ func (m *Chat) readResponse(ctx context.Context, response *http.Response,
 		if err != nil {
 			return nil, err
 		}
+		result.Info.ProviderResponseId = envelope.ID
+		result.Info.ResponseModel = envelope.Model
+		result.Info.ResponseServiceTier = envelope.ServiceTier
 		return previewProviderResponse(ctx, stream, options, result)
 	}
 	accumulator := chatAccumulator{fields: make(map[string]json.RawMessage),
 		calls: make(map[int]*chatCallDelta), text: make(map[string]*strings.Builder)}
 	var usage chatUsage
 	var finish string
+	var responseID, model, tier string
 	size := 0
 	err := readSSE(response.Body, func(data []byte) (bool, error) {
 		if bytes.Equal(data, []byte("[DONE]")) {
@@ -83,6 +91,16 @@ func (m *Chat) readResponse(ctx context.Context, response *http.Response,
 		if envelope.Error != nil {
 			return false, errors.New(envelope.Error.Message)
 		}
+		// Some servers omit identity fields from the final usage-only event.
+		if envelope.ID != "" {
+			responseID = envelope.ID
+		}
+		if envelope.Model != "" {
+			model = envelope.Model
+		}
+		if envelope.ServiceTier != "" {
+			tier = envelope.ServiceTier
+		}
 		if envelope.Usage != (chatUsage{}) {
 			usage = envelope.Usage
 		}
@@ -91,6 +109,9 @@ func (m *Chat) readResponse(ctx context.Context, response *http.Response,
 				return false, errors.New("unexpected Chat response choice")
 			}
 			if err := accumulator.add(choice.Delta); err != nil {
+				return false, err
+			}
+			if err := stream.observeChatDelta(choice.Delta); err != nil {
 				return false, err
 			}
 			for _, name := range []string{"reasoning_content", "reasoning", "content", "refusal"} {
@@ -119,7 +140,50 @@ func (m *Chat) readResponse(ctx context.Context, response *http.Response,
 	if err != nil {
 		return nil, err
 	}
-	return m.convertResponse(ctx, message, finish, usage)
+	result, err := m.convertResponse(ctx, message, finish, usage)
+	if err != nil {
+		return nil, err
+	}
+	result.Info.ProviderResponseId = responseID
+	result.Info.ResponseModel = model
+	result.Info.ResponseServiceTier = tier
+	return result, nil
+}
+
+// Stop inspecting extra native fields once content has arrived. The accumulator still validates
+// every delta; this helper only measures content that has no text streaming callback.
+func (stream *providerStream) observeChatDelta(delta map[string]json.RawMessage) error {
+	if stream.firstContent != 0 {
+		return nil
+	}
+	for _, name := range []string{"tool_calls", "images"} {
+		var items []json.RawMessage
+		if raw := delta[name]; len(raw) > 0 {
+			if err := json.Unmarshal(raw, &items); err != nil {
+				return err
+			}
+		}
+		if len(items) > 0 {
+			stream.observeContent()
+		}
+	}
+	var details []struct {
+		Type    string `json:"type"`
+		Text    string `json:"text"`
+		Summary string `json:"summary"`
+	}
+	if raw := delta["reasoning_details"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &details); err != nil {
+			return err
+		}
+	}
+	for _, detail := range details {
+		if detail.Type == "reasoning.text" && detail.Text != "" ||
+			detail.Type == "reasoning.summary" && detail.Summary != "" {
+			stream.observeContent()
+		}
+	}
+	return nil
 }
 
 type chatAccumulator struct {
@@ -341,5 +405,6 @@ func (m *Chat) convertResponse(ctx context.Context, raw json.RawMessage, reason 
 	return &gent.ModelCallResponse{Choices: []*gent.ContentChoice{choice}, Info: &gent.GenerationInfo{
 		InputTokens: usage.Input, OutputTokens: usage.Output, TotalTokens: usage.Total,
 		CachedInputTokens: cached, ReasoningTokens: usage.OutputDetail.Reasoning,
+		CacheWriteInputTokens: usage.InputDetail.CacheWrite,
 	}}, nil
 }

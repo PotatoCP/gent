@@ -102,7 +102,7 @@ func (r *valueDecoder) decodeExpected(value decodingValue, depth int,
 	if depth > 100 {
 		return reflect.Value{}, errors.New("gent: value nesting exceeds 100")
 	}
-	if len(value.Data.bytes()) == 0 {
+	if !value.Data.present() {
 		return reflect.Value{}, errors.New("gent: invalid encoded JSON")
 	}
 	registration, registered := r.lookupId(value.Type)

@@ -16,7 +16,18 @@ Different registrations and runs can overlap, including handlers that share the 
 
 ## Select delivery
 
+Create separate instances of the handler above:
+
+{{example:subscriber-handlers}}
+
 {{example:subscriber-config}}
+
+Pass the registration configuration to the Runner:
+
+{{example:subscriber-runner}}
+
+Create a context and submit a task as in [Hello World](/start/hello-world/). A custom UI Subscriber
+uses the same registration; replace the EventLog instance with that implementation.
 
 Accepted delivery can arrive in bursts after saves. It includes rejected candidates and tool
 activity, not only accepted answers. Live delivery can arrive before persistence, but complete

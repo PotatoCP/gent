@@ -11,24 +11,28 @@ import (
 type frameworkValueCodec[T any] struct {
 	name     string
 	registry *CodecRegistry
-	encode   func(*valueEncoder, T, int) (EncodedValue, error)
+	encode   func(*valueEncoder, T, int) (encodingValue, error)
 	decode   func(*valueDecoder, decodingValue, int) (T, error)
 }
 
 func (c frameworkValueCodec[T]) Type() string { return c.name }
 func (frameworkValueCodec[T]) Version() int   { return 1 }
 func (c frameworkValueCodec[T]) Encode(value any) (json.RawMessage, error) {
-	return c.encodeValue(newValueEncoder(c.registry), value, 0)
+	data, err := c.encodeValue(newValueEncoder(c.registry), value, 0)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(data)
 }
 
 func (c frameworkValueCodec[T]) encodeValue(
 	encoder *valueEncoder, value any, depth int,
-) (json.RawMessage, error) {
+) (any, error) {
 	encoded, err := c.encode(encoder, value.(T), depth+1)
 	if err != nil {
 		return nil, err
 	}
-	return json.Marshal(encoded)
+	return encoded, nil
 }
 func (c frameworkValueCodec[T]) Decode(data json.RawMessage) (any, error) {
 	decoder := valueDecoder{CodecRegistry: c.registry, status: valueDecodeInvalid}
@@ -56,7 +60,7 @@ func addFrameworkValueCodec[T any](
 		T,
 		int,
 	) (
-		EncodedValue,
+		encodingValue,
 		error,
 	),
 	decode func(*valueDecoder, decodingValue, int) (T, error),
@@ -81,10 +85,10 @@ func registerToolStateCodecs(r *CodecRegistry) {
 			value DataContent,
 			depth int,
 		) (
-			EncodedValue,
+			encodingValue,
 			error,
 		) {
-			return encoder.value(value.value, depth)
+			return encoder.encode(reflect.ValueOf(value.value), depth)
 		},
 		func(decoder *valueDecoder, value decodingValue, depth int) (DataContent, error) {
 			decoded, err := decoder.decodedValue(value, depth)
@@ -105,10 +109,10 @@ func registerToolStateCodecs(r *CodecRegistry) {
 			value ModelToolCallResponse,
 			depth int,
 		) (
-			EncodedValue,
+			encodingValue,
 			error,
 		) {
-			return encoder.value(value.data, depth)
+			return encoder.encode(reflect.ValueOf(value.data), depth)
 		},
 		func(decoder *valueDecoder, value decodingValue, depth int) (ModelToolCallResponse, error) {
 			data, err := decodeSavedAs[modelToolResponseData](decoder, value, depth)
@@ -128,10 +132,10 @@ func registerToolStateCodecs(r *CodecRegistry) {
 			value ToolCallRecord,
 			depth int,
 		) (
-			EncodedValue,
+			encodingValue,
 			error,
 		) {
-			return encoder.value(value.data, depth)
+			return encoder.encode(reflect.ValueOf(value.data), depth)
 		},
 		func(decoder *valueDecoder, value decodingValue, depth int) (ToolCallRecord, error) {
 			data, err := decodeSavedAs[toolCallRecordData](decoder, value, depth)

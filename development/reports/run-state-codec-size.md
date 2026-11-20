@@ -1,10 +1,11 @@
 # RunStateSnapshot size review
 
-Status: draft proposals for owner review. No codec change is approved or implemented by this work.
-The chat scenario and explorer changes are separate. Measurements use the current codec plus a
-temporary, reversible format experiment. No production storage format was changed.
+Status: the owner approved structural tables and local value sharing on 2026-11-19. The production
+implementation is described in [Saved document format](saved-document-format.md). Compression is
+still outside scope. The earlier sections below preserve the original measurements, design reasons,
+and prototype evidence. They describe the codec before this implementation unless stated otherwise.
 
-## Findings
+## Findings before the change
 
 The inspector compares two formats of the same recovered state at the same accepted position:
 
@@ -283,6 +284,246 @@ Before approval, require:
 5. Size, CPU, allocation, and restore-time measurements with text, native state, media, and large
   data.
 
-Keep existing public storage calls for all stages. Table layout, sharing rules, and compression
-remain draft until the owner approves the codec design. The explorer changes do not approve a
-storage format change.
+Keep existing public storage calls for all stages. The owner later approved structural tables and
+sharing explicitly on 2026-11-19. That approval does not include compression. The explorer changes
+remain separate from storage format approval.
+
+
+## Production implementation and verification, 2026-11-19
+
+The approved structural changes are implemented. The public storage calls remain unchanged. The
+private format has a versioned integrity envelope, a type table, record layouts, and shared typed
+values. It has no compression. The reader visits the compact tables directly and retains the
+existing typed and logical-state validation. See [Saved document format](saved-document-format.md)
+for the complete grammar, ownership rules, bounds, and unsupported former format.
+
+### Exact sample comparison
+
+The production encoder was also checked against the fixed input files from the earlier experiment.
+The compact documents expanded to the exact original typed JSON bytes. The RunStateSnapshots loaded
+as Ready, with the same logical state. The full archive loaded as RunView. This sample check is
+separate from the full savepoint recovery tests below.
+
+| Sample | Former bytes | Production bytes | Reduction |
+| --- | ---: | ---: | ---: |
+| Prior airline RunStateSnapshot | 59,467 | 27,131 | 54.4% |
+| Fresh airline RunStateSnapshot | 59,468 | 27,132 | 54.4% |
+| Fresh airline RunView | 760,167 | 80,782 | 89.4% |
+
+The production grammar differs from the prototype. Its fixed format version and integrity envelope
+are included in these sizes. Type metadata, complete native bytes, source identities, recovery
+evidence, and original archived prompts remain present. No recovery field was removed.
+
+### Encoding and decoding costs
+
+`BenchmarkSavedDocument` constructs an accepted three-turn run through Runner and Recorder. It
+compares the complete typed envelope with the document format on identical values. Both paths use
+the current component codecs, including per-call reuse of repeated text and binary encoding. This
+isolates the storage-format cost; it is not a comparison with a previous executable.
+
+The following results are medians of three local samples, with GOMAXPROCS=4 and a 200 ms benchmark
+target. Timing is approximate and can vary with machine load. Allocation bytes are total allocated
+bytes per operation, not peak resident memory. These measurements do not prove a peak-memory gain.
+
+The state case measures the retained state payload. It does not include the outer RunStateSnapshot
+validation or Runner.Restore. RunView decoding includes its existing archive/reducer validation.
+The native case preserves raw provider JSON; the media case includes 96 KiB of binary content; the
+large-data case includes 736 KiB of application text. Long repeated data can benefit more than
+unique or already compressed data.
+
+In all tables, E means the complete typed envelope and D means the new document.
+
+| Case | E bytes | D bytes | Reduction |
+| --- | ---: | ---: | ---: |
+| text state | 56,090 | 24,847 | 55.7% |
+| text view | 247,953 | 35,786 | 85.6% |
+| native state | 53,158 | 18,862 | 64.5% |
+| native view | 261,864 | 30,884 | 88.2% |
+| media state | 565,368 | 279,654 | 50.5% |
+| media view | 2,030,428 | 290,629 | 85.7% |
+| large data state | 2,314,029 | 772,400 | 66.6% |
+| large data view | 9,305,353 | 784,349 | 91.6% |
+
+Time, ms per operation:
+
+| Case | Encode E / D | Decode E / D |
+| --- | ---: | ---: |
+| text state | 0.667 / 1.947 | 1.902 / 1.505 |
+| text view | 2.892 / 5.210 | 8.772 / 4.508 |
+| native state | 0.710 / 2.214 | 1.860 / 1.724 |
+| native view | 3.406 / 6.831 | 9.287 / 4.961 |
+| media state | 7.335 / 11.336 | 16.627 / 9.018 |
+| media view | 19.444 / 16.510 | 54.343 / 23.570 |
+| large data state | 17.539 / 24.525 | 50.660 / 23.872 |
+| large data view | 71.679 / 26.605 | 201.651 / 77.973 |
+
+Allocation, MiB per operation:
+
+| Case | Encode E / D | Decode E / D |
+| --- | ---: | ---: |
+| text state | 0.196 / 0.617 | 0.316 / 0.519 |
+| text view | 1.010 / 1.607 | 1.470 / 1.478 |
+| native state | 0.235 / 0.747 | 0.369 / 0.577 |
+| native view | 1.253 / 1.975 | 1.787 / 1.749 |
+| media state | 1.215 / 2.131 | 1.582 / 1.295 |
+| media view | 3.780 / 3.395 | 6.004 / 4.319 |
+| large data state | 4.044 / 5.266 | 4.685 / 2.737 |
+| large data view | 25.959 / 6.120 | 19.080 / 10.385 |
+
+Allocation count per operation:
+
+| Case | Encode E / D | Decode E / D |
+| --- | ---: | ---: |
+| text state | 1,851 / 7,286 | 5,367 / 7,034 |
+| text view | 9,858 / 19,797 | 26,480 / 18,672 |
+| native state | 2,439 / 8,443 | 6,984 / 8,100 |
+| native view | 13,101 / 24,706 | 35,073 / 22,826 |
+| media state | 1,871 / 7,429 | 5,424 / 7,158 |
+| media view | 9,930 / 20,059 | 26,711 / 18,873 |
+| large data state | 2,453 / 8,553 | 7,151 / 8,182 |
+| large data view | 13,134 / 24,881 | 35,757 / 23,101 |
+
+The cost is not uniform. Small state documents need more encoding time and allocation for tables.
+Their decoder also allocates more bytes in these samples, despite lower elapsed time. Media and
+large repeated archive data show better encoding and decoding results. Small documents can grow.
+The selected design reduces stored repetition; it does not promise that every operation gets faster
+or uses less memory. Separate receipt hashing still creates the full canonical typed JSON buffer.
+
+Reproduce the format comparison with:
+
+```sh
+GOMAXPROCS=4 go test ./internal/core -run '^$' -bench '^BenchmarkSavedDocument$' \
+  -benchmem -benchtime=200ms -count=3 -timeout 300s
+```
+
+
+### Review against req-multi-turn.md
+
+The change was reviewed against the current requirements, including the owner's request to complete
+this review before claiming the codec work is done. The review found no conflict in the affected
+contracts. It does not reopen approved interfaces or claim a new provider feature.
+
+- **D40/D52/D53/D62/D63/D65/D77, recovery equivalence:** both replay paths use the new document
+  reader. `TestEverySavepointRestoresAcceptedState` covers all nine approved savepoint categories,
+  ReAct and custom loops, four interruption positions, both replay paths, and exact retry.
+  `TestRunStateSnapshotAndTailMatchFullReplay` compares complete encoded states. The codec
+  does not change save timing, managed operation identities, accepted counters, or continuation.
+- **D30/D78/D98/D118, compact state and full archive:** the serializer still receives the private
+  retained RunState. `TestRunStateRetainsContextWithoutArchiveGrowth` checks bounded retained size.
+  `TestRunViewReconstructsFullArchiveAndOldReceipts` checks complete
+  history, activity, control state, and receipts, including applying more batches after a load.
+  The wire tables do not remove source records or add references to another file.
+- **D78, ownership and capture:** sharing occurs only in storage. New ownership tests decode shared
+  pointers, maps, binary slices, and custom-codec buffers, change one occurrence, and compare the
+  remaining complete values. Concurrent decodes remain independent.
+  `TestRecorderRunStateSnapshotMatchesItsBatch` checks stable captures after later acceptance.
+- **D46/D79/D112/D126, integrity and typed results:** digest, grammar, index, reference-order,
+  logical-expansion, type, version, and state checks remain active. New tests reject corrupt and
+  truncated data, unsupported formats, invalid references, and validly sealed invalid state.
+  `TestRunStateLoadSeparatesMissingCodecAndOperationFailure` preserves the distinction between
+  Incompatible and an unexpected codec error. Failed Unmarshal leaves its target unchanged.
+- **D66/D105, accepted identities:** `TestSavedDocumentKeepsBatchReceipts` checks each recorded
+  batch against the canonical typed representation. Storage table indexes and sharing do not change
+  BatchId. EventSequenceNumber, RunId, TurnId, and operation identities retain their meanings.
+- **D72/D76/D83, custom data and code evolution:** the existing evolution tests now also use
+  complete document Marshal/Unmarshal. Added fields, removed fields with no remaining codec,
+  renamed Go fields, declared-type changes, anonymous structs, and map-key collisions retain their
+  prior rules. Component EncodedValue remains available for custom checkpoint fields. No migration
+  framework or second public state type was added.
+- **D73/D87/D98/D100/D103, output and native context:** provider restore/NewTurn and repeated
+  rejection tests still exercise complete adapter requests after both replay paths. Exact native
+  JSON bytes, signatures, phases, IDs, and ordered content remain saved. Accepted-answer publication
+  still waits for its save. `TestAcceptedRecoverySurvivesAnotherInterruption` checks accepted
+  recovery reuse. `TestRetainedUsersSurviveCompactionAndRestoration` checks compaction restoration.
+- **D70/D75, enums and API simplicity:** both new internal enum families use named string types,
+  typed constants, and per-value comments. Explicit conversion maps them to the private integer
+  wire tags. The public storage calls are unchanged. The two added CodecLimits fields configure
+  the expansion safeguards; zero selects bounded defaults.
+- **D81, example integration:** the browser test uses the chat example's actual serialized memory
+  store, both scenarios, both recovery paths, and the reusable RunView/RunState inspectors. It
+  checks the encoded and recovered tabs and byte counts. The inspected Go module ZIP excludes the
+  nested chat module and its assets.
+
+The public compatibility boundary is explicit: this development format does not read former saved
+storage envelopes. UnmarshalRunState reports Incompatible. It also rejects unsupported new document
+versions. This follows the development policy that no backward compatibility or migration reader
+is required. Logical state and batch receipt semantics are retained.
+
+The review does not claim live provider compatibility. No provider mapping changed, and this task
+uses provider fixtures and the deterministic chat provider. Configured live-provider checks remain
+a release gate before a release or a new remote-compatibility claim.
+
+
+### Capture, validated load, and replay
+
+The existing `BenchmarkRunStateStorage` also passed with the new format. Each case creates an
+accepted log through Recorder. The first two cases retain one 128-byte active input while history
+grows from 100 to 2,000 iterations. The third retains 1 MiB of active text across two iterations.
+Capture runs inside Recorder.Save. Load includes RunStateSnapshot integrity and logical validation.
+It does not include Runner.Restore or later model/tool execution. Load plus tail reads up to four
+subsequent batches. Full replay is measured for both RunState and RunView.
+
+These are single-operation local samples, suitable for checking scale and byte counts. They are
+not latency guarantees. Allocated bytes are total allocations, not peak memory. A dash means that
+capture did not write or read serialized bytes.
+
+| Case | Operation | ms | Allocated B | Allocations | Stored/read B |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 100 | capture | 0.214 | 19,792 | 344 | — |
+| 100 | encode | 1.575 | 571,856 | 6,111 | 15,806 |
+| 100 | load | 1.067 | 439,984 | 5,787 | 15,806 |
+| 100 | load + tail | 5.820 | 2,084,304 | 28,135 | 64,444 |
+| 100 | state replay | 233.251 | 79,236,928 | 1,072,977 | 2,435,349 |
+| 100 | archive replay | 212.419 | 79,458,504 | 1,073,261 | 2,435,349 |
+| 2,000 | capture | 0.192 | 19,792 | 344 | — |
+| 2,000 | encode | 1.500 | 570,592 | 6,099 | 15,822 |
+| 2,000 | load | 1.532 | 441,232 | 5,799 | 15,822 |
+| 2,000 | load + tail | 5.881 | 2,133,136 | 28,155 | 64,567 |
+| 2,000 | state replay | 3,820.995 | 1,569,264,760 | 21,304,407 | 48,497,886 |
+| 2,000 | archive replay | 4,115.802 | 1,571,550,464 | 21,308,478 | 48,497,886 |
+| 1 MiB active | capture | 0.406 | 19,792 | 344 | — |
+| 1 MiB active | encode | 38.706 | 11,064,088 | 6,113 | 1,064,220 |
+| 1 MiB active | load | 26.599 | 2,538,288 | 5,799 | 1,064,220 |
+| 1 MiB active | load + tail | 65.107 | 12,588,624 | 27,983 | 2,160,778 |
+| 1 MiB active | state replay | 83.923 | 16,986,744 | 29,307 | 2,161,216 |
+| 1 MiB active | archive replay | 63.724 | 8,461,624 | 29,278 | 2,161,216 |
+
+Retained encoded size changes by only 16 bytes between 100 and 2,000 iterations. Capture allocation
+remains 19,792 bytes and 344 allocations. Loading the retained state plus its tail reads about
+64 KiB in both cases. Full replay reads about 2.4 MB and 48.5 MB respectively. Thus the new document
+format preserves the retained-state loading path; it does not require earlier archive bytes.
+Large active content still increases encoding and loading work, as the requirements permit.
+
+Reproduce this check with:
+
+```sh
+GOMAXPROCS=4 go test ./internal/core -run '^$' -bench '^BenchmarkRunStateStorage$' \
+  -benchmem -benchtime=1x -count=1 -timeout 300s
+```
+
+### Completed verification
+
+All checks below passed on the final Go changes:
+
+| Check | Result |
+| --- | --- |
+| Main module, native full suite | 24 test packages passed; all 31 packages reported |
+| Main module, CGO-disabled full suite | 24 test packages passed; all 31 packages reported |
+| Main module, race full suite | 24 test packages passed; all 31 packages reported |
+| Chat module, native, CGO-disabled, and race suites | Passed |
+| Chat JavaScript tests | All five files passed |
+| Chat Playwright flow and console checks | Passed; screenshots inspected |
+| Saved-document parser fuzzing | 297,523 executions in 15 seconds; passed |
+| Format comparison and capture/replay benchmarks | Passed |
+| Go module ZIP check | Chat module, assets, and .env excluded |
+| Go format, whitespace, line length, Markdown links | Passed |
+
+The Go suites used `-count=1 -timeout 300s`. Main-module suites also used `-p 1` and GOMAXPROCS=4.
+The race suite exercised the complete savepoint matrix, provider fixtures, managed tool recovery,
+concurrent capture/acceptance, subscribers, and shared-registry decoding. The browser flow used a
+separate local fixture server and left the user's existing server running.
+
+No test assertion was removed to obtain a pass. Binary wire tests now compare the document's exact
+expanded typed representation with their original expected values. A small storage-limit fixture
+was adjusted to include the new format header and still tests exact over-limit errors. Tests also
+check exact table syntax, unchanged batch receipts, full decoded values, and no mutation on failure.

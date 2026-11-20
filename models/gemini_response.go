@@ -19,17 +19,20 @@ type geminiCandidate struct {
 }
 
 type geminiEnvelope struct {
-	Candidates []geminiCandidate `json:"candidates"`
-	Feedback   struct {
+	ResponseID   string            `json:"responseId"`
+	ModelVersion string            `json:"modelVersion"`
+	Candidates   []geminiCandidate `json:"candidates"`
+	Feedback     struct {
 		Reason string `json:"blockReason"`
 	} `json:"promptFeedback"`
 	Usage struct {
-		Input     int `json:"promptTokenCount"`
-		Output    int `json:"candidatesTokenCount"`
-		Total     int `json:"totalTokenCount"`
-		Cached    int `json:"cachedContentTokenCount"`
-		Reasoning int `json:"thoughtsTokenCount"`
-		Tools     int `json:"toolUsePromptTokenCount"`
+		Input       int    `json:"promptTokenCount"`
+		Output      int    `json:"candidatesTokenCount"`
+		Total       int    `json:"totalTokenCount"`
+		Cached      int    `json:"cachedContentTokenCount"`
+		Reasoning   int    `json:"thoughtsTokenCount"`
+		Tools       int    `json:"toolUsePromptTokenCount"`
+		ServiceTier string `json:"serviceTier"`
 	} `json:"usageMetadata"`
 	Error *struct {
 		Message string `json:"message"`
@@ -37,7 +40,7 @@ type geminiEnvelope struct {
 }
 
 func (m *generateContentModel) readResponse(ctx context.Context, response *http.Response,
-	stream *gent.StreamWithDuration, options *gent.CallOptions, request map[string]any,
+	stream *providerStream, options *gent.CallOptions, request map[string]any,
 	prior *geminiContinuation,
 ) (*gent.ModelCallResponse, error) {
 	var envelope geminiEnvelope
@@ -65,7 +68,16 @@ func (m *generateContentModel) readResponse(ctx context.Context, response *http.
 		if event.Error != nil {
 			return false, errors.New(event.Error.Message)
 		}
+		if event.ResponseID != "" {
+			envelope.ResponseID = event.ResponseID
+		}
+		if event.ModelVersion != "" {
+			envelope.ModelVersion = event.ModelVersion
+		}
 		if event.Usage != (geminiEnvelope{}).Usage {
+			if event.Usage.ServiceTier == "" {
+				event.Usage.ServiceTier = envelope.Usage.ServiceTier
+			}
 			envelope.Usage = event.Usage
 		}
 		if event.Feedback.Reason != "" {
@@ -81,11 +93,19 @@ func (m *generateContentModel) readResponse(ctx context.Context, response *http.
 		candidate := event.Candidates[0]
 		for _, raw := range candidate.Content.Parts {
 			var part struct {
-				Text    string `json:"text"`
-				Thought bool   `json:"thought"`
+				Text    string          `json:"text"`
+				Thought bool            `json:"thought"`
+				Call    json.RawMessage `json:"functionCall"`
+				Inline  json.RawMessage `json:"inlineData"`
+				File    json.RawMessage `json:"fileData"`
 			}
 			if err := json.Unmarshal(raw, &part); err != nil {
 				return false, err
+			}
+			for _, content := range []json.RawMessage{part.Call, part.Inline, part.File} {
+				if len(content) > 0 && string(content) != "null" {
+					stream.observeContent()
+				}
 			}
 			kind := gent.AssistantContentIntermediary
 			if part.Thought {
@@ -265,5 +285,7 @@ func geminiResult(choice *gent.ContentChoice, response *geminiEnvelope) *gent.Mo
 	return &gent.ModelCallResponse{Choices: []*gent.ContentChoice{choice}, Info: &gent.GenerationInfo{
 		InputTokens: usage.Input + usage.Tools, OutputTokens: usage.Output + usage.Reasoning,
 		TotalTokens: usage.Total, CachedInputTokens: usage.Cached, ReasoningTokens: usage.Reasoning,
+		ProviderResponseId: response.ResponseID, ResponseModel: response.ModelVersion,
+		ResponseServiceTier: usage.ServiceTier,
 	}}
 }

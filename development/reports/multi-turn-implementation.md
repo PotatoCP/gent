@@ -170,7 +170,7 @@ verified Stop, same-task Continue, and task replacement. Desktop and mobile scre
 inspected. The first browser run found a tool-result projection omission and an icon policy error;
 both were fixed and the complete flow passed again.
 
-The [release verifier](../../examples/chat/releasecheck/main.go) creates a real module ZIP with Go's
+The [release verifier](../../scripts/releasecheck/main.go) creates a real module ZIP with Go's
 module packer from current tracked and non-ignored source. The inspected ZIP includes the root
 module and excludes the chat module, its assets/dependencies, node_modules, and .env. The separate
 go.mod supplies module exclusion; .gitattributes also marks the application for source-archive

@@ -59,7 +59,7 @@ func (m *generateContentModel) GenerateContentStream(ctx context.Context,
 		headers.Set("X-Goog-Api-Key", m.config.APIKey)
 	}
 	return startProviderStream(ctx, m.config.HTTPClient, endpoint, headers, body,
-		func(ctx context.Context, response *http.Response, stream *gent.StreamWithDuration) (
+		func(ctx context.Context, response *http.Response, stream *providerStream) (
 			*gent.ModelCallResponse, error,
 		) {
 			result, err := m.readResponse(ctx, response, stream, &request.Options, body, prior)

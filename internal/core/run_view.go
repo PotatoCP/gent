@@ -117,7 +117,7 @@ func registerRunViewCodec(codecs *CodecRegistry) {
 			view RunView,
 			depth int,
 		) (
-			EncodedValue,
+			encodingValue,
 			error,
 		) {
 			data := runViewData{SchemaVersion: view.SchemaVersion, RunId: view.RunId,
@@ -129,7 +129,7 @@ func registerRunViewCodec(codecs *CodecRegistry) {
 			if view.replay != nil {
 				data.State = &view.replay.data
 			}
-			return encoder.value(data, depth)
+			return encoder.encode(reflect.ValueOf(data), depth)
 		},
 		func(decoder *valueDecoder, value decodingValue, depth int) (RunView, error) {
 			data, err := decodeSavedAs[runViewData](decoder, value, depth)

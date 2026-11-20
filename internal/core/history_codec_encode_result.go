@@ -25,15 +25,18 @@ type valueEncoder struct {
 	*CodecRegistry
 	status   valueEncodeStatus
 	visiting map[any]bool
+	strings  map[string]json.RawMessage
+	buffers  map[string]json.RawMessage
 }
 
 type savedValueEncoder interface {
-	encodeValue(*valueEncoder, any, int) (json.RawMessage, error)
+	encodeValue(*valueEncoder, any, int) (any, error)
 }
 
 // Build nested envelopes as Go values and serialize them together. Serializing each container
 // separately makes encoding/json scan and copy the same descendant JSON at every ancestor. The
-// wire fields match EncodedValue; only scalar and custom-codec leaves contain JSON during encoding.
+// component fields match EncodedValue; only scalar and application-codec leaves contain JSON.
+// Storage tables consume this tree directly. Framework codecs keep their children in the tree.
 type encodingValue struct {
 	Type         string `json:"type"`
 	DeclaredType string `json:"declaredType,omitempty"`
@@ -67,7 +70,7 @@ func (encoder *valueEncoder) marshal(value any) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data, err := json.Marshal(encoded)
+	data, err := encoder.marshalDocument(encoded)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +79,7 @@ func (encoder *valueEncoder) marshal(value any) ([]byte, error) {
 
 func (encoder *valueEncoder) encodeCodec(
 	codec ValueCodec, value any, depth int,
-) (json.RawMessage, error) {
+) (any, error) {
 	if framework, ok := codec.(savedValueEncoder); ok {
 		return framework.encodeValue(encoder, value, depth)
 	}
@@ -89,5 +92,6 @@ func (encoder *valueEncoder) encodeCodec(
 		encoder.status = valueEncodeOperationFailed
 		return nil, fmt.Errorf("codec %s returned invalid JSON", codec.Type())
 	}
-	return data, nil
+	// Application codecs can reuse their buffer after this call. The saved value must own it.
+	return append(json.RawMessage(nil), data...), nil
 }

@@ -38,7 +38,7 @@ func (m *Anthropic) GenerateContentStream(ctx context.Context,
 		"Anthropic-Version": {"2023-06-01"}, "Accept": {"text/event-stream"}}
 	return startProviderStream(ctx, m.config.HTTPClient, m.config.BaseURL+"/messages",
 		headers, body, func(ctx context.Context, response *http.Response,
-			stream *gent.StreamWithDuration,
+			stream *providerStream,
 		) (*gent.ModelCallResponse, error) {
 			result, err := readAnthropic(ctx, response, stream, &request.Options)
 			recordSchema(result, decision)
@@ -359,20 +359,22 @@ func anthropicPart(part gent.ContentPart) (map[string]any, error) {
 
 type anthropicEnvelope struct {
 	ID         string            `json:"id"`
+	Model      string            `json:"model"`
 	Content    []json.RawMessage `json:"content"`
 	StopReason string            `json:"stop_reason"`
 	Usage      anthropicUsage    `json:"usage"`
 }
 
 type anthropicUsage struct {
-	Input      int `json:"input_tokens"`
-	Output     int `json:"output_tokens"`
-	CacheRead  int `json:"cache_read_input_tokens"`
-	CacheWrite int `json:"cache_creation_input_tokens"`
+	Input       int    `json:"input_tokens"`
+	Output      int    `json:"output_tokens"`
+	CacheRead   int    `json:"cache_read_input_tokens"`
+	CacheWrite  int    `json:"cache_creation_input_tokens"`
+	ServiceTier string `json:"service_tier"`
 }
 
 func readAnthropic(ctx context.Context, response *http.Response,
-	stream *gent.StreamWithDuration, options *gent.CallOptions,
+	stream *providerStream, options *gent.CallOptions,
 ) (*gent.ModelCallResponse, error) {
 	var envelope anthropicEnvelope
 	if !strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") {
@@ -481,7 +483,9 @@ func convertAnthropic(response *anthropicEnvelope) (*gent.ModelCallResponse, err
 	input := u.Input + u.CacheRead + u.CacheWrite
 	return &gent.ModelCallResponse{Choices: []*gent.ContentChoice{choice}, Info: &gent.GenerationInfo{
 		InputTokens: input, OutputTokens: u.Output, TotalTokens: input + u.Output,
-		CachedInputTokens: u.CacheRead,
-		RawGenerationInfo: map[string]any{"cache_creation_input_tokens": u.CacheWrite},
+		CachedInputTokens: u.CacheRead, CacheWriteInputTokens: u.CacheWrite,
+		ProviderResponseId: response.ID, ResponseModel: response.Model,
+		ResponseServiceTier: u.ServiceTier,
+		RawGenerationInfo:   map[string]any{"cache_creation_input_tokens": u.CacheWrite},
 	}}, nil
 }

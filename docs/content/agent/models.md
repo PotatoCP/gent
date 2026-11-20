@@ -64,6 +64,15 @@ Other adapters accept `models.Config`. Vertex AI has its own authentication conf
 continuation belongs to the provider that created it. Do not change its provider label to force
 incompatible data into another endpoint.
 
+## Give the model to the Runner
+
+Use the `model` from any constructor above:
+
+{{example:model-runner}}
+
+Use this Runner to create a context and submit a task, as shown in
+[Hello World](/start/hello-world/). The same setup applies to each adapter.
+
 See [ReAct loop settings](/agent/react/) for call options and [Provider
 support](/reference/providers/) for adapter differences. A shared interface does not imply identical
 model capabilities.

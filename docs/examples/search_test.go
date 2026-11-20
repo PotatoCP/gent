@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/agents/react"
 	"github.com/rickchristie/gent/common"
+	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/format"
 	"github.com/rickchristie/gent/policy"
 	"github.com/rickchristie/gent/search"
@@ -80,6 +82,17 @@ Refunds are available within 14 days.`, Metadata: map[string]any{
 
 	chain, err := policyTools(ctx, embedder)
 	assert.NoError(t, err)
+	model := &scriptModel{Calls: []*gent.ModelToolCallRequest{
+		toolCall("get_policy", `{"policy_id":"refund"}`),
+	}, Answer: "Refunds are available within 30 days."}
+	// docs:start policies-runner
+	loop := react.NewAgent(model)
+	runner := executor.NewRunner(loop, &gent.Config{ToolChain: chain})
+	// Keep the embedder open until all conversations that use these tools have finished.
+	// docs:end policies-runner
+	answer, _ := runText(t, runner)
+	assert.Equal(t, "Refunds are available within 30 days.", answer)
+	assert.Len(t, model.Requests, 2)
 	runCheck(t, &gent.Config{ToolChain: chain}, func(execCtx *gent.ExecutionContext) error {
 		plan, err := chain.PrepareCalls(execCtx, []*gent.ModelToolCallRequest{
 			toolCall("get_policy", `{"policy_id":"refund"}`)})

@@ -54,10 +54,12 @@ already shows the selected record, including fields that have no special rendere
 ## Exploration
 
 - **Chronological** is the default view. Each point is a saved task, model call, or tool-call group.
-  Select a point to read its input and output. Task points show the original user messages and
-  the system messages from that task's first saved model request. Model points show complete
-  effective messages, call options, response choices, commentary, exposed reasoning, and tool
-  requests. Tools requested together share one point, whether execution was sequential or
+  Select a point to read its input and output. Task points show the system messages first, then
+  the original user messages. The system messages come from that task's first saved model request.
+  Model points show new request content first. Repeated messages collapse in place; select
+  **Full request** to read all effective messages in order. Call options, response choices,
+  commentary, exposed reasoning, and tool requests remain available.
+  Tools requested together share one point, whether execution was sequential or
   concurrent. Each tool has its own accordion for arguments, effective input, result, errors,
   recovery, and source events. More than one accordion can stay open for comparison.
 - **Messages** shows instructions and saved messages. Switch to Active selection to read them in
@@ -88,6 +90,20 @@ replaces its stream fragments in the display. If it is absent, saved fragments r
 Accepted output appears separately from the original candidate because output processing can
 change it. Source disclosures keep the underlying events and their JSON paths.
 
+**New content** compares the selected request with the previous available saved request in the
+same execution context, including across turns and restored attempts. It compares complete message
+values: role, ordered parts, tool IDs, metadata, and native continuation. Any changed message stays
+visible in full. Identical occurrences match at most once, in order. A repeated user prompt added
+to the conversation is still a new occurrence. Object field order does not affect the comparison.
+When numeric precision or deep data prevents a reliable comparison, the message stays visible.
+This conservative rule can show extra context; it must not hide an unverified match.
+
+Repeated ranges keep their original message numbers and positions. Open an **Already sent** range
+to read it without changing the view. **Full request** shows the complete message list, with paging
+for long requests. The raw request and all call options remain under **Full request and call
+options**. This is a display filter, not a change to the saved request or provider input. A missing
+earlier request means that all messages are shown. RunState can compare only its retained requests.
+
 Tool groups use the saved model response's native request IDs and names within their execution
 scope. Accepted history can also link logical tool IDs to one request message, including IDs that
 ReAct normalized. Nearby timestamps, matching tool names, or a reused ambiguous provider ID do not
@@ -105,11 +121,21 @@ history entry positions or enlarge RunState to create a full timeline.
 
 Search covers the current section's text and identifiers. Lists show 12 records per page. Source
 fields expand on demand and show large objects in groups of 50 fields. Model requests show 20
-complete messages at a time, with a button to reveal more. No data is removed by paging. Wide
+complete messages at a time, with a button to reveal more. New content also limits the number of
+comparison ranges shown at once, so alternating new and repeated messages stay bounded.
+No data is removed by paging. Wide
 containers place the record list beside its details. Very wide containers also place a model
 request beside its response. All model and user content is rendered as text, never HTML. Media
 remain available in Source fields; the component does not fetch remote media or expose hidden
 reasoning.
+
+All disclosures use the same heading and body layout, including call details, repeated messages,
+tool results, native data, errors, and nested JSON. Each body starts under its heading text. A
+subtle guide line and consistent vertical gaps show the parent-child relation. Narrow containers
+use a smaller indent so deeply nested data stays readable. Use the shared `disclosure` builder in
+`dom.js` for new toggle views; separate spacing rules can make nested records look like siblings.
+This shared layout also applies to the raw JSON, Activity, and State tabs. Source data still loads
+on demand, and opening a node again reuses its existing body.
 
 Unsafe JSON integer tokens remain decimal strings for display. Counter subtraction uses BigInt.
 Pass the JSON **string**, not an object already parsed with `JSON.parse`, to avoid rounding an event

@@ -37,10 +37,12 @@ embedding check uses the repository's small ONNX fixture. A portable build check
 unavailable result.
 
 ```bash
-go test ./... -count=1 -timeout 300s
-CGO_ENABLED=0 go test ./... -count=1 -timeout 300s
-go test -race ./... -count=1 -timeout 300s
-go test ./docs/examples/... -count=1 -timeout 300s -coverprofile=/tmp/gent-examples.cover
+for module in . docs examples examples/chat scripts; do
+  go -C "$module" test ./... -count=1 -timeout 300s
+  CGO_ENABLED=0 go -C "$module" test ./... -count=1 -timeout 300s
+  go -C "$module" test -race ./... -count=1 -timeout 300s
+done
+go -C docs test ./examples/... -count=1 -timeout 300s -coverprofile=/tmp/gent-examples.cover
 npm --prefix docs run check:examples -- /tmp/gent-examples.cover
 npm --prefix docs test
 cd docs
@@ -53,8 +55,10 @@ an existing Chromium executable. The check opens every page through local files 
 tests a nested host path and a moved folder with spaces. It checks styles, fonts, exact copied code,
 search, mobile navigation, and browser errors. Screenshots are saved in `docs/screenshots`.
 
-Conversation Lab is a separate Go module. Run its Go and browser checks from `examples/chat` as its
-README specifies. Provider construction and fixture tests do not prove current remote model support.
+Docs, examples, and release tools use separate Go modules. Root `go test ./...` does not enter them.
+These boundaries keep teaching material out of Gent's module download. The source remains in Git.
+Run Conversation Lab's browser checks as its README specifies. Provider construction and fixture
+tests do not prove current remote model support.
 Use the configured live checks before a release that makes provider capability claims.
 
 ## Publish static files
@@ -96,6 +100,11 @@ bundled IBM Plex Mono font is the fallback. This order needs no external font se
 Explain required inputs before a fragment. Explain its result and relevant contract after it. Keep
 comments for ownership, guarantees, timing, and failure behavior. Do not repeat application setup on
 each page. Keep one canonical example for each behavior and link related pages to it.
+
+Every page that defines or configures a component must show how to use that value. Include a short
+Runner, loop, registry, or caller connection on the same page. Name inputs supplied by an earlier
+fragment or linked page. Test the connection through the public execution path; constructing an
+unused value does not prove that Gent uses it. Link to Hello World for context and task setup.
 
 The API reference and its source pages come from the same checkout as the examples. The header marks
 the site as development documentation. Internal review and implementation reports belong in

@@ -3,6 +3,10 @@ type. Batches remain sufficient for recovery. The RunStateSnapshot is optional r
 
 ## Capture at a save boundary
 
+Extend the BatchRecorder from [Save batches](/storage/save-batches/):
+
+{{example:snapshot-recorder-type}}
+
 Insert this after encoding `batch` into `data` in a Recorder.Save implementation. `Every` is a
 positive interval of event positions chosen by the application.
 
@@ -11,6 +15,16 @@ positive interval of event positions chosen by the application.
 The capture callback is valid only during its Save invocation. Do not retain the callback. The
 returned RunState is independent and stable. It can be encoded after Save returns, but it must not
 be published ahead of the accepted batch it describes.
+
+## Use the recorder
+
+The complete source defines `SnapshotRecorder`, which adds this capture step to `BatchRecorder`.
+Use your `store`, the shared `codecs` registry, and a positive `interval` such as 100:
+
+{{example:snapshot-runner}}
+
+Run tasks with this Runner as shown in [Hello World](/start/hello-world/). Gent supplies the capture
+callback to Save. The application does not capture mutable execution state from another goroutine.
 
 ## Load the accepted tail
 

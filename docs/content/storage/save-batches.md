@@ -12,6 +12,17 @@ The complete source includes a memory store for tests. It does not survive proce
 store must atomically accept bytes, the expected cursor, and the exact duplicate receipt. A shared
 store must also verify the current writer lease or fence in that transaction.
 
+## Give the recorder to the Runner
+
+Use your `store` implementation and a `codecs` registry from `gent.NewCodecRegistry()`. Register
+custom saved types before use. Give the same registry to the recorder and the Runner:
+
+{{example:recorder-runner}}
+
+Create the execution context and call NewTurn as shown in [Hello World](/start/hello-world/).
+The configured recorder receives saves from NewTurn and Continue, including the accepted task and
+completed answer. Keep it on the Config used for [restoration](/storage/restore/) too.
+
 ## Accept a retry
 
 `BatchId` identifies the exact batch contents. It is not an ordinal. An identical accepted retry
@@ -33,6 +44,6 @@ See [RunStateSnapshots](/storage/run-state-snapshots/) for optional faster loadi
 
 ## Bound pending evidence
 
-On the shared Config before execution:
+Set this on the same `config` before passing it to `executor.NewRunner`:
 
 {{example:recording-bounds}}

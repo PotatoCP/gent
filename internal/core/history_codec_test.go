@@ -42,6 +42,7 @@ func TestCodecRegistryRoundTrip(t *testing.T) {
 		Execution(execution).ModelReply("provider-call", "policy", execution.Parts...).Build()
 	assert.NoError(t, err)
 	values := []any{
+		(*Task)(nil),
 		nil, []string(nil), []string{}, map[string]any(nil), map[string]any{},
 		map[string]any{"id": uint64(1<<63 + 7), "count": int32(12), "decimal": json.Number("1.20")},
 		namedMap{"large": 1<<62 + 7}, namedSlice{1<<63 + 8}, json.RawMessage(`{"value":7}`),
@@ -86,7 +87,11 @@ func TestCodecRegistryRoundTrip(t *testing.T) {
 			}
 			portable, err := registry.Marshal(tt.input.value)
 			assert.NoError(t, err)
-			assert.Equal(t, data, portable, "Marshal and Encode must use the same portable format")
+			assert.Equal(t, data, expandTestDocument(t, registry, portable),
+				"document tables must preserve the complete typed value")
+			var restored any
+			assert.NoError(t, registry.Unmarshal(portable, &restored))
+			assert.Equal(t, tt.expected.value, restored)
 			var wire EncodedValue
 			if !assert.NoError(t, json.Unmarshal(data, &wire)) {
 				return

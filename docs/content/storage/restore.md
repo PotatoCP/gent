@@ -26,7 +26,9 @@ Apply the `tail` returned by storage:
 
 ## Prepare the context
 
-Use a Runner with the current model, tools, recorder, subscribers, Hooks, and limits:
+Use a Runner with the current model, tools, recorder, subscribers, Hooks, and limits. Create it with
+`executor.NewRunner(loop, config)`, using the same registration pattern as
+[Save batches](/storage/save-batches/#give-the-recorder-to-the-runner):
 
 {{example:restore-context}}
 

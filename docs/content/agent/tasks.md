@@ -5,6 +5,15 @@ messages belong in `Instructions`, not in `Messages`.
 
 {{example:task-text}}
 
+## Submit the task
+
+Use the `runner` and `execCtx` from [Hello World](/start/hello-world/):
+
+{{example:task-submit}}
+
+The task variants below use this same call. Substitute `withInstructions`, `keep`, or `clear` for
+`task`. Submit the next task after the preceding execution call returns.
+
 ## Supply system instructions
 
 {{example:task-instructions}}

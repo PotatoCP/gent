@@ -3,6 +3,7 @@ package gent
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -11,30 +12,34 @@ import (
 type streamChunkCodec struct{ registry *CodecRegistry }
 
 type savedStreamChunk struct {
-	Content          *EncodedValue `json:"content,omitempty"`
-	SourceMessageIds []string      `json:"sourceMessageIds,omitempty"`
+	Content          *encodingValue `json:"content,omitempty"`
+	SourceMessageIds []string       `json:"sourceMessageIds,omitempty"`
 }
 
 func (streamChunkCodec) Type() string { return "github.com/rickchristie/gent/StreamChunk" }
 func (streamChunkCodec) Version() int { return 4 }
 
 func (c streamChunkCodec) Encode(value any) (json.RawMessage, error) {
-	return c.encodeValue(newValueEncoder(c.registry), value, 0)
+	data, err := c.encodeValue(newValueEncoder(c.registry), value, 0)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(data)
 }
 
 func (c streamChunkCodec) encodeValue(
 	encoder *valueEncoder, value any, depth int,
-) (json.RawMessage, error) {
+) (any, error) {
 	chunk := value.(StreamChunk)
 	wire := savedStreamChunk{SourceMessageIds: chunk.SourceMessageIds}
 	if chunk.Content != nil {
-		encoded, err := encoder.value(chunk.Content, depth+1)
+		encoded, err := encoder.encode(reflect.ValueOf(chunk.Content), depth+1)
 		if err != nil {
 			return nil, err
 		}
 		wire.Content = &encoded
 	}
-	return json.Marshal(wire)
+	return wire, nil
 }
 
 func (c streamChunkCodec) Decode(data json.RawMessage) (any, error) {

@@ -3,9 +3,13 @@ does not replace SaveBatch storage.
 
 ## Attach a sequencer
 
-Use the run ID that the application obtained from its context:
+Register a sequencer before creating the execution context. An empty run ID binds it to the first
+event from that conversation:
 
 {{example:trace-attach}}
+
+Create a context and run tasks with this Runner as in [Hello World](/start/hello-world/). Keep one
+sequencer per conversation. It rejects events from a different run after it binds the first ID.
 
 ## Subscribe with bounds
 
@@ -26,3 +30,6 @@ state; they are not a RunStateSnapshot for execution.
 ## Hide private display fields
 
 {{example:trace-redact}}
+
+Apply these Redactor callbacks to the `trace.Config` passed to NewSequencer in the first example.
+Register that sequencer as the Runner's Subscriber in the same way.

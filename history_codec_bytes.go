@@ -4,7 +4,10 @@ import (
 	core "github.com/rickchristie/gent/internal/core"
 )
 
-// CodecLimits bounds a saved record and each decoded binary buffer. Zero means no limit.
+// CodecLimits bounds saved records, logical expansion, and decoded binary buffers.
+// Zero leaves encoded and binary sizes unlimited. Zero expansion limits select 256 MiB and
+// 4,194,304 JSON values. Positive values replace these defaults. Expansion counts every reference
+// occurrence before constructing Go values, including saved fields absent from current code.
 // Custom codecs must enforce their own decoded allocation limits for application-specific data.
 type CodecLimits = core.CodecLimits
 

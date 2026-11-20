@@ -10,6 +10,15 @@ Use field rules when the inferred type needs more constraints.
 `Strict(true)` requests provider argument enforcement where supported. Gent still performs local
 validation before the handler and after mutable input Hooks.
 
+## Give the tool to the Runner
+
+Register the built `tool` before creating an execution context:
+
+{{example:schema-runner}}
+
+The schema variants below use the same registration. Run a task with this Runner as shown in
+[Hello World](/start/hello-world/). Gent applies the tool's input schema before its handler runs.
+
 ## Make a field optional
 
 {{example:schema-optional}}

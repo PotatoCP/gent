@@ -43,8 +43,11 @@ func schemaOutput() (*output.SchemaOutput[Answer], error) {
 		"required":             []string{"summary", "count"},
 		"additionalProperties": false,
 	})
+	if err != nil {
+		return nil, err
+	}
 	// docs:end output-schema
-	return out, err
+	return out, nil
 }
 
 func textOutput() *output.TextOutput {

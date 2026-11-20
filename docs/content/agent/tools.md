@@ -16,6 +16,9 @@ before calling the function.
 
 {{example:tools-method}}
 
+Add this `tool` with `chain.RegisterTool(tool)` on the chain from the first example. The guidance
+and error-handling variants below use the same registration.
+
 Use `MustBuild` for a fixed definition when invalid setup must stop startup. Configure a tool before
 sharing it between runs. Its handler must support concurrent calls if those runs can overlap.
 

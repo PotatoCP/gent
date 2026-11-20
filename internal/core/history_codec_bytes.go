@@ -9,18 +9,24 @@ import (
 	"strings"
 )
 
-// CodecLimits bounds a saved record and each decoded binary buffer. Zero means no limit.
+// CodecLimits bounds saved records, logical expansion, and decoded binary buffers.
+// Zero leaves encoded and binary sizes unlimited. Zero expansion limits select 256 MiB and
+// 4,194,304 JSON values. Positive values replace these defaults. Expansion counts every reference
+// occurrence before constructing Go values, including saved fields absent from current code.
 // Custom codecs must enforce their own decoded allocation limits for application-specific data.
 type CodecLimits struct {
-	MaxEncodedBytes int
-	MaxBinaryBytes  int
+	MaxEncodedBytes   int
+	MaxBinaryBytes    int
+	MaxExpandedBytes  int
+	MaxExpandedValues int
 }
 
 // CodecOption configures a registry before it is shared by executions.
 type CodecOption func(*CodecRegistry)
 
 func WithCodecLimits(limits CodecLimits) CodecOption {
-	if limits.MaxEncodedBytes < 0 || limits.MaxBinaryBytes < 0 {
+	if limits.MaxEncodedBytes < 0 || limits.MaxBinaryBytes < 0 ||
+		limits.MaxExpandedBytes < 0 || limits.MaxExpandedValues < 0 {
 		panic("gent: codec limits must not be negative")
 	}
 	return func(r *CodecRegistry) { r.limits = limits }

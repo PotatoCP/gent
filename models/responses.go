@@ -62,7 +62,7 @@ func (m *Responses) GenerateContentStream(base context.Context,
 		"Accept": {"text/event-stream"}}
 	return startProviderStream(base, m.config.HTTPClient,
 		strings.TrimRight(m.config.BaseURL, "/")+"/responses", headers, body,
-		func(ctx context.Context, response *http.Response, stream *gent.StreamWithDuration) (
+		func(ctx context.Context, response *http.Response, stream *providerStream) (
 			*gent.ModelCallResponse, error,
 		) {
 			result, err := m.readResponse(ctx, response, stream, &request.Options)
@@ -366,6 +366,9 @@ func (m *Responses) inputItems(messages []*gent.ModelMessage) ([]any, error) {
 }
 
 type responseEnvelope struct {
+	ID                string `json:"id"`
+	Model             string `json:"model"`
+	ServiceTier       string `json:"service_tier"`
 	Status            string `json:"status"`
 	IncompleteDetails struct {
 		Reason string `json:"reason"`
@@ -377,7 +380,8 @@ type responseEnvelope struct {
 		Output       int `json:"output_tokens"`
 		Total        int `json:"total_tokens"`
 		InputDetails struct {
-			Cached int `json:"cached_tokens"`
+			Cached     int `json:"cached_tokens"`
+			CacheWrite int `json:"cache_write_tokens"`
 		} `json:"input_tokens_details"`
 		OutputDetails struct {
 			Reasoning int `json:"reasoning_tokens"`
@@ -392,7 +396,7 @@ type responseError struct {
 func (e *responseError) Error() string { return fmt.Sprintf("Responses %s: %s", e.Code, e.Message) }
 
 func (m *Responses) readResponse(ctx context.Context, response *http.Response,
-	stream *gent.StreamWithDuration, options *gent.CallOptions,
+	stream *providerStream, options *gent.CallOptions,
 ) (*gent.ModelCallResponse, error) {
 	if !strings.Contains(response.Header.Get("Content-Type"), "text/event-stream") {
 		var envelope responseEnvelope
@@ -418,27 +422,42 @@ func (m *Responses) readResponse(ctx context.Context, response *http.Response,
 			return false, errors.New("Responses stream ended without a final response")
 		}
 		var event struct {
-			Type        string           `json:"type"`
-			Delta       string           `json:"delta"`
-			Response    responseEnvelope `json:"response"`
-			Code        string           `json:"code"`
-			Message     string           `json:"message"`
-			OutputIndex int              `json:"output_index"`
-			Item        struct {
-				Type  string `json:"type"`
-				Phase string `json:"phase"`
+			Type         string           `json:"type"`
+			Delta        string           `json:"delta"`
+			Response     responseEnvelope `json:"response"`
+			Code         string           `json:"code"`
+			Message      string           `json:"message"`
+			OutputIndex  int              `json:"output_index"`
+			PartialImage string           `json:"partial_image_b64"`
+			Item         struct {
+				Type   string `json:"type"`
+				Phase  string `json:"phase"`
+				Name   string `json:"name"`
+				Result string `json:"result"`
 			} `json:"item"`
 		}
 		if err := json.Unmarshal(data, &event); err != nil {
 			return false, err
 		}
 		switch event.Type {
-		case "response.output_item.added":
+		case "response.output_item.added", "response.output_item.done":
 			if event.OutputIndex < 0 || event.OutputIndex > 4096 {
 				return false, errors.New("invalid Responses output index")
 			}
 			if event.Item.Type == "message" {
 				itemTypes[event.OutputIndex] = responseMetaType(event.Item.Phase)
+			}
+			if event.Item.Type == "function_call" && event.Item.Name != "" ||
+				event.Item.Type == "image_generation_call" && event.Item.Result != "" {
+				stream.observeContent()
+			}
+		case "response.function_call_arguments.delta":
+			if event.Delta != "" {
+				stream.observeContent()
+			}
+		case "response.image_generation_call.partial_image":
+			if event.PartialImage != "" {
+				stream.observeContent()
 			}
 		case "response.output_text.delta", "response.refusal.delta":
 			kind := itemTypes[event.OutputIndex]
@@ -641,6 +660,9 @@ func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCall
 	return &gent.ModelCallResponse{Choices: []*gent.ContentChoice{choice}, Info: &gent.GenerationInfo{
 		InputTokens: usage.Input, OutputTokens: usage.Output, TotalTokens: usage.Total,
 		CachedInputTokens: usage.InputDetails.Cached, ReasoningTokens: usage.OutputDetails.Reasoning,
+		CacheWriteInputTokens: usage.InputDetails.CacheWrite,
+		ProviderResponseId:    response.ID, ResponseModel: response.Model,
+		ResponseServiceTier: response.ServiceTier,
 	}}, nil
 }
 

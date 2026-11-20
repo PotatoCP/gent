@@ -5,6 +5,13 @@ wrapped chain's validation, limits, events, and recovery.
 
 {{example:tools-javascript}}
 
+Give the wrapper to the Runner:
+
+{{example:programmatic-runner}}
+
+The wrapped `chain` must already contain the tools that scripts can call. Use this Runner for the
+context and NewTurn calls shown in [Hello World](/start/hello-world/).
+
 BigInt preserves captured integer values in JavaScript. The default number mode can round values
 outside JavaScript's safe integer range. The saved Go evidence keeps its original numeric type.
 

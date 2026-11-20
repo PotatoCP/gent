@@ -10,6 +10,7 @@ import (
 	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/format"
 	"github.com/rickchristie/gent/toolchain"
+	"github.com/rickchristie/gent/trace"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -50,9 +51,17 @@ func TestHooksAndStatistics(t *testing.T) {
 }
 
 func TestObservationExamples(t *testing.T) {
+	// docs:start subscriber-handlers
 	live, accepted := &EventLog{}, &EventLog{}
+	// docs:end subscriber-handlers
 	config := subscriberConfig(live, accepted)
-	runText(t, executor.NewRunner(&LocalLoop{}, config))
+	model := &FixedModel{Text: "Ready."}
+	// docs:start subscriber-runner
+	loop := react.NewAgent(model)
+	runner := executor.NewRunner(loop, config)
+	// The configured handlers receive events from NewTurn and Continue.
+	// docs:end subscriber-runner
+	runText(t, runner)
 	assert.Equal(t, accepted.Events, live.Events)
 	if !assert.Len(t, accepted.Stops, 1) || !assert.Len(t, live.Stops, 1) {
 		return
@@ -68,12 +77,25 @@ func TestObservationExamples(t *testing.T) {
 	assert.Equal(t, LiveKey{AcceptedKey{"run", 7}, "attempt"}, preview)
 	assert.Equal(t, []gent.ContentPart{gent.TextPart("Part")}, contentPreview(event))
 	assert.Nil(t, contentPreview(&gent.RecordedEvent{Payload: &gent.BeforeModelCallEvent{}}))
-	seq, config, err := traceConfig("view")
+	seq, traced, err := traceRunner(&FixedModel{Text: "Ready."})
 	assert.NoError(t, err)
 	defer seq.Close()
-	assert.Equal(t, gent.SubscriberLive, config.Subscribers[0].Delivery)
 	subscription, err := traceSubscribe(seq)
 	assert.NoError(t, err)
+	execCtx, err := traced.NewExecutionContext(context.Background(), "trace")
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer execCtx.Release()
+	answer, result, err := traced.NewTurn(execCtx, gent.NewTask(gent.TextPart("Start.")))
+	assert.NoError(t, err)
+	assert.NoError(t, checkOutputResult(result))
+	assert.Equal(t, "Ready.", answer)
+	view := seq.Snapshot()
+	assert.Equal(t, execCtx.RunId(), view.RunId)
+	assert.Equal(t, trace.RunStatusSucceeded, view.Status)
+	assert.Equal(t, gent.SubscriberClosed, seq.LastDeliveryStop().Reason)
+	assert.NoError(t, seq.LastDeliveryStop().Error)
 	subscription.Close()
 	assert.NoError(t, subscription.Err())
 }

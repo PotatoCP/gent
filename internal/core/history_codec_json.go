@@ -23,6 +23,7 @@ type savedJSONValue struct {
 	document *savedJSON
 	start    int
 	end      int
+	table    *savedTableNode
 }
 
 func indexSavedJSON(data []byte) (savedJSONValue, error) {
@@ -87,13 +88,26 @@ func (document *savedJSON) valueAt(start int) savedJSONValue {
 }
 
 func (value savedJSONValue) bytes() []byte {
+	if value.table != nil {
+		return value.appendJSON(make([]byte, 0, value.table.measure.bytes))
+	}
 	if value.document == nil { // An absent data field is different from a JSON null value.
 		return nil
 	}
 	return value.document.data[value.start:value.end]
 }
 
+func (value savedJSONValue) present() bool {
+	return value.document != nil || value.table != nil
+}
+
 func (value savedJSONValue) kind() byte {
+	if value.table != nil {
+		if value.table.layout == nil {
+			return '['
+		}
+		return '{'
+	}
 	return value.document.data[savedJSONSpace(value.document.data, value.start)]
 }
 
@@ -129,6 +143,9 @@ func (value savedJSONValue) boolean(target *bool) error {
 }
 
 func (value savedJSONValue) object(visit func(string, savedJSONValue) error) error {
+	if value.table != nil {
+		return value.table.object(visit)
+	}
 	if value.kind() == 'n' {
 		return nil
 	}
@@ -157,6 +174,17 @@ func (value savedJSONValue) object(visit func(string, savedJSONValue) error) err
 }
 
 func (value savedJSONValue) array(visit func(savedJSONValue) error) error {
+	if value.table != nil {
+		if value.table.layout != nil {
+			return errors.New("gent: expected a saved JSON array")
+		}
+		for _, child := range value.table.values {
+			if err := visit(child); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	if value.kind() == 'n' {
 		return nil
 	}

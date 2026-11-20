@@ -22,6 +22,18 @@ func discovery(tool any) (*toolchain.SearchChain, error) {
 	return chain, nil
 }
 
+func searchWithEngine(tool any, engine gent.ToolSearcher) (*toolchain.SearchChain, error) {
+	// docs:start search-engine-register
+	chain := toolchain.NewSearch(toolchain.SearchHintDomainCategories)
+	chain.RegisterTool(tool)
+	chain.RegisterEngine(engine)
+	if err := chain.Initialize(); err != nil {
+		return nil, err
+	}
+	// docs:end search-engine-register
+	return chain, nil
+}
+
 func programmatic(chain gent.ToolChain) *toolchain.JsToolChainWrapper {
 	// docs:start tools-javascript
 	wrapped := toolchain.NewJsToolChainWrapper(chain).

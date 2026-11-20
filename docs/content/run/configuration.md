@@ -12,6 +12,17 @@ Exact iteration limits use `>=` at completed iteration boundaries. Other limits 
 
 {{example:config-run-limit}}
 
+## Give the configuration to the Runner
+
+Select one configuration before creating a context. This example uses `standard`; substitute
+`unlimited`, `oneRule`, or `runLimit` to use another choice:
+
+{{example:config-runner}}
+
+Later examples also create or update a Config. Pass that value in place of `standard`. Complete
+configuration before creating the Runner, then create a context and submit a task as shown in
+[Hello World](/start/hello-world/).
+
 LimitTurn is the default. LimitRun measures cumulative counters. Gauges always describe the current
 turn. Continue does not reset an exhausted allowance. Restore with changed configuration if your
 application chooses to permit more work.

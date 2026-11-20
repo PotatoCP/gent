@@ -9,7 +9,7 @@ Run the complete example from the repository root:
 ```bash
 export OPENAI_API_KEY='your-api-key'
 export GENT_MODEL='your-model-id'
-go run ./docs/examples/hello
+go -C docs run ./examples/hello
 ```
 
 Replace the example values with your own settings. Do not put real keys in source files. The command

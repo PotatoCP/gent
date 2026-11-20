@@ -20,6 +20,19 @@ change after capture. Embedding BasicLoopData does not serialize added fields fo
 
 {{example:loop-data-factory}}
 
+Give that `config` to the Runner for your custom `loop`:
+
+{{example:loop-data-runner}}
+
+## Use the data inside Next
+
+After a local file check succeeds, update the context's instance:
+
+{{example:loop-data-use}}
+
+The factory is not the data instance. Read `execCtx.Data()` inside the loop. Add a Recorder to the
+same Config to keep progress after process exit. See [Save batches](/storage/save-batches/).
+
 Add fields compatibly when their defaults preserve the old meaning. Preserve names, types, units,
 and saved enum values while runs depend on them. Reject incompatible state explicitly. Gent does not
 supply automatic migration or silently restart an unknown saved step.

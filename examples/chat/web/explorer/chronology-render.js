@@ -1,5 +1,6 @@
-import {element, jsonTree} from './dom.js';
+import {disclosure, element, jsonTree} from './dom.js';
 import {facts, section, sourceFields} from './fields.js';
+import {compareRequestMessages} from './request-diff.js';
 
 function label(value) {
   const text = String(value).replaceAll('_', ' ');
@@ -32,7 +33,7 @@ function renderParts(parts = []) {
 
 // Render complete content in bounded groups. More messages stay available without building an
 // archive-sized DOM tree when the user selects a model call with a long request.
-function renderMessages(messages) {
+function renderMessages(messages, start = 0) {
   const node = element('div', 'ge-model-messages');
   let cursor = 0;
   const more = element('button', 'ge-more', 'Show next 20 messages'); more.type = 'button';
@@ -43,7 +44,7 @@ function renderMessages(messages) {
       const message = messages[cursor];
       const block = element('article', 'ge-model-message');
       block.dataset.role = message.Role;
-      block.append(element('div', 'ge-role', `${cursor + 1} · ${label(message.Role)}`),
+      block.append(element('div', 'ge-role', `${start + cursor + 1} · ${label(message.Role)}`),
         renderParts(message.Parts || []));
       if (message.Continuation || message.Metadata) {
         block.append(sourceFields(message, '', 'Message metadata and native continuation'));
@@ -77,16 +78,89 @@ function taskDetail(row, node) {
   }
   const task = section('Task', 'Original user input from the accepted history change.');
   task.append(renderMessages(row.messages));
-  node.append(task, system);
+  node.append(system, task);
+}
+
+function repeatedMessages(messages, start, end) {
+  const range = end - start === 1 ? `Message ${start + 1}` : `Messages ${start + 1}–${end}`;
+  const {node, body} = disclosure('ge-repeated-messages', `${range} · Already sent`);
+  let loaded = false;
+  node.addEventListener('toggle', () => {
+    if (!node.open || loaded) return;
+    loaded = true;
+    body.append(renderMessages(messages.slice(start, end), start));
+  });
+  return node;
+}
+
+function changedMessages(messages, comparison) {
+  const node = element('div', 'ge-request-changes');
+  if (!comparison.shownCount) node.append(element('p', 'ge-request-empty',
+    'No new messages. Call options remain available below.'));
+  const more = element('button', 'ge-more', 'Show more request messages'); more.type = 'button';
+  let start = 0;
+  function next() {
+    more.remove();
+    // Bound the number of ranges too. Alternating new and repeated messages must not bypass
+    // message paging and build an archive-sized DOM tree on selection.
+    for (let count = 0; count < 20 && start < messages.length; count++) {
+      let end = start + 1;
+      while (end < messages.length && comparison.repeated[end] === comparison.repeated[start]) {
+        end++;
+      }
+      node.append(comparison.repeated[start] ? repeatedMessages(messages, start, end) :
+        renderMessages(messages.slice(start, end), start));
+      start = end;
+    }
+    if (start < messages.length) node.append(more);
+  }
+  more.addEventListener('click', next); next();
+  return node;
+}
+
+function requestMessages(row) {
+  const messages = row.request.Messages || [];
+  const previous = row.previousRequest;
+  const comparison = compareRequestMessages(messages, previous?.request.Messages || []);
+  const node = element('div', 'ge-request-context');
+  const controls = element('div', 'ge-request-controls');
+  const modes = element('div', 'ge-request-modes');
+  modes.setAttribute('role', 'group'); modes.setAttribute('aria-label', 'Request display');
+  const changes = element('button', '', 'New content');
+  const full = element('button', '', 'Full request');
+  changes.type = full.type = 'button';
+  modes.append(changes, full);
+  const count = element('span', 'ge-request-count'); count.setAttribute('role', 'status');
+  controls.append(modes, count);
+  const hint = element('p', 'ge-note', previous ?
+    `Compared with the previous saved request in this context, at event ${previous.order}. ` +
+      'Changed messages stay visible in full. Open an Already sent row to read repeated context.' :
+    'No earlier request is retained for comparison. All messages are shown.');
+  const content = element('div', 'ge-request-content');
+  function show(all) {
+    changes.setAttribute('aria-pressed', String(!all));
+    full.setAttribute('aria-pressed', String(all));
+    count.textContent = all ? `${messages.length} messages · Complete request` :
+      `${comparison.shownCount} new or changed · ${comparison.repeatedCount} repeated`;
+    content.replaceChildren();
+    if (all || !comparison.repeatedCount) {
+      content.append(renderMessages(messages)); return;
+    }
+    content.append(changedMessages(messages, comparison));
+  }
+  changes.addEventListener('click', () => show(false));
+  full.addEventListener('click', () => show(true));
+  node.append(controls, hint, content); show(false);
+  return node;
 }
 
 function modelDetail(row, node) {
   const after = row.after?.source.payload;
   const columns = element('div', 'ge-call-columns');
   const sent = section('Sent to model',
-    'Complete effective messages after Hooks, in request order.');
+    'Effective messages after Hooks, in their original request order.');
   if (row.request) {
-    sent.append(renderMessages(row.request.Messages || []), sourceFields(row.request,
+    sent.append(requestMessages(row), sourceFields(row.request,
       `${row.requestSource.path}/payload/Request`, 'Full request and call options'));
   } else sent.append(element('p', 'ge-note', 'The request is not retained in this data.'));
   const returned = section('Returned by model',
@@ -173,9 +247,9 @@ function executionDetails(row) {
     ['Provider', payload.Provider || 'Not named'], ['Topic', payload.StreamTopicId],
     ['Input tokens', after?.InputTokens], ['Output tokens', after?.OutputTokens]);
   if (row.type === 'tool-step') values.push(['Outcome', after?.Output?.Kind || row.status]);
-  const details = element('details', 'ge-call-info');
-  details.append(element('summary', '', 'Saved execution details'), facts(values));
-  return details;
+  const {node, body} = disclosure('ge-call-info', 'Saved execution details');
+  body.append(facts(values));
+  return node;
 }
 
 function savedEvidence(events) {
@@ -194,20 +268,19 @@ function toolGroup(row, node) {
   if (row.batch?.source) node.append(sourceFields(row.batch.source.source, row.batch.source.path,
     'Source model response'));
   for (const call of row.calls) {
-    const details = element('details', 'ge-tool-accordion');
+    const {node: details, heading, body} = disclosure('ge-tool-accordion', '');
     details.dataset.callId = call.callId;
-    const summary = element('summary');
     const status = element('span', 'ge-badge', call.status); status.dataset.status = call.status;
-    summary.append(element('strong', '', call.toolName), status,
+    heading.append(element('strong', '', call.toolName), status,
       element('span', 'ge-tool-position', call.subtitle));
-    details.append(summary);
+    body.classList.add('ge-tool-accordion-body');
     let loaded = false;
     details.addEventListener('toggle', () => {
       if (!details.open || loaded) return;
       loaded = true;
       const after = call.after?.source.payload;
       const record = after?.Output;
-      details.append(executionDetails(call), renderToolResult(record, {
+      body.append(executionDetails(call), renderToolResult(record, {
         effective: record?.Input || call.before?.source.payload.Args || after?.Args,
         error: after?.Error || record?.Error, completed: Boolean(call.after),
         path: call.after ? `${call.after.path}/payload/Output` : '',

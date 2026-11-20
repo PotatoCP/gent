@@ -8,7 +8,9 @@ import (
 // interface fields loses content-part implementations, numeric types, and typed tool metadata.
 type EncodedValue = core.EncodedValue
 
-// ValueCodec supplies a versioned representation for an application-owned value.
+// ValueCodec supplies a versioned representation for an application-owned value. Decode must
+// return an owned value and enforce its own allocation limits. Gent supplies a separate input
+// buffer for each Decode call; do not return shared mutable results across calls.
 type ValueCodec = core.ValueCodec
 
 // CodecRegistry binds wire names to concrete types. Register custom types before starting a run;

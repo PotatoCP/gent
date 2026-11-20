@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 
 	"sync/atomic"
 	"time"
@@ -382,9 +384,14 @@ func BatchDigest(batch *SaveBatch, registries ...*CodecRegistry) (string, error)
 func batchDigest(batch *SaveBatch, encoder *valueEncoder) (string, error) {
 	copy := *batch
 	copy.BatchId = ""
-	// Encode the complete typed representation. A numeric or custom payload type can change
-	// meaning even when ordinary JSON would produce the same text.
-	data, err := encoder.marshal(&copy)
+	// Receipt identity uses the complete typed value, independent of storage tables or sharing.
+	// A wire optimization must not change an accepted batch's receipt. Numeric and custom types
+	// still distinguish values which ordinary JSON would render alike.
+	value, err := encoder.encode(reflect.ValueOf(&copy), 0)
+	if err != nil {
+		return "", err
+	}
+	data, err := json.Marshal(value)
 	if err != nil {
 		return "", err
 	}

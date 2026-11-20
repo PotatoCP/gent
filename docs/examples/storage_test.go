@@ -34,8 +34,7 @@ func (*pauseLoop) Output() gent.Output[string] { return output.NewTextOutput() }
 func (*pauseLoop) Next(execCtx *gent.ExecutionContext) (*gent.AgentLoopResult, error) {
 	data := execCtx.Data().(*LoopData)
 	if data.TurnFiles == 0 {
-		data.Files++
-		data.TurnFiles++
+		recordFile(execCtx)
 		if err := appendHistory(execCtx); err != nil {
 			return nil, err
 		}
@@ -77,7 +76,11 @@ func TestReplayExamples(t *testing.T) {
 			}
 			accepted := &EventLog{}
 			config.Subscribers = []*gent.SubscriberRegistration{{Subscriber: accepted}}
-			runner := executor.NewRunner(&pauseLoop{}, config)
+			loop := &pauseLoop{}
+			// docs:start loop-data-runner
+			runner := executor.NewRunner(loop, config)
+			// Use the configured factory when creating a context or restoring accepted state.
+			// docs:end loop-data-runner
 			execCtx, err := runner.NewExecutionContext(context.Background(), "saved")
 			if !assert.NoError(t, err) {
 				return

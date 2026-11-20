@@ -14,6 +14,15 @@ This handler uses the `lookupInput` type from the tool's definition:
 Gent validates effective tool input after the Hook. Do not change operation identities or retain
 mutable access after return. The archive keeps the effective input that the operation received.
 
+## Attach the Hooks
+
+Pass the completed `hooks` value to the Runner before creating or restoring a context:
+
+{{example:hooks-runner}}
+
+Add your ToolChain to the same Config when using the tool Hook. Calls made by NewTurn or Continue
+use these Hooks. See [Hello World](/start/hello-world/) for context creation and task submission.
+
 ## Compose and fail
 
 To compose callbacks, call the first, check its error, then call the second in the same configured

@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/agents/react"
+	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/trace"
 )
 
@@ -84,18 +86,22 @@ func contentPreview(event *gent.RecordedEvent) []gent.ContentPart {
 	// docs:end stream-payload
 }
 
-func traceConfig(runId string) (*trace.Sequencer, *gent.Config, error) {
+func traceRunner(model gent.Model) (*trace.Sequencer, *executor.Runner[string], error) {
 	// docs:start trace-attach
-	seq, err := trace.NewSequencer(runId, trace.Config{})
+	// An empty ID binds the first event, after the Runner creates the conversation.
+	seq, err := trace.NewSequencer("", trace.Config{})
 	if err != nil {
 		return nil, nil, err
 	}
-	config := &gent.Config{Subscribers: []*gent.SubscriberRegistration{
-		{Subscriber: seq, Delivery: gent.SubscriberLive},
-	}}
-	// The application closes seq when its display session ends.
+	loop := react.NewAgent(model)
+	runner := executor.NewRunner(loop, &gent.Config{
+		Subscribers: []*gent.SubscriberRegistration{
+			{Subscriber: seq, Delivery: gent.SubscriberLive},
+		},
+	})
+	// Use this pair for one conversation. Close seq after releasing the execution context.
 	// docs:end trace-attach
-	return seq, config, nil
+	return seq, runner, nil
 }
 
 func traceArchive(view *gent.RunView) (*trace.Sequencer, error) {

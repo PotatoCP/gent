@@ -62,7 +62,7 @@ export function buildChronology(activity, entries = []) {
     row.events.push(reference);
   }
   for (const row of calls.values()) describeCall(row);
-  const pending = new Map();
+  const pending = new Map(), previousRequests = new Map();
   rows.sort(compareSequence);
   for (const row of rows) {
     const key = JSON.stringify([row.source.turnId, row.source.contextId]);
@@ -71,6 +71,10 @@ export function buildChronology(activity, entries = []) {
       pending.get(key).push(row);
     }
     if (row.type !== 'model-step' || !row.request) continue;
+    // Keep only a reference to the previous available request in this context. Compare content
+    // when selected, not across the complete archive at load time. A new turn keeps this context.
+    row.previousRequest = previousRequests.get(row.source.contextId) || null;
+    previousRequests.set(row.source.contextId, {request: row.request, order: row.order});
     for (const task of pending.get(key) || []) {
       task.systems = (row.request.Messages || []).filter(message => message.Role === 'system');
       task.systemSource = row.requestSource;

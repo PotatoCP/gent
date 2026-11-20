@@ -6,7 +6,7 @@ setup. Run commands from the stated directory with the same source version as th
 From the repository root, with the two environment variables from Setup:
 
 ```bash
-go run ./docs/examples/hello
+go -C docs run ./examples/hello
 ```
 
 This makes a real model call. The command's teaching code is on [Hello World](/start/hello-world/).
@@ -18,7 +18,7 @@ the addition tool, schemas, data returns, recovery inspection, search chains, sc
 retrieval with controlled inputs:
 
 ```bash
-go test ./docs/examples/... -count=1 -timeout 300s
+go -C docs test ./examples/... -count=1 -timeout 300s
 ```
 
 ## Saved conversations
@@ -26,7 +26,7 @@ go test ./docs/examples/... -count=1 -timeout 300s
 The repository's `examples/history` command demonstrates accepted batches and restoration:
 
 ```bash
-go run ./examples/history
+go -C examples run ./history
 ```
 
 The documentation tests also compare full replay and RunStateSnapshot plus tail with fresh objects.

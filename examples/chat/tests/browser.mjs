@@ -7,8 +7,10 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {checkAdditionalEvidence, checkChronology, checkFullscreen,
-  checkRawTabs, checkWorkingAlignment} from './browser-chronology.mjs';
+  checkRawTabs, checkRequestPaging} from './browser-chronology.mjs';
 import {checkToolGroups} from './browser-tool-groups.mjs';
+import {checkChatTranscript, watchLivePreview} from './browser-chat.mjs';
+import {checkDisclosureHierarchy} from './browser-disclosures.mjs';
 
 const require = createRequire(new URL('../../../docs/package.json', import.meta.url));
 const {chromium, expect} = require('playwright/test');
@@ -95,16 +97,15 @@ try {
     'Use get_customer_info, then reply with exactly: Customer checked.' :
     config.scenarios[0].prompt;
   await page.locator('#prompt').fill(first);
+  const checkPreview = await watchLivePreview(page);
   await page.locator('#prompt').press('Enter');
-  const preview = page.locator('.message[data-delivery="live"]').first();
-  await expect(preview).toBeVisible({timeout: 90000});
-  await checkWorkingAlignment(page, expect);
+  await checkPreview();
   if (!live) {
     const reasoning = page.locator('.message.reasoning').first();
-    await reasoning.locator('summary').click();
+    await expect(reasoning.locator('details')).toHaveCount(0);
     await expect(reasoning.locator('.message-body')).toHaveText(
       'The saved lookup supplies the customer facts. Earlier user input is still present.');
-    await expect(reasoning.locator('details')).toHaveAttribute('open', '');
+    await expect(reasoning.locator('.message-body')).toBeVisible();
     await page.screenshot({path: join(shots, 'demo-streaming.png'), fullPage: true});
   }
   // Refresh reads accepted bytes and reconciles previews while execution continues.
@@ -112,8 +113,13 @@ try {
   await expect(page.locator('#status')).toHaveText('Turn complete', {timeout: 120000});
   const runId = new URL(page.url()).searchParams.get('run');
   assert.ok(runId);
+  const group = page.locator('.tool-group-toggle').first();
+  await expect(group.locator(':scope > summary')).toHaveText('Ran tools');
+  await expect(group).not.toHaveAttribute('open');
+  await group.locator(':scope > summary').click();
   const tool = page.locator('.message.tool').first();
-  await expect(tool.locator('summary')).toHaveText('⌘get_customer_infoComplete');
+  await expect(tool.locator('.tool-name')).toHaveText('get_customer_info');
+  await expect(tool.locator('.tool-status')).toHaveText('Complete');
   await tool.locator('summary').click();
   await expect(tool.locator('.tool-args')).toHaveText(
     '{"customer_id":"","email":"john.smith@email.com"}');
@@ -130,9 +136,9 @@ try {
     await expect(page.locator('.message.commentary')).toHaveText(
       "I'll check the customer record first.");
     const reasoning = page.locator('.message.reasoning').first();
-    await reasoning.locator('summary').click();
     await expect(reasoning.locator('.message-body')).toHaveText(
       'The saved lookup supplies the customer facts. Earlier user input is still present.');
+    await expect(reasoning.locator('.message-body')).toBeVisible();
   }
   await answers.locator('.source-link').click();
   await expect(page.locator('#event-detail')).toBeVisible();
@@ -224,6 +230,7 @@ try {
   await standalone.context().grantPermissions(['clipboard-read', 'clipboard-write'], {origin: url});
   const savedView = await (await page.request.get(`${url}/api/inspect?runId=${runId}` +
     '&kind=view&path=capture')).json();
+  await checkDisclosureHierarchy(browser, url, expect, savedView.decoded, shots, errors);
   await standalone.locator('#file').setInputFiles({name: 'recovered-view.json',
     mimeType: 'application/json', buffer: Buffer.from(savedView.decoded)});
   await expect(standalone.locator('.gent-run-explorer h4')).toHaveText('Accepted archive');
@@ -239,6 +246,7 @@ try {
   await standalone.screenshot({path: join(shots, `${provider}-explorer-tools.png`),
     fullPage: true});
   await checkAdditionalEvidence(standalone, expect, savedView.decoded);
+  await checkRequestPaging(standalone, expect, savedView.decoded);
   await checkToolGroups(standalone, expect, savedView.decoded,
     join(shots, `${provider}-tool-group.png`));
   await standalone.locator('#file').setInputFiles({name: 'invalid.json',
@@ -353,6 +361,7 @@ try {
     await billing.reload();
     await expect(billing.locator('#agent-name')).toHaveText('TechGear Store');
     await expect(billing.locator('#scenario')).toBeDisabled();
+    await billing.locator('.tool-group-heading').click();
     await billing.locator('.message.tool summary').click();
     assert.deepEqual(JSON.parse(await billing.locator('.message.tool .message-body').innerText()), {
       id: 'C001', name: 'Alex Rivera', email: 'alex.rivera@email.com', phone: '+1-555-0321',
@@ -377,6 +386,7 @@ try {
   await expect(page.locator('#prompt')).toHaveValue('Line one\nL');
   await page.goto('about:blank');
   assert.deepEqual(errors, []);
+  await checkChatTranscript(browser, url, expect, shots, errors);
   await stop();
   const fresh = await start();
   const missing = await page.request.get(`${fresh}/api/state?runId=${runId}`);
@@ -415,7 +425,8 @@ try {
     await expect(page.locator('.message.user')).toHaveText('Keep this draft after restart.');
   }
   assert.deepEqual(errors, []);
-  console.log(`PASS ${provider}: shared scenarios, streaming, tool, retained input, ` +
+  console.log(`PASS ${provider}: shared scenarios, streaming text, nested tool groups, ` +
+    'retained input, ' +
     'both replay paths, chronology, full-screen control, working indicator, ' +
     'encoded and recovered JSON, byte sizes, resizing, missing-run redirect, and recovery');
 } catch (error) {

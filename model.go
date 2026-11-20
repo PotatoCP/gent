@@ -30,7 +30,9 @@ type ModelCallResponse = core.ModelCallResponse
 // Read-only derived views avoid parallel mutable copies of candidate content and tool calls.
 type ContentChoice = core.ContentChoice
 
-// GenerationInfo contains metadata about the generation including normalized token counts.
+// GenerationInfo contains normalized token counts, provider identity, and local timings.
+// Counts use plain values: zero can mean a reported zero or an unavailable count. Empty strings
+// mean not reported. Accepted model evidence preserves these values and timings on replay.
 type GenerationInfo = core.GenerationInfo
 
 // ModelCallRequest captures the debuggable and mutable parts of a model request.

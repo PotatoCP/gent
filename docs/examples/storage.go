@@ -15,12 +15,12 @@ type ByteStore interface {
 	Commit(ctx context.Context, batch *gent.SaveBatch, data, state []byte) error
 }
 
+// docs:start recorder-save
 type BatchRecorder struct {
 	Codecs *gent.CodecRegistry
 	Store  ByteStore
 }
 
-// docs:start recorder-save
 func (recorder *BatchRecorder) Save(ctx context.Context, batch *gent.SaveBatch,
 	captureRunStateSnapshot func() (*gent.RunState, error),
 ) error {
@@ -35,10 +35,13 @@ func (recorder *BatchRecorder) Save(ctx context.Context, batch *gent.SaveBatch,
 
 // docs:end recorder-save
 
+// docs:start snapshot-recorder-type
 type SnapshotRecorder struct {
 	BatchRecorder
 	Every uint64
 }
+
+// docs:end snapshot-recorder-type
 
 func (recorder *SnapshotRecorder) Save(ctx context.Context, batch *gent.SaveBatch,
 	captureRunStateSnapshot func() (*gent.RunState, error),

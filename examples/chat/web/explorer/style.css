@@ -5,6 +5,9 @@
   --ge-line: #dedfd6;
   --ge-accent: #2f6650;
   --ge-paper: #fcfcf8;
+  --ge-marker-width: 16px;
+  --ge-disclosure-gap: 8px;
+  --ge-disclosure-step: calc(var(--ge-marker-width) + var(--ge-disclosure-gap));
   color: var(--ge-ink); font: 12px/1.6 "DM Sans", sans-serif;
   min-width: 0; container-type: inline-size; margin: 22px 0 28px;
 }
@@ -69,8 +72,24 @@
 .gent-run-explorer .ge-facts dt { color: var(--ge-muted); font-size: 10px; }
 .gent-run-explorer .ge-facts dd { margin: 0; font: 10px/1.8 "IBM Plex Mono", monospace;
   overflow-wrap: anywhere; }
-.gent-run-explorer .ge-source { margin: 14px 0; }
-.gent-run-explorer summary { cursor: pointer; color: var(--ge-accent); font-size: 11px; }
+/* One text column per level keeps all disclosures readable, including native JSON and errors. */
+.gent-run-explorer .ge-disclosure { min-width: 0; margin: 8px 0; }
+.gent-run-explorer .ge-disclosure > summary { display: grid;
+  grid-template-columns: var(--ge-marker-width) minmax(0, 1fr);
+  column-gap: var(--ge-disclosure-gap); padding: 8px 0; align-items: start;
+  cursor: pointer; color: var(--ge-accent); font-size: 11px; list-style: none; }
+.gent-run-explorer .ge-disclosure > summary::-webkit-details-marker { display: none; }
+.gent-run-explorer .ge-disclosure > summary::before { content: '▸'; text-align: center; }
+.gent-run-explorer .ge-disclosure[open] > summary::before { content: '▾'; }
+.gent-run-explorer .ge-disclosure-heading { min-width: 0; overflow-wrap: anywhere; }
+.gent-run-explorer .ge-disclosure-body { position: relative; min-width: 0;
+  margin-inline-start: var(--ge-disclosure-step); padding: 6px 0 12px; }
+.gent-run-explorer .ge-disclosure-body::before { content: ''; position: absolute;
+  inset-inline-start: calc(var(--ge-marker-width) / 2 - var(--ge-disclosure-step));
+  top: 6px; bottom: 12px;
+  border-inline-start: 1px solid var(--ge-line); pointer-events: none; }
+.gent-run-explorer .ge-disclosure-body > :first-child { margin-top: 0; }
+.gent-run-explorer .ge-disclosure-body > :last-child { margin-bottom: 0; }
 .gent-run-explorer .ge-path { display: block; margin: 12px 0; color: var(--ge-muted);
   font: 10px "IBM Plex Mono", monospace; overflow-wrap: anywhere; }
 .gent-run-explorer .ge-code { font: 11px/1.8 "IBM Plex Mono", monospace; white-space: pre-wrap;
@@ -85,15 +104,21 @@
 .gent-run-explorer .ge-table th:first-child { width: 66%; text-align: left; font-weight: 400; }
 .gent-run-explorer .ge-table thead { color: var(--ge-muted); }
 .gent-run-explorer .json-tree { font: 11px/1.8 "IBM Plex Mono", monospace;
-  overflow-wrap: anywhere; border-left: 1px solid var(--ge-line); padding-left: 10px; }
-.gent-run-explorer .json-tree details { margin-left: 10px; }
-.gent-run-explorer .json-tree > details { margin-left: 0; }
+  overflow-wrap: anywhere; border: 0; padding: 0; min-width: 0; }
+.gent-run-explorer .json-tree details { margin: 0; }
+.gent-run-explorer .ge-json-node > summary { padding-block: 4px; }
+.gent-run-explorer .ge-json-node > .ge-disclosure-body { padding-block: 4px 8px; }
+.gent-run-explorer .ge-json-node > .ge-disclosure-body::before { top: 4px; bottom: 8px; }
 .gent-run-explorer .json-key { color: var(--ge-accent); }
 .gent-run-explorer .json-string { color: #87522c; white-space: pre-wrap; }
 .gent-run-explorer .json-value { color: #56639a; }
-.gent-run-explorer .json-leaf { margin-left: 13px; }
-.gent-run-explorer .json-more { font-size: 10px; color: var(--ge-accent); margin: 6px 12px; }
+.gent-run-explorer .json-leaf { margin-inline-start: var(--ge-disclosure-step); padding: 2px 0; }
+.gent-run-explorer .json-more { font-size: 10px; color: var(--ge-accent);
+  margin: 6px 0 6px var(--ge-disclosure-step); padding: 4px 0; }
 @container (max-width: 350px) {
+  .gent-run-explorer .ge-disclosure, .gent-run-explorer .json-tree {
+    --ge-marker-width: 12px; --ge-disclosure-gap: 4px; --ge-disclosure-step: 16px;
+  }
   .gent-run-explorer .ge-controls { flex-direction: column; }
   .gent-run-explorer .ge-controls input { width: 100%; }
   .gent-run-explorer .ge-metrics { gap: 18px; }
@@ -124,17 +149,32 @@
   .gent-run-explorer .ge-detail { padding-top: 0; }
 }
 .gent-run-explorer .ge-tool-accordion { border-bottom: 1px solid var(--ge-line); }
-.gent-run-explorer .ge-tool-accordion > summary { display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) auto; gap: 3px 8px; padding: 16px 0;
-  align-items: baseline; list-style: none; }
-.gent-run-explorer .ge-tool-accordion > summary::-webkit-details-marker { display: none; }
+.gent-run-explorer .ge-tool-accordion > summary { padding-block: 16px; }
+.gent-run-explorer .ge-tool-accordion > summary > .ge-disclosure-heading { display: grid;
+  grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; align-items: baseline;
+  color: var(--ge-ink); }
 .gent-run-explorer .ge-tool-accordion > summary::before { content: '＋'; color: var(--ge-accent); }
 .gent-run-explorer .ge-tool-accordion[open] > summary::before { content: '−'; }
 .gent-run-explorer .ge-tool-accordion > summary strong { color: var(--ge-ink);
   font: 11px/1.7 "IBM Plex Mono", monospace; overflow-wrap: anywhere; }
-.gent-run-explorer .ge-tool-position { grid-column: 2 / -1; font-size: 10px;
+.gent-run-explorer .ge-tool-position { grid-column: 1 / -1; font-size: 10px;
   color: var(--ge-muted); }
-.gent-run-explorer .ge-tool-accordion > .ge-call-info { margin: 8px 0 16px; }
+.gent-run-explorer .ge-tool-accordion-body { padding-bottom: 18px; }
+.gent-run-explorer .ge-tool-accordion-body .ge-section { margin-block: 16px; }
+.gent-run-explorer .ge-request-controls { display: flex; flex-wrap: wrap; align-items: center;
+  gap: 10px 14px; margin: 16px 0 10px; }
+.gent-run-explorer .ge-request-modes { display: inline-flex; padding: 3px; border-radius: 6px;
+  background: #e9ece4; gap: 2px; }
+.gent-run-explorer .ge-request-modes button { padding: 5px 9px; border-radius: 4px;
+  font-size: 11px; }
+.gent-run-explorer .ge-request-modes button[aria-pressed="true"] { color: var(--ge-ink);
+  background: var(--ge-paper); box-shadow: 0 1px 3px #252d2814; }
+.gent-run-explorer .ge-request-count { color: var(--ge-muted); font-size: 10px; }
+.gent-run-explorer .ge-repeated-messages { margin: 14px 0;
+  border-block: 1px dashed var(--ge-line); }
+.gent-run-explorer .ge-repeated-messages > summary { padding: 12px 0; color: var(--ge-muted); }
+.gent-run-explorer .ge-repeated-messages[open] > summary { color: var(--ge-accent); }
+.gent-run-explorer .ge-request-empty { color: var(--ge-muted); font-size: 11px; margin: 18px 0; }
 .gent-run-explorer .ge-raw-heading { display: flex; align-items: baseline;
   justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
 .gent-run-explorer .ge-size { font: 10px "IBM Plex Mono", monospace; color: var(--ge-accent); }

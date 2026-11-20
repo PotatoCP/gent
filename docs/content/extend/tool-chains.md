@@ -10,6 +10,15 @@ Embed the registry to retain its validation and recovery behavior:
 This changes visibility, not authorization. The handler must still check whether the requested
 action is permitted. A model's lack of an advertised definition is not an access-control boundary.
 
+## Give the custom chain to the Runner
+
+Here `tool` is a built tool named `lookup_order`:
+
+{{example:custom-chain-runner}}
+
+Create a context and call NewTurn as in [Hello World](/start/hello-world/). Gent still uses the
+embedded registry for managed calls, validation, and recovery.
+
 ## Implement the managed chain contract
 
 NativeTools selects definitions. PrepareCalls validates requests and proposes a plan. ExecuteNext

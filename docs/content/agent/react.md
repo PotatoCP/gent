@@ -20,5 +20,13 @@ system instructions, parse final-answer tags, or change native tool identities.
 
 {{example:react-guards}}
 
+## Give the configured loop to the Runner
+
+After applying the settings above:
+
+{{example:react-runner}}
+
+Create an execution context and call NewTurn as shown in [Hello World](/start/hello-world/).
+
 ReAct saves prepared decisions and tool-plan progress for recovery. You do not need a custom step
 enum to resume this loop. See [Custom loops](/extend/loops/) when you need another control policy.

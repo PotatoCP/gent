@@ -36,6 +36,9 @@ embedder. Close it after all indexes and queries finish.
 
 {{example:search-fused}}
 
+Add documents to `index`, then call `index.Search(ctx, query, topK)` as in the earlier examples.
+The fused index applies writes to its source indexes and combines their search results.
+
 Set weights and normalization to match the score semantics of the sources. Top-K controls result
 count. The search API also provides knee truncation and source-specific confidence settings.
 

@@ -1,17 +1,5 @@
 import assert from 'node:assert/strict';
 
-export async function checkWorkingAlignment(page, expect) {
-  const working = page.locator('#working');
-  await expect(working).toBeVisible();
-  await expect(working).toHaveCSS('display', 'flex');
-  await expect(working).toHaveCSS('align-items', 'center');
-  await expect(working).toHaveCSS('gap', '8px');
-  const dot = await working.locator('.pulse').boundingBox();
-  const text = await working.locator('span').last().boundingBox();
-  assert.ok(Math.abs(dot.y + dot.height / 2 - text.y - text.height / 2) <= 1);
-  assert.equal(text.x - dot.x - dot.width, 8);
-}
-
 export async function checkChronology(page, expect, kind, decoded, live) {
   const explorer = page.getByRole('region', {name: 'Run data explorer'});
   await expect(explorer.getByRole('button', {name: 'Chronological', exact: true}))
@@ -24,6 +12,8 @@ export async function checkChronology(page, expect, kind, decoded, live) {
     return;
   }
   const detail = explorer.locator('.ge-detail');
+  await expect(detail.locator(':scope > .ge-section > h5')).toHaveText(
+    ['System prompt', 'Task', 'Saved evidence']);
   const firstCall = decoded.activity.find(event => event.type === 'model_call_started');
   const system = detail.locator('.ge-section').filter({
     has: page.getByRole('heading', {name: 'System prompt', exact: true})});
@@ -50,6 +40,30 @@ export async function checkChronology(page, expect, kind, decoded, live) {
   await expect(returned.locator('.ge-content')).toHaveText("I'll check the customer record first.");
   await expect(returned.locator('.ge-code')).toHaveText('{"email":"john.smith@email.com"}');
   await explorer.locator('.ge-row[data-kind="model-step"]').nth(1).click();
+  const secondCall = decoded.activity.filter(event => event.type === 'model_call_started')[1];
+  const repeatedCount = firstCall.payload.Request.Messages.length;
+  const requestMessages = secondCall.payload.Request.Messages;
+  assert.equal(requestMessages.length, 5);
+  assert.deepEqual(requestMessages.slice(0, 2), firstCall.payload.Request.Messages.slice(0, 2));
+  assert.deepEqual(requestMessages.at(-1), firstCall.payload.Request.Messages.at(-1));
+  const repeated = sent.locator('.ge-repeated-messages').first();
+  await expect(repeated).not.toHaveAttribute('open');
+  await expect(sent.locator('.ge-repeated-messages > summary')).toHaveText([
+    'Messages 1–2 · Already sent', 'Message 5 · Already sent']);
+  await expect(sent.locator('.ge-request-count')).toHaveText(
+    `${requestMessages.length - repeatedCount} new or changed · ${repeatedCount} repeated`);
+  await expect(sent.locator('.ge-role')).toHaveText(['3 · Ai', '4 · Tool']);
+  await sent.getByRole('button', {name: 'Full request', exact: true}).click();
+  await expect(sent.locator('.ge-model-message')).toHaveCount(requestMessages.length);
+  await expect(sent.locator('.ge-request-count')).toHaveText(
+    `${requestMessages.length} messages · Complete request`);
+  assert.deepEqual(await sent.locator('.ge-content').allTextContents(),
+    requestMessages.flatMap(message => message.Parts.flatMap(part => part.Text ? [part.Text] :
+      (part.Content || part.Parts || []).flatMap(item => item.Text ? [item.Text] : []))));
+  await sent.getByRole('button', {name: 'New content', exact: true}).click();
+  await repeated.locator('summary').click();
+  await expect(repeated.locator('.ge-model-message')).toHaveCount(2);
+  await repeated.locator('summary').click();
   await expect(returned.locator('.ge-part-label')).toHaveText(
     ['Reasoning', 'Final answer candidate', 'Final answer']);
   assert.deepEqual(await returned.locator('.ge-content').allTextContents(), [
@@ -69,7 +83,31 @@ I found John Smith (C001), using john.smith@email.com.
     'email: "john.smith@email.com"', 'frequent_flyer_tier: "gold"', 'id: "C001"',
     'name: "John Smith"', 'phone: "+1-555-0123"',
   ]);
-  await explorer.locator('.ge-row[data-kind="model-step"]').first().click();
+  await checkToolAlignment(page, expect, detail);
+  await explorer.locator('.ge-row[data-kind="model-step"]').nth(1).click();
+}
+
+export async function checkToolAlignment(page, expect, detail) {
+  const viewport = page.viewportSize();
+  for (const size of [viewport, {width: 390, height: 850}]) {
+    await page.setViewportSize(size);
+    if (size.width <= 800) {
+      await expect(page.locator('#inspector-toggle')).toHaveAttribute('aria-expanded', 'false');
+      await page.locator('#inspector-toggle').click();
+    }
+    const tool = detail.locator('.ge-tool-accordion[open]').first();
+    await expect(tool.locator('.ge-tool-accordion-body')).toBeVisible();
+    const title = await tool.locator(':scope > summary .ge-disclosure-heading > strong')
+      .boundingBox();
+    for (const selector of ['.ge-tool-accordion-body', '.ge-section > h5', '.ge-call-info']) {
+      const content = await tool.locator(selector).first().boundingBox();
+      assert.ok(Math.abs(content.x - title.x) <= 1, `${selector} must align with the tool title`);
+    }
+    assert.equal(await page.evaluate(() =>
+      document.documentElement.scrollWidth <= innerWidth), true);
+  }
+  await page.setViewportSize(viewport);
+  await expect(page.locator('#inspector-toggle')).toHaveAttribute('aria-expanded', 'true');
 }
 
 export async function checkFullscreen(page, expect, screenshot) {
@@ -148,11 +186,71 @@ export async function checkAdditionalEvidence(page, expect, json) {
     .toHaveText('Customer service unavailable');
   await expect(explorer.locator('.ge-content')).toHaveText('Customer service unavailable');
   await explorer.locator('.ge-row[data-kind="model-step"]').last().click();
+  await expect(sent.locator('.ge-request-count')).toHaveText('0 new or changed · 26 repeated');
+  await expect(sent.locator('.ge-model-message')).toHaveCount(0);
+  await expect(sent.locator('.ge-request-empty')).toHaveText(
+    'No new messages. Call options remain available below.');
+  await sent.locator('.ge-repeated-messages > summary').click();
+  await expect(sent.locator('.ge-model-message')).toHaveCount(20);
+  await sent.getByRole('button', {name: 'Show next 20 messages'}).click();
+  await expect(sent.locator('.ge-model-message')).toHaveCount(26);
+  await sent.getByRole('button', {name: 'Full request', exact: true}).click();
+  await expect(sent.locator('.ge-model-message')).toHaveCount(20);
+  await sent.getByRole('button', {name: 'Show next 20 messages'}).click();
+  assert.deepEqual(await sent.locator('.ge-content').allTextContents(),
+    messages.map(message => message.Parts[0].Text));
+  await expect(sent.locator('img')).toHaveCount(0);
   const returned = explorer.locator('.ge-call-columns > section').last();
   await expect(returned.locator('.ge-note').last()).toHaveText(
     'No complete response is saved at this position.');
   await returned.getByText('Saved stream fragment · event 1001', {exact: true}).click();
   await expect(returned.locator('.json-tree')).toBeVisible();
+  await explorer.evaluate(host => host.dispatchEvent(new Event('remove-explorer')));
+  await expect(explorer).toHaveCount(0);
+}
+
+export async function checkRequestPaging(page, expect, json) {
+  const view = JSON.parse(json);
+  const start = view.activity.find(event => event.type === 'model_call_started');
+  const previous = Array.from({length: 22}, (_, index) =>
+    ({Role: 'human', Parts: [{Text: `Previous ${index}`}]}));
+  const added = previous.map((_, index) =>
+    ({Role: 'tool', Parts: [{Text: `New result ${index}`}]}));
+  const messages = previous.flatMap((message, index) => [message, added[index]]);
+  view.activity = [
+    {...start, payload: {Request: {Messages: previous}}},
+    {...start, eventSequenceNumber: 1000, modelCallId: 'next',
+      payload: {Request: {Messages: messages}}},
+  ];
+  await page.evaluate(async json => {
+    const {createRunExplorer} = await import('/explorer/index.js');
+    const host = document.createElement('div'); host.id = 'request-paging';
+    document.body.append(host);
+    const explorer = createRunExplorer(host, {kind: 'view', json});
+    host.addEventListener('remove-explorer', () => { explorer.destroy(); host.remove(); },
+      {once: true});
+  }, JSON.stringify(view));
+  const explorer = page.locator('#request-paging');
+  await explorer.locator('.ge-row').last().click();
+  const sent = explorer.locator('.ge-request-context');
+  await expect(sent.locator('.ge-request-count')).toHaveText('22 new or changed · 22 repeated');
+  await expect(sent.locator('.ge-model-message')).toHaveCount(10);
+  await expect(sent.locator('.ge-repeated-messages')).toHaveCount(10);
+  const more = sent.getByRole('button', {name: 'Show more request messages', exact: true});
+  await more.click();
+  await expect(sent.locator('.ge-model-message')).toHaveCount(20);
+  await more.click();
+  await expect(more).toHaveCount(0);
+  assert.deepEqual(await sent.locator('.ge-content').allTextContents(),
+    added.map(message => message.Parts[0].Text));
+  await expect(sent.locator('.ge-role')).toHaveText(
+    added.map((_, index) => `${2 * index + 2} · Tool`));
+  await sent.getByRole('button', {name: 'Full request', exact: true}).click();
+  await expect(sent.locator('.ge-model-message')).toHaveCount(20);
+  await sent.getByRole('button', {name: 'Show next 20 messages'}).click();
+  await sent.getByRole('button', {name: 'Show next 20 messages'}).click();
+  assert.deepEqual(await sent.locator('.ge-content').allTextContents(),
+    messages.map(message => message.Parts[0].Text));
   await explorer.evaluate(host => host.dispatchEvent(new Event('remove-explorer')));
   await expect(explorer).toHaveCount(0);
 }

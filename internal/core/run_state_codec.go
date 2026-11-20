@@ -65,12 +65,8 @@ func (codecs *CodecRegistry) UnmarshalRunState(data []byte) (*RunStateLoadResult
 	if wire.Digest == "" || wire.Digest != hex.EncodeToString(sum[:]) {
 		return invalid("gent: RunStateSnapshot digest mismatch")
 	}
-	var encoded EncodedValue
-	if err := json.Unmarshal(wire.State, &encoded); err != nil {
-		return invalid(fmt.Sprintf("gent: invalid RunStateSnapshot value: %v", err))
-	}
 	decoder := valueDecoder{CodecRegistry: codecs, status: valueDecodeInvalid}
-	decoded, err := decoder.value(encoded, 0)
+	decoded, err := decoder.document(wire.State)
 	if err != nil {
 		switch decoder.status {
 		case valueDecodeOperationFailed:

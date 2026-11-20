@@ -1,4 +1,4 @@
-import {element, jsonTree} from './dom.js';
+import {disclosure, element, jsonTree} from './dom.js';
 import {counterRows, partText} from './data.js';
 import {facts, section, sourceFields} from './fields.js';
 import {renderChronology, renderToolResult} from './chronology-render.js';
@@ -68,10 +68,9 @@ export function renderState(data) {
   }
   table.append(body); counters.append(table);
   for (const runtime of data.runtime.contexts || []) {
-    const gauges = element('details', 'ge-source');
-    gauges.append(element('summary', '', 'Current gauges'),
-      facts(Object.entries(runtime.gauges || {})));
-    counters.append(gauges);
+    const {node, body} = disclosure('ge-source', 'Current gauges');
+    body.append(facts(Object.entries(runtime.gauges || {})));
+    counters.append(node);
   }
   const saved = section('Custom data & continuation', 'Saved task, LoopData, and loop progress. ' +
     'Typed values stay in their codec form for inspection.');

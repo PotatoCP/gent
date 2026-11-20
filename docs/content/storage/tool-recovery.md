@@ -17,6 +17,16 @@ External services can use the logical ID for their own idempotency contract.
 
 {{example:tool-recover}}
 
+## Register the tool with the Runner
+
+Use the `tool` built above:
+
+{{example:recovery-runner}}
+
+Give the same Config a Recorder to save recoverable batches. After an interrupted attempt, restore
+accepted state with a Runner that still binds this tool, then Continue. Gent calls the recovery
+handler. See [Restore and Continue](/storage/restore/) for that caller flow.
+
 ## Report a completed operation
 
 Return this only when inspection proves the result:

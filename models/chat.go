@@ -64,7 +64,7 @@ func (m *Chat) GenerateContentStream(ctx context.Context,
 	}
 	return startProviderStream(ctx, m.config.HTTPClient, m.config.BaseURL+"/chat/completions",
 		headers, body, func(ctx context.Context, response *http.Response,
-			stream *gent.StreamWithDuration,
+			stream *providerStream,
 		) (*gent.ModelCallResponse, error) {
 			result, err := m.readResponse(ctx, response, stream, &request.Options)
 			recordSchema(result, decision)

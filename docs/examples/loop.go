@@ -80,6 +80,15 @@ func loopDataConfig() (*gent.Config, error) {
 	return config, nil
 }
 
+func recordFile(execCtx *gent.ExecutionContext) {
+	// docs:start loop-data-use
+	data := execCtx.Data().(*LoopData)
+	data.Files++
+	data.TurnFiles++
+	// Change local progress inside Next. The next approved save captures these fields together.
+	// docs:end loop-data-use
+}
+
 func appendHistory(execCtx *gent.ExecutionContext) error {
 	// docs:start loop-history
 	entry, err := execCtx.NewHistoryEntry(&gent.HistoryEntry{

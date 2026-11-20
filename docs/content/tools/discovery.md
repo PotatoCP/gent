@@ -13,6 +13,15 @@ Initialize after registering the tools and engines. `Pin` keeps selected definit
 Page size limits each search reply. The current bindings determine what can run after restoration; a
 saved definition does not register executable code.
 
+## Give the search chain to the Runner
+
+After Initialize succeeds:
+
+{{example:discovery-runner}}
+
+Use this Runner for task execution as in [Hello World](/start/hello-world/). Its model can request
+tool discovery and then call a selected tool through shared execution.
+
 ## Select an engine
 
 Bleve provides keyword search. Regex search finds names by a pattern. `NewFusedToolSearcher` adds
@@ -39,3 +48,9 @@ With an existing embedder:
 For combined keyword and vector search:
 
 {{example:tools-fused-search}}
+
+Register either `engine` before Initialize. This creates a separate chain from the first example:
+
+{{example:search-engine-register}}
+
+Give this `chain` to Config.ToolChain with the Runner setup shown above.

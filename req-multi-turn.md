@@ -781,6 +781,30 @@ explicit ownership. Encoding, bytes written, allocations, and save delay need se
 Large custom data or active media can dominate cost. Do not treat measurements of the old complete
 RunView as measurements of this retained-state design. (D40/D78/D119)
 
+### Saved document representation — approved 2026-11-19
+
+The owner approved the type-table, record-layout, and shared-value proposal in the
+[codec size report](development/reports/run-state-codec-size.md). Implement these structural changes
+before considering compression. Preserve the reasoning in that report. The production wire contract
+is in [Saved document format](development/reports/saved-document-format.md).
+
+Keep the public Marshal, Unmarshal, MarshalRunState, and UnmarshalRunState calls. Each storage
+document is self-contained: full type names occur in local tables, layouts retain declared fields
+and versions, and equal typed values can use local references. Do not remove recovery evidence,
+prune archive content, shorten prompts, or change compaction to obtain size savings. Keep exact
+native bytes, concrete types, nil/empty distinctions, and accepted identities.
+
+Read the compact format directly. Do not first allocate the full expanded JSON representation.
+Shared wire values must produce independently owned mutable Go values under D78. Keep existing
+field-evolution and logical-state checks. Validate integrity, table indexes, slot counts, reference
+order, and expansion bounds before typed construction. References cannot require an earlier file,
+form cycles, or bypass limits through repeated or ignored values. Keep batch receipt identity
+independent of storage-table choices. Component EncodedValue APIs retain their existing purpose.
+
+Measure stored bytes, CPU time, allocations, and replay behavior. Run the full native, CGO-disabled,
+and race suites. Review the completed change against this requirements document before claiming
+completion, as the owner requested. Compression and external dictionaries are outside this change.
+
 ### Approved savepoints
 
 **Save schedule — D54/D61/D111/D143.** Each row captures complete logical state, including LoopData.
@@ -2446,6 +2470,28 @@ example.
 The chat UI must show the reasoning or reasoning summaries exposed by Gent and the selected
 provider, tool-call progress and results, assistant output, and relevant execution progress. Keep
 unavailable or opaque provider data in its supported representation; do not invent reasoning text.
+
+**Display approved 2026-11-19:** use the Codex transcript pattern. Stream commentary and
+exposed reasoning as visible text, separate from the final answer. Put consecutive tool calls
+inside a collapsed group with the fixed header **Ran tools**. Each tool has a separate toggle for
+its details. Text messages divide these display groups. Preserve open state during streaming and
+acceptance. Do not generate group-summary labels or imply that grouped calls all ran in parallel.
+
+**Chronological inspector approved 2026-11-19:** task details show the system prompt before the
+human input. Model-call details default to new request content. Collapse exact repeated messages
+in their original positions and retain a clear way to inspect each range or the full request.
+Compare complete messages, including role, metadata, tool IDs, and native continuation. Do not
+hide changed content or change saved data. The implementation compares the previous available
+saved request in the same context, across turns and attempts. Each prior occurrence matches at
+most once. Keep uncertain matches visible. Label the comparison source, because RunState can lack
+earlier requests. Keep call options and raw source data available. Expanded tool details must align
+with their accordion header text so the hierarchy remains clear.
+The same spacing rule applies to every chronology disclosure: execution details, source records,
+repeated messages, message metadata, native continuation, tool inputs and results, errors, recovery
+reports, and nested JSON. Align each body with its heading text. Keep clear vertical gaps and a
+consistent indent per level. Use a smaller indent in narrow layouts. Verify the complete hierarchy
+on desktop and mobile, including keyboard toggles and reopened lazy content.
+
 Distinguish provisional Live updates from accepted facts and publish accepted final output only
 after Save succeeds. A user can submit the next prompt after a completed answer in the same RunId.
 Use the standard NewTurn, Restore, Continue, and GetLastTurnResult contracts with configured
@@ -2491,6 +2537,168 @@ Use deterministic checks for replay and failure cases, then verify the browser f
 configured live provider. Check browser errors, streaming order, tool visibility, and repeated
 turns. Follow the repository verification rules when implementing the application. The example
 follows the completed refactor; it is not part of this documentation cleanup.
+
+### Model-call metadata — approved fields and remaining drafts
+
+**Owner approval, 2026-11-19:** add the six fields below to `GenerationInfo`. Keep numeric
+measurements as plain values. Do not change existing counts to pointers or change their integer
+width. Keep `Duration` as `time.Duration`. This approval supersedes the earlier optional-primitive
+proposal. It does not approve the separate native-metadata or schema-diagnostic redesign.
+
+`ModelCallResponse.Info` remains the one metadata path. The approved shape is:
+
+```go
+type GenerationInfo struct {
+    InputTokens          int
+    OutputTokens         int
+    TotalTokens          int
+    CachedInputTokens    int
+    CacheWriteInputTokens int
+    ReasoningTokens      int
+
+    ProviderRequestId   string
+    ProviderResponseId  string
+    ResponseModel       string
+    ResponseServiceTier string
+
+    RawGenerationInfo map[string]any
+    Duration           time.Duration
+    TimeToFirstContent time.Duration
+}
+```
+
+| Approved addition | Purpose and contract |
+| --- | --- |
+| `CacheWriteInputTokens` | Reported input tokens written to cache; separate from cache reads |
+| `ProviderRequestId` | Transport request ID returned by the provider; empty if absent |
+| `ProviderResponseId` | Response or message ID returned by the provider; empty if absent |
+| `ResponseModel` | Exact returned model name/version; do not substitute the requested model |
+| `ResponseServiceTier` | Exact returned processing tier; do not substitute the requested tier |
+| `TimeToFirstContent` | Local elapsed time until the adapter first observes model content |
+
+**Value semantics:** zero can mean either a reported zero or an unavailable count. Empty strings
+mean not reported. The presence of `Info` does not prove that every count was supplied. This is an
+accepted tradeoff: plain values keep the caller interface simple and avoid pointer checks and
+allocations. Do not add presence flags or a wrapper for each primitive as a substitute. A displayed
+zero must not become proof of a cache miss or a zero-cost call. The earlier nil-versus-zero display
+proposal is superseded by this rule.
+
+Keep `CachedInputTokens` as the cache-read field. Its existing meaning is correct. Do not add a
+stored cache-hit flag, cache percentage, uncached-input duplicate, or token rate. Cached input is
+part of normalized input. Reasoning can be part of normalized output. Do not add these subcounts
+to totals again. Anthropic input includes ordinary input, cache reads, and cache writes. Do not
+infer cache writes from input that missed the cache. Preserve each provider's count semantics.
+
+**Timing:** `Duration` remains local adapter elapsed time through response assembly and producer
+cleanup. It is not provider compute time. Zero means not measured. `AfterModelCallEvent.Duration`
+remains the managed-call duration and has a wider scope. Measure `TimeToFirstContent` from the same
+adapter start, before callbacks or bounded delivery can block. Count text, exposed reasoning,
+tool-call content, or media; exclude heartbeats, empty deltas, opaque reasoning, and status-only
+events. Some adapters receive tool or media content without emitting a text chunk. Measure those
+native events too. Zero means not measured or no qualifying content observed. For a non-streamed
+response, first content is available after parsing; this is not time to first model token.
+Replayed results keep their original measurements. Restoration does not start a new timing period.
+Per-HTTP-retry timing remains outside these fields.
+
+**Identity:** IDs describe the returned provider request and response. They are not Gent's
+`ModelCallId`, operation identity, or a complete HTTP-attempt log. An adapter retry can have several
+request IDs. These fields describe the returned response. Do not create a terminal save or an empty
+accepted response to store an error ID. The event already identifies the configured provider and
+requested model. Returned model and tier strings remain provider-defined values, not a closed Gent
+enum. An absent value stays empty; it must not be filled with the request configuration.
+
+**Provider mappings:** adapters map only supported returned fields. OpenAI/xAI Responses use
+response `id`, `model`, `service_tier`, and `usage.input_tokens_details.cache_write_tokens` when
+present. Chat-compatible adapters use `id`, `model`, `service_tier`, and
+`usage.prompt_tokens_details.cache_write_tokens` when present. Anthropic uses message `id`, `model`,
+`usage.service_tier`, and `usage.cache_creation_input_tokens`. Gemini/Vertex use `responseId`,
+`modelVersion`, and `usageMetadata.serviceTier`. Ollama returns `model`. Unsupported or absent
+fields
+keep their zero values. The shared HTTP path reads `x-request-id`, or `request-id` when the former
+is absent. Do not store all headers. Streaming usage follows the provider's cumulative update
+rules; never add each report to the previous report. Retain response identity when later events
+omit it. Anthropic usage updates can contain strings and nested objects as well as counts.
+
+**Recovery and accounting:** `AfterModelCallEvent.Response.Info` is frozen with the model evidence
+and stored at the next approved savepoint. Full batch replay keeps it in `RunView.Activity`;
+encoding and loading the archive preserves it too. A compact RunState keeps only evidence needed
+for execution, not the complete usage history. Keep D57: no extra model-response savepoint.
+Cancellation can prevent final usage from arriving. Interruption before acceptance can lose
+observed usage. Replaying an accepted result must preserve its metadata without adding its usage
+again. These records support troubleshooting and accepted usage totals, not a complete provider
+bill. Request identifiers and native diagnostics follow the archive's existing access rules.
+
+The inspector already exposes saved `Info` under **Full response**. A separate **Usage** panel
+remains a draft. It could show counts, cache reads and writes, reasoning, duration, and provider
+identity. A zero count must be presented with the value semantics above. The repeated-message
+filter changes display only; it does not change provider requests or cache behavior. Do not infer
+exact cost without provider and pricing context.
+
+#### Native metadata and schema diagnostics — still draft
+
+The current `RawGenerationInfo` map contains selected provider fields and Gent diagnostics. It is
+not a complete provider response or native usage record. Anthropic keeps its cache-creation count
+there, and Gent stores its output-schema decision there. Keep this behavior for the approved field
+addition. Replacing this map has not been approved.
+
+The remaining proposal is to replace that mixed map with `ProviderMetadata json.RawMessage` and
+`SchemaEnforcement *SchemaEnforcementInfo`, where the latter has `Native bool`, `Profile string`,
+and `Reason string`. A pointer to this optional structure is distinct from the rejected primitive
+pointers, but this whole replacement is still draft. It would separate provider data from Gent's
+schema decision and preserve selected provider-specific fields without adding a normalized field
+for every provider detail.
+
+If approved later, retain native names such as `usage` and `usageMetadata`. Preserve unknown fields
+inside selected sections, including modality counts, cache lifetimes, timing, and cache diagnostics.
+Do not copy the whole response, generated content, or all HTTP headers. Preserve numeric precision.
+Streaming metadata must follow the provider's update rules; it is not an exact wire response.
+Use normal provider and codec size bounds and never silently truncate saved metadata. The adapter
+would create typed fields and native metadata once; then normal evidence ownership rules apply.
+Custom application data must not be mixed into provider metadata. This costs more archive bytes
+but can help explain provider-specific behavior without another persistence path.
+
+Normalized money/cost fields, detailed transport-attempt records, and request IDs on failures remain
+separate work. They need clear pricing, retry, and error contracts. Do not create accepted model
+responses for unexpected errors. Native selection rules and fixture coverage must be reviewed
+before implementing the remaining metadata redesign.
+
+**Verification requirements:** use native JSON and stream fixtures for all adapter names. Verify
+cache-read/write separation, absent values, returned IDs/model/tier, cumulative stream usage, and
+first-content timing for text, reasoning, tools, and media. Prove that heartbeats and opaque data do
+not start the content timer. Prove that callbacks and delivery delay do not inflate that timer.
+Compare complete `GenerationInfo` after SaveBatch replay and RunView encoding/decoding. Check
+RunStateSnapshot plus accepted-tail restoration and batch-only restoration without recounting
+accepted usage. Preserve the normal recovery and archive guarantees.
+
+**Implementation verification, 2026-11-19:** the six approved fields now use plain values. Native
+JSON and stream fixtures pass for all 11 adapter names. Controlled stream tests cover content,
+empty and opaque events, callback delay, and blocked delivery. Complete metadata survives batch
+and archive encoding/replay. Both execution restore paths preserve accepted usage without another
+model call. The root and chat modules pass native, CGO-disabled, and race suites. The chat browser
+checks pass, including both replay paths and the inspector. These checks use fixtures; they do not
+establish live billing accuracy. The native metadata and Usage panel proposals remain draft.
+
+**Sources and prior evidence:** before these additions, a public-API probe ran ReAct, stored three
+encoded batches, rebuilt RunView, encoded and decoded the archive, and compared the complete old
+`GenerationInfo`, including nested raw data and duration. That exact comparison passed. The existing
+`TestProvidersStreamingAndContinuation` fixtures passed for all 11 configured adapter names. These
+were fixture checks, not live billing verification. Current fields and semantics were checked
+against the official references below on 2026-11-19:
+
+- [OpenAI response fields][metadata-openai] and
+  [prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching).
+- [Anthropic response headers][metadata-anthropic],
+  [message usage](https://platform.claude.com/docs/en/api/messages/create), and
+  [streaming usage](https://platform.claude.com/docs/en/build-with-claude/streaming).
+- [Gemini response metadata][metadata-gemini].
+- [OpenRouter cache counts][metadata-openrouter].
+
+[metadata-anthropic]: https://platform.claude.com/docs/en/api/overview
+[metadata-gemini]: https://aistudio.google.com/api-reference/generate-content
+[metadata-openai]: https://developers.openai.com/api/reference/resources/responses/methods/create
+[metadata-openrouter]:
+  https://github.com/OpenRouterTeam/docs/blob/main/cookbook/administration/usage-accounting.mdx
+
 
 ## Cleanup report
 

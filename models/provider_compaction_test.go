@@ -187,8 +187,15 @@ func logCompactionFailure(t *testing.T, execCtx *gent.ExecutionContext) {
 			continue
 		}
 		for _, choice := range after.Response.Choices {
-			t.Logf("topic=%s iteration=%d status=%s text=%q", after.StreamTopicId, after.Iteration,
-				choice.Completion.Status, gent.ContentText(choice.CandidateContent()))
+			t.Logf("topic=%s iteration=%d completion=%+v info=%+v", after.StreamTopicId,
+				after.Iteration, choice.Completion, after.Response.Info)
+			// Phase labels can explain why visible text is not an answer candidate. Keep all
+			// readable items in the failure report without printing native opaque content.
+			for _, part := range choice.Parts {
+				if content, ok := part.(*gent.AssistantContent); ok {
+					t.Logf("content=%s text=%q", content.Type, gent.ContentText(content.Content))
+				}
+			}
 			for _, call := range choice.ToolCalls() {
 				t.Logf("tool=%s arguments=%s", call.FunctionCall.Name, call.FunctionCall.Arguments)
 			}

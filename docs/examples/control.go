@@ -25,6 +25,22 @@ func deadlineContext(parent context.Context) (context.Context, context.CancelFun
 	return ctx, cancel
 }
 
+func timedExecution(parent context.Context, runner *executor.Runner[string], task *gent.Task) (
+	string, *gent.ExecutionResult, error,
+) {
+	ctx, cancel := deadlineContext(parent)
+	// docs:start control-timeout-use
+	defer cancel()
+	execCtx, err := runner.NewExecutionContext(ctx, "timed-task")
+	if err != nil {
+		return "", nil, err
+	}
+	defer execCtx.Release()
+	return runner.NewTurn(execCtx, task)
+	// The deadline applies to this worker. After interruption, restore accepted state.
+	// docs:end control-timeout-use
+}
+
 func runStatus(result *gent.ExecutionResult) string {
 	// docs:start control-status
 	switch result.Status {

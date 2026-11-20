@@ -68,9 +68,14 @@ RunView and RunState each use a complete reusable inspector. **Chronological** i
 Select a task, model call, or tool-call group to read its saved input and output. Tools requested
 together share one chronological item. Expand each tool to read its input, execution result,
 errors, and recovery evidence. The next model request shows the exact prepared tool replies.
-Model calls show complete effective messages and response content, including
-commentary, exposed reasoning, and tool requests. The task's system prompt is labeled as the
-first saved model request after Hooks. Call details and source events remain available.
+Task details show the system prompt first, then the user messages. The prompt is labeled as the
+first saved model request after Hooks. Model calls start with **New content**: exact repeated
+messages collapse in place under **Already sent**, with their original positions. Open a range
+to inspect it, or select **Full request** to show all messages. Changed messages stay visible in
+full, including changes to metadata and native continuation. Response content shows commentary,
+exposed reasoning, and tool requests. Call details, options, and source events remain available.
+All disclosures share one indentation rule. Expanded content starts under its heading text, with
+a guide line for nested levels. The smaller mobile indent keeps deep source data readable.
 
 RunView supplies the full accepted chronology. RunState shows only retained recovery evidence;
 its chronology can be empty after completion. Its Messages view still shows retained context.
@@ -115,8 +120,8 @@ A server restart clears both the simulated services and the byte store.
 Try this sequence:
 
 1. Choose a scenario, select its starter task, then send the task.
-2. Follow the assistant's commentary. Expand the lookup to read its input and result. Expand
-   reasoning when the provider makes it available. The chat shows one accepted answer.
+2. Follow the streamed commentary and exposed reasoning. Open **Ran tools**, then open a tool to
+   read its input and result. The final answer stays separate from this progress text.
 3. Ask: "What did I first ask you to do, and what did the earlier lookup find?"
 4. Open the right inspector. Use both replay sources under **Recovery controls**. The saved answer
    remains unchanged. Inspect Events, RunView, and RunState without running the agent.
@@ -131,7 +136,14 @@ candidate only after Accepted delivery of its processed answer. The archive reta
 A provider's native continuation data stays available in the inspector. It is not readable
 reasoning.
 
-The chat has user messages, assistant replies, commentary, expandable reasoning, and tool cards.
+The conversation uses a flat text layout. Commentary and exposed reasoning stream as visible text.
+Consecutive tool calls share a collapsed **Ran tools** group. Each tool has its own toggle for
+input, result, and event inspection. The header is fixed; no model call generates a summary.
+Open groups and tool details keep their state and keyboard focus as results arrive and previews
+become accepted data. Text messages divide groups, so progress remains in its original order.
+This display grouping does not claim that tools ran in parallel. The inspector groups tools by
+their saved request relationships. Final answers keep their separate identity and actions.
+
 Enter sends a message. Shift+Enter adds a line. You can prepare the next message during execution.
 The conversation follows new output until you scroll up. **Latest message** returns to new output.
 On small screens, **Inspector** opens the same technical view as a side panel.
@@ -173,9 +185,8 @@ is a serialized size, not a Go heap measurement. Reformatting a RunStateSnapshot
 digest. The recovered JSON has separate Copy and Download controls.
 The JSON tree expands on demand and pages large containers. These controls inspect data; they do not
 execute models, tools, or custom restore callbacks. See the
-[codec size review](../../development/reports/run-state-codec-size.md) for measured overhead and
-draft
-size-reduction options. The example uses the current codec without compression changes.
+[codec size review](../../development/reports/run-state-codec-size.md) for measurements of the
+implemented type tables, layouts, and shared values. The codec uses no compression.
 
 ## Interface flow
 
@@ -190,7 +201,7 @@ size-reduction options. The example uses the current codec without compression c
 | [http.go](http.go) | HTTP actions and server-sent events |
 | [inspect.go](inspect.go) | Read-only archive and RunStateSnapshot inspection |
 | [web/state.js](web/state.js) | Accepted/live reconciliation and complete-message replacement |
-| [web/chat.js](web/chat.js) | Chat messages, reasoning, tool cards, and accepted answer display |
+| [web/chat.js](web/chat.js) | Visible progress text, nested tool toggles, and accepted answers |
 | [web/inspector.js](web/inspector.js) | Event delivery records and saved data inspection |
 | [web/resize.js](web/resize.js) | Pointer and keyboard control of inspector width |
 | [web/request.js](web/request.js) | Expected missing-run responses and HTTP failures |
@@ -261,6 +272,7 @@ node tests/browser.mjs
 
 The browser script uses `/opt/google/chrome/chrome` by default. Set CHROME_PATH for another Chromium
 binary. It verifies both scenarios, shared starter tasks, structured tool results, streaming,
+grouped tools with keyboard toggles and focus retention, separate progress and final answers,
 later turns, refresh, both replay paths, original
 response inspection, event pagination, encoded and recovered JSON downloads, byte sizes, panel
 resizing, missing-run redirection with a retained draft,
@@ -285,11 +297,11 @@ copy this application into the root module or embed its assets in a library pack
 Verify the real module payload from current source without staging or committing:
 
 ```sh
-go run ./releasecheck -root ../.. -out /tmp/gent-module.zip
+go -C ../../scripts run ./releasecheck -root .. -out /tmp/gent-module.zip
 ```
 
 The verifier supplies tracked and non-ignored source files, including this example, to Go's module
-ZIP writer. It opens the produced ZIP and rejects any example application files, node_modules, or
-.env credentials. This checks the payload, not only whether normal package builds exclude it.
+ZIP writer. It checks the produced ZIP and Git source archive. It rejects all docs and examples,
+node_modules, and .env credentials. This checks the payload, not only the package build list.
 
 Local fonts use the licenses included in [web/fonts](web/fonts).

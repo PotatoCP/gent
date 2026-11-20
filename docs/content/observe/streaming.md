@@ -1,6 +1,18 @@
 Use Live events for previews and accepted history as the durable basis. Keep provider reasoning,
 opaque native data, candidate answers, and accepted answers distinct.
 
+## Attach the UI subscriber
+
+`ui` is your implementation of `gent.Subscriber`, with OnEvent and OnStop methods. Use the
+[Subscribers example](/observe/subscribers/) for their signatures and delivery failure handling.
+Register it before creating or restoring the context:
+
+{{example:stream-runner}}
+
+Run tasks as in [Hello World](/start/hello-world/). In OnEvent, use the keys and
+payload check below before sending a display update. Return send errors. OnStop should report the
+stopped delivery cursor so the application can reconnect from accepted history.
+
 ## Identify delivery
 
 {{example:stream-keys}}

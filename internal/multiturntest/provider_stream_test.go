@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/auth"
 	"fmt"
@@ -234,9 +235,16 @@ func TestProvidersStreamingAndContinuation(t *testing.T) {
 				assert.Equal(t, answerParts, choice.Parts)
 				assert.Equal(t, &gent.ContentSource{MessageIds: sourceIds}, choice.CandidateSource)
 				info := *response.Info
+				assert.GreaterOrEqual(t, info.TimeToFirstContent, time.Nanosecond)
+				assert.GreaterOrEqual(t, info.Duration, info.TimeToFirstContent)
 				info.Duration, info.RawGenerationInfo = 0, nil
-				assert.Equal(t, gent.GenerationInfo{InputTokens: 13, OutputTokens: 8, TotalTokens: 21,
-					CachedInputTokens: 2, ReasoningTokens: test.expected.reasoningTokens}, info)
+				info.TimeToFirstContent = 0
+				wantInfo := gent.GenerationInfo{InputTokens: 13, OutputTokens: 8, TotalTokens: 21,
+					CachedInputTokens: 2, ReasoningTokens: test.expected.reasoningTokens}
+				if test.input.provider == "anthropic" {
+					wantInfo.ProviderResponseId = "msg-7"
+				}
+				assert.Equal(t, wantInfo, info)
 				if !assert.Len(t, requests, 2) {
 					return
 				}

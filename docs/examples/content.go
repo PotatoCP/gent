@@ -1,6 +1,9 @@
 package examples
 
-import "github.com/rickchristie/gent"
+import (
+	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/executor"
+)
 
 func mediaParts(png, pdf, audio, video []byte) ([]gent.ContentPart, error) {
 	// docs:start content-parts
@@ -44,4 +47,30 @@ func cachedPart() gent.ContentPart {
 	// Cache controls are provider-specific hints. They do not guarantee a cache hit.
 	// docs:end content-cache
 	return part
+}
+
+func cachedTask(part gent.ContentPart) *gent.Task {
+	// docs:start content-cache-task
+	task := &gent.Task{
+		Instructions: []*gent.ModelMessage{{
+			Role: gent.ChatMessageTypeSystem, Parts: []gent.ContentPart{part},
+		}},
+		Messages: gent.NewTask(gent.TextPart("Explain the account rules.")).Messages,
+	}
+	// Put stable instructions before changing user input. Submit task with NewTurn.
+	// docs:end content-cache-task
+	return task
+}
+
+func submitParts(runner *executor.Runner[string], execCtx *gent.ExecutionContext,
+	parts []gent.ContentPart,
+) (string, *gent.ExecutionResult, error) {
+	// docs:start content-submit
+	task := gent.NewTask(parts...)
+	answer, result, err := runner.NewTurn(execCtx, task)
+	if err != nil {
+		return "", nil, err
+	}
+	return answer, result, nil
+	// docs:end content-submit
 }

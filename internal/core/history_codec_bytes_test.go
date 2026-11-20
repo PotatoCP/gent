@@ -42,7 +42,7 @@ func TestCodecBinaryRepresentation(t *testing.T) {
 			if !assert.NoError(t, err) {
 				return
 			}
-			assert.Equal(t, tt.expected.wire, string(wire))
+			assert.Equal(t, tt.expected.wire, string(expandTestDocument(t, registry, wire)))
 			var actual any
 			assert.NoError(t, registry.Unmarshal(wire, &actual))
 			assert.Equal(t, tt.expected.value, actual)
@@ -171,18 +171,19 @@ func TestCodecBinaryDecodeValidation(t *testing.T) {
 
 func TestCodecBinaryLimits(t *testing.T) {
 	registry := NewCodecRegistry(WithCodecLimits(CodecLimits{
-		MaxBinaryBytes: 3, MaxEncodedBytes: 64,
+		MaxBinaryBytes: 3, MaxEncodedBytes: 256,
 	}))
 	wire, err := registry.Marshal([]byte{0, 1, 255})
 	assert.NoError(t, err)
-	assert.Equal(t, `{"type":"bytes","version":1,"data":"AAH/"}`, string(wire))
+	assert.Equal(t, `{"type":"bytes","version":1,"data":"AAH/"}`,
+		string(expandTestDocument(t, registry, wire)))
 	_, err = registry.Encode([]byte{0, 1, 2, 255})
 	assert.EqualError(t, err, "gent: binary value exceeds 3 bytes")
-	_, err = registry.Marshal(string(bytes.Repeat([]byte{'a'}, 65)))
-	assert.EqualError(t, err, "gent: encoded value exceeds 64 bytes")
+	_, err = registry.Marshal(string(bytes.Repeat([]byte{'a'}, 257)))
+	assert.EqualError(t, err, "gent: encoded value exceeds 256 bytes")
 	var value []byte
-	err = registry.Unmarshal(bytes.Repeat([]byte{' '}, 65), &value)
-	assert.EqualError(t, err, "gent: encoded value exceeds 64 bytes")
+	err = registry.Unmarshal(bytes.Repeat([]byte{' '}, 257), &value)
+	assert.EqualError(t, err, "gent: encoded value exceeds 256 bytes")
 	assert.Nil(t, value)
 }
 

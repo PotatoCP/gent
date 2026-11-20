@@ -75,6 +75,19 @@ func taskExamples() []*gent.Task {
 	return []*gent.Task{task, withInstructions, keep, clear}
 }
 
+func submitTask(runner *executor.Runner[string], execCtx *gent.ExecutionContext, task *gent.Task) (
+	string, *gent.ExecutionResult, error,
+) {
+	// docs:start task-submit
+	answer, result, err := runner.NewTurn(execCtx, task)
+	if err != nil {
+		return "", nil, err
+	}
+	// Check result.Status before treating answer as a completed result.
+	return answer, result, nil
+	// docs:end task-submit
+}
+
 func conversation(ctx context.Context, model gent.Model) ([]string, error) {
 	runner := executor.NewRunner(react.NewAgent(model), &gent.Config{})
 	execCtx, err := runner.NewExecutionContext(ctx, "conversation")

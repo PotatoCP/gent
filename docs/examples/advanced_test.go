@@ -119,11 +119,19 @@ func TestAdvancedExamples(t *testing.T) {
 	for _, engine := range []gent.ToolSearcher{
 		semanticTools(fixtureEmbedder{}), hybridTools(fixtureEmbedder{}),
 	} {
-		assert.NoError(t, engine.IndexAll([]gent.IndexableTool{tool.(gent.IndexableTool)}))
-		result, err := engine.Search(context.Background(), "order")
-		assert.NoError(t, err)
-		assert.Equal(t, &gent.ToolSearchResult{Status: gent.ToolExecuted,
-			Names: []string{"lookup_order"}}, result)
+		chain, err := searchWithEngine(tool, engine)
+		if !assert.NoError(t, err) {
+			return
+		}
+		runCheck(t, &gent.Config{ToolChain: chain}, func(execCtx *gent.ExecutionContext) error {
+			result, err := chain.Search(execCtx, &gent.ToolSearchRequest{
+				QueryType: engine.Id(), Query: "order",
+			})
+			assert.NoError(t, err)
+			assert.Equal(t, &gent.ToolSearchResult{Status: gent.ToolExecuted,
+				Names: []string{"lookup_order"}, Instructions: "Page 1; 1 matching tools."}, result)
+			return nil
+		})
 	}
 	chain := toolchain.NewSearch(toolchain.SearchHintDomainCategories).
 		RegisterEngine(toolchain.NewRegexToolSearcher())

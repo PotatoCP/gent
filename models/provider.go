@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/rickchristie/gent"
 )
@@ -39,9 +40,61 @@ func providerConfig(config *Config, defaultURL string) Config {
 // all stream events. Binary output gets a separate decoded-byte bound before allocation.
 const maxProviderBytes = 64 << 20
 
-type providerReader func(context.Context, *http.Response, *gent.StreamWithDuration) (
+type providerReader func(context.Context, *http.Response, *providerStream) (
 	*gent.ModelCallResponse, error,
 )
+
+// The provider's one producer owns these measurements. Observe content before callbacks or
+// bounded delivery can block. Native tool/media events count even without a readable text delta.
+type providerStream struct {
+	*gent.StreamWithDuration
+	firstContent time.Duration
+}
+
+func (stream *providerStream) observeContent() {
+	if stream.firstContent == 0 {
+		stream.firstContent = stream.Duration()
+	}
+}
+
+func (stream *providerStream) observeResponse(response *gent.ModelCallResponse) {
+	if stream.firstContent != 0 {
+		return
+	}
+	for _, choice := range response.Choices {
+		if hasModelContent(choice.Parts) || choice.Completion.Refusal != nil &&
+			hasModelContent(choice.Completion.Refusal.Content) {
+			stream.observeContent()
+			return
+		}
+	}
+}
+
+func hasModelContent(parts []gent.ContentPart) bool {
+	for _, part := range parts {
+		switch part := partValue(part).(type) {
+		case *gent.AssistantContent:
+			if hasModelContent(part.Content) {
+				return true
+			}
+		case gent.TextContent:
+			if part.Text != "" {
+				return true
+			}
+		case gent.BinaryContent:
+			if len(part.Data) > 0 {
+				return true
+			}
+		case gent.ImageURLContent:
+			if part.URL != "" {
+				return true
+			}
+		case gent.ModelToolCallRequest:
+			return true
+		}
+	}
+	return false
+}
 
 func startProviderStream(base context.Context, client *http.Client, url string,
 	headers http.Header, body any, read providerReader, steering ...gent.SteeringMessages,
@@ -58,11 +111,12 @@ func startProviderStream(base context.Context, client *http.Client, url string,
 	}
 	request.Header = headers.Clone()
 	request.Header.Set("Content-Type", "application/json")
-	stream, err := gent.NewBoundedStreamWithDuration(ctx, 64, cancel)
+	buffer, err := gent.NewBoundedStreamWithDuration(ctx, 64, cancel)
 	if err != nil {
 		cancel()
 		return nil, err
 	}
+	stream := &providerStream{StreamWithDuration: buffer}
 	go func() {
 		defer cancel()
 		var response *http.Response
@@ -76,6 +130,9 @@ func startProviderStream(base context.Context, client *http.Client, url string,
 			err = checkHTTPResponse(response)
 			if err == nil {
 				result, err = read(ctx, response, stream)
+				if result != nil {
+					stream.observeResponse(result)
+				}
 				break
 			}
 			if attempt != 0 || len(steering) == 0 {
@@ -101,6 +158,11 @@ func startProviderStream(base context.Context, client *http.Client, url string,
 		closeErr := response.Body.Close()
 		if result != nil {
 			result.Info.Duration = stream.Duration()
+			result.Info.TimeToFirstContent = stream.firstContent
+			result.Info.ProviderRequestId = response.Header.Get("X-Request-Id")
+			if result.Info.ProviderRequestId == "" {
+				result.Info.ProviderRequestId = response.Header.Get("Request-Id")
+			}
 		}
 		stream.Complete(result, errors.Join(err, closeErr))
 	}()
@@ -196,12 +258,13 @@ func readSSE(reader io.Reader, consume func([]byte) (bool, error)) error {
 	return errors.New("model stream ended without a terminal event")
 }
 
-func sendProviderText(ctx context.Context, stream *gent.StreamWithDuration,
+func sendProviderText(ctx context.Context, stream *providerStream,
 	options *gent.CallOptions, kind gent.AssistantContentType, id, value string,
 ) error {
 	if value == "" {
 		return nil
 	}
+	stream.observeContent()
 	if kind == gent.AssistantContentReasoning && options.StreamingReasoningFunc != nil {
 		if err := options.StreamingReasoningFunc(ctx, []byte(value), nil); err != nil {
 			return err
@@ -223,9 +286,10 @@ func sendProviderText(ctx context.Context, stream *gent.StreamWithDuration,
 
 // A server can return one JSON body even when streaming was requested. Deliver the same
 // provisional metadata and callbacks in that case; only the agent can accept output.
-func previewProviderResponse(ctx context.Context, stream *gent.StreamWithDuration,
+func previewProviderResponse(ctx context.Context, stream *providerStream,
 	options *gent.CallOptions, response *gent.ModelCallResponse,
 ) (*gent.ModelCallResponse, error) {
+	stream.observeResponse(response)
 	for _, choice := range response.Choices {
 		for _, part := range choice.Parts {
 			meta, ok := part.(*gent.AssistantContent)

@@ -100,49 +100,58 @@ func (choice *ContentChoice) ToolCalls() []*ModelToolCallRequest {
 	return calls
 }
 
-// GenerationInfo contains metadata about the generation including normalized token counts.
+// GenerationInfo contains response metadata and normalized token counts. Counts use plain values:
+// zero can mean a reported zero or an unavailable count. Empty strings mean not reported. These
+// fields do not prove billing or a cache miss. Accepted model evidence preserves them on replay.
 type GenerationInfo struct {
-	// InputTokens is the number of input/prompt tokens used.
-	// This is normalized across providers:
-	//   - OpenAI: PromptTokens
-	//   - Anthropic: InputTokens
-	//   - Google: input_tokens / PromptTokens
-	//   - Ollama: PromptTokens
-	//   - Bedrock: input_tokens
+	// InputTokens is the normalized input count, including cached input. For Anthropic, it
+	// includes ordinary input, cache reads, and cache writes. Do not add those counts again.
 	InputTokens int
 
-	// OutputTokens is the number of output/completion tokens generated.
-	// This is normalized across providers:
-	//   - OpenAI: CompletionTokens
-	//   - Anthropic: OutputTokens
-	//   - Google: output_tokens / CompletionTokens
-	//   - Ollama: CompletionTokens
-	//   - Bedrock: output_tokens
+	// OutputTokens is the normalized output count. It can include reasoning tokens.
 	OutputTokens int
 
 	// TotalTokens is the total token count (InputTokens + OutputTokens).
 	// Some providers return this directly; otherwise it's computed.
 	TotalTokens int
 
-	// CachedInputTokens is the number of input tokens served from cache.
-	// This is normalized across providers:
-	//   - OpenAI: PromptCachedTokens
-	//   - Anthropic: CacheReadInputTokens
-	//   - Google: CachedTokens / CacheReadInputTokens
+	// CachedInputTokens is the number of input tokens read from cache.
 	CachedInputTokens int
 
-	// ReasoningTokens is the number of tokens used for reasoning/thinking.
-	// This is normalized across providers:
-	//   - OpenAI: ReasoningTokens / CompletionReasoningTokens
-	//   - Anthropic: (extracted from ThinkingTokens if available)
+	// CacheWriteInputTokens is the number of input tokens written to cache, when reported.
+	// It is separate from cache reads. Uncached input does not imply a cache write.
+	CacheWriteInputTokens int
+
+	// ReasoningTokens is the reported reasoning count. It is not an extra output charge.
 	ReasoningTokens int
 
-	// RawGenerationInfo contains the original provider-specific GenerationInfo map.
-	// Use this to access provider-specific fields not covered by the normalized fields.
+	// ProviderRequestId identifies the returned HTTP response for provider support. It is
+	// not Gent's ModelCallId or a record of all requests made during an adapter retry.
+	ProviderRequestId string
+
+	// ProviderResponseId is the response or message ID supplied by the provider.
+	ProviderResponseId string
+
+	// ResponseModel is the returned model name/version. The requested alias is not a fallback.
+	ResponseModel string
+
+	// ResponseServiceTier is the returned processing tier. The requested tier is not a fallback.
+	ResponseServiceTier string
+
+	// RawGenerationInfo contains selected provider fields and Gent diagnostics, such as the
+	// output-schema decision. It is not a complete copy of the provider response or usage.
 	RawGenerationInfo map[string]any
 
-	// Duration is how long the generation took.
+	// Duration is local adapter elapsed time through response assembly and cleanup. Zero means
+	// not measured. This is not provider compute time or the managed AfterModelCallEvent duration.
 	Duration time.Duration
+
+	// TimeToFirstContent is local elapsed time from the same start as Duration until the adapter
+	// first observes text, exposed reasoning, tool-call content, or media. Measurement precedes
+	// callbacks and blocked delivery; heartbeats and status-only events do not count. Zero means
+	// not measured or no content observed. A non-streamed response is measured after parsing, so
+	// this is not time to first token. Replayed results retain their original measurements.
+	TimeToFirstContent time.Duration
 }
 
 // ModelCallRequest captures the debuggable and mutable parts of a model request.

@@ -41,7 +41,7 @@ func (m *Ollama) GenerateContentStream(ctx context.Context,
 	}
 	return startProviderStream(ctx, m.config.HTTPClient, m.config.BaseURL+"/api/chat",
 		headers, body, func(ctx context.Context, response *http.Response,
-			stream *gent.StreamWithDuration,
+			stream *providerStream,
 		) (*gent.ModelCallResponse, error) {
 			result, err := readOllama(ctx, response, stream, &request.Options)
 			recordSchema(result, decision)
@@ -225,6 +225,7 @@ func ollamaMessages(messages []*gent.ModelMessage) ([]any, error) {
 }
 
 type ollamaEnvelope struct {
+	Model   string        `json:"model"`
 	Message ollamaMessage `json:"message"`
 	Done    bool          `json:"done"`
 	Reason  string        `json:"done_reason"`
@@ -252,7 +253,7 @@ func (message *ollamaMessage) UnmarshalJSON(data []byte) error {
 }
 
 func readOllama(ctx context.Context, response *http.Response,
-	stream *gent.StreamWithDuration, options *gent.CallOptions,
+	stream *providerStream, options *gent.CallOptions,
 ) (*gent.ModelCallResponse, error) {
 	if !strings.Contains(response.Header.Get("Content-Type"), "ndjson") {
 		var envelope ollamaEnvelope
@@ -275,6 +276,7 @@ func readOllama(ctx context.Context, response *http.Response,
 	scanner.Buffer(make([]byte, 64<<10), maxProviderBytes)
 	var text, thinking strings.Builder
 	var calls []json.RawMessage
+	var model string
 	fields := make(map[string]json.RawMessage)
 	size := 0
 	for scanner.Scan() {
@@ -292,6 +294,12 @@ func readOllama(ctx context.Context, response *http.Response,
 		}
 		if event.Error != "" {
 			return nil, errors.New(event.Error)
+		}
+		if event.Model != "" {
+			model = event.Model
+		}
+		if len(event.Message.Calls) > 0 {
+			stream.observeContent()
 		}
 		var delta map[string]json.RawMessage
 		if err := json.Unmarshal(event.Message.raw, &delta); err != nil {
@@ -312,6 +320,7 @@ func readOllama(ctx context.Context, response *http.Response,
 			return nil, err
 		}
 		if event.Done {
+			event.Model = model
 			event.Message.Content, event.Message.Thinking = text.String(), thinking.String()
 			event.Message.Calls = calls
 			// Replay native fields as received. Only streamed strings and calls need assembly.
@@ -395,5 +404,6 @@ func convertOllama(response *ollamaEnvelope) (*gent.ModelCallResponse, error) {
 	return &gent.ModelCallResponse{Choices: []*gent.ContentChoice{choice}, Info: &gent.GenerationInfo{
 		InputTokens: response.Input, OutputTokens: response.Output,
 		TotalTokens: response.Input + response.Output, CachedInputTokens: response.Cached,
+		ResponseModel: response.Model,
 	}}, nil
 }

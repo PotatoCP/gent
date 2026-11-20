@@ -114,3 +114,26 @@ test('RunState shows only retained evidence and preserves uint64 order', () => {
   [{kind: 'model-step', sequence: '18446744073709551613',
     paths: ['/Evidence/1', '/Evidence/0'], response}]);
 });
+
+test('requests follow saved sequence within one context across turns and attempts', () => {
+  const input = [
+    event(10, 'model_call_started', {Request: request('Next turn')},
+      {modelCallId: 'model:4', turnId: 'next-turn'}),
+    event(6, 'model_call_started', {}, {modelCallId: 'missing-request'}),
+    event(7, 'model_call_finished', {Request: request('Restored')},
+      {modelCallId: 'model:3', attemptId: 'restored'}),
+    event(5, 'model_call_started', {Request: request('Other context')},
+      {modelCallId: 'model:2', contextId: 'other'}),
+    event(3, 'model_call_started', {Request: request('First')}, modelIds),
+  ];
+  const data = readRunData({kind: 'view', json: JSON.stringify({runId: 'run',
+    history: {revision: 1}, activity: input})});
+  assert.deepEqual(data.chronology.map(row => ({sequence: row.order,
+    previous: row.previousRequest ?? null})), [
+    {sequence: 3, previous: null},
+    {sequence: 5, previous: null},
+    {sequence: 6, previous: null},
+    {sequence: 7, previous: {order: 3, request: request('First')}},
+    {sequence: 10, previous: {order: 7, request: request('Restored')}},
+  ]);
+});

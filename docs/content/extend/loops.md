@@ -10,6 +10,13 @@ This loop needs no model or tool call:
 Process a complete candidate before AcceptOutput. A rejection needs useful correction content; your
 loop decides how to use it on the next call. Unexpected errors propagate to the application.
 
+## Give the custom loop to the Runner
+
+{{example:loop-runner}}
+
+Use the same NewExecutionContext and NewTurn calls as [Hello World](/start/hello-world/). This loop
+returns `Ready.` through normal output acceptance and persistence.
+
 ## Add history
 
 Within Next, propose an appended entry and a complete active selection:

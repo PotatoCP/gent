@@ -90,7 +90,7 @@ function render() {
   }
   byId('scenario').disabled = submitting || Boolean(state.runId);
   byId('suggestion').disabled = !scenario || submitting;
-  chat.render(chatMessages(state), state.active, provider);
+  chat.render(chatMessages(state), state.active);
   inspector.update(state);
   byId('head').textContent = String(state.head);
   byId('batches').textContent = `${state.batchCount}${state.head > archiveHead ? '+' : ''}`;

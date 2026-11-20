@@ -10,7 +10,7 @@ This test runs a real Runner and checks the complete result:
 From the repository root:
 
 ```bash
-go test ./docs/examples/... -count=1 -timeout 300s
+go -C docs test ./examples/... -count=1 -timeout 300s
 ```
 
 The checks execute the teaching code, including model request fixtures, tools, output validation,

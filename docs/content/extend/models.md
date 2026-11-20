@@ -17,6 +17,7 @@ label a model candidate as an accepted final answer.
 
 ## Complete a producer
 
+Use this producer pattern inside GenerateContentStream instead of returning NewCompletedStream.
 This small producer returns a completed response. A real adapter can send chunks before completion.
 
 {{example:custom-model-stream}}
@@ -24,3 +25,10 @@ This small producer returns a completed response. A real adapter can send chunks
 Response waits for producer completion. Complete must run after cleanup, including cancellation. Use
 stable chunk payloads before reusing producer buffers. Do not leave an unjoined goroutine or an
 unread response body behind when the caller closes the stream.
+
+## Use the model in an agent
+
+{{example:custom-model-runner}}
+
+Create an execution context and call NewTurn as shown in [Hello World](/start/hello-world/). ReAct
+uses the adapter through the managed model path and accepts `Ready.` through its output contract.

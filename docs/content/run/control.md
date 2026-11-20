@@ -24,6 +24,10 @@ stale commands before they can affect a later task.
 
 {{example:control-cancel}}
 
+Use that `ctx` when creating the context. Here `runner` and `task` are already configured:
+
+{{example:control-timeout-use}}
+
 Call `cancel` when the owner is done. Go context cancellation interrupts execution. `Release`
 disposes of the handle and joins workers; it does not complete an unfinished task or make a terminal
 save. Do not call Release synchronously from a callback that it must join. A callback can use Stop.

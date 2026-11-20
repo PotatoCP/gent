@@ -44,8 +44,10 @@ func (decoder *valueDecoder) value(value EncodedValue, depth int) (any, error) {
 }
 
 func (decoder *valueDecoder) decodedValue(value decodingValue, depth int) (any, error) {
-	if err := decoder.checkEncodedSize(len(value.Data.bytes())); err != nil {
-		return nil, err
+	if value.Data.table == nil {
+		if err := decoder.checkEncodedSize(len(value.Data.bytes())); err != nil {
+			return nil, err
+		}
 	}
 	decoded, err := decoder.decode(value, depth)
 	if err != nil {
