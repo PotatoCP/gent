@@ -23,10 +23,12 @@ const (
 // missing nested binding remains an explicit replay result. Registry use remains concurrent.
 type valueEncoder struct {
 	*CodecRegistry
-	status   valueEncodeStatus
-	visiting map[any]bool
-	strings  map[string]json.RawMessage
-	buffers  map[string]json.RawMessage
+	status       valueEncodeStatus
+	visiting     map[any]bool
+	strings      map[string]json.RawMessage
+	buffers      map[string]json.RawMessage
+	typeNames    map[reflect.Type]string
+	declarations map[reflect.Type]string
 }
 
 type savedValueEncoder interface {

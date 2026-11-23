@@ -35,6 +35,7 @@ type registeredValue struct {
 	version int
 	typ     reflect.Type
 	codec   ValueCodec
+	shape   *codecShape
 }
 
 // CodecRegistry binds wire names to concrete types. Register custom types before starting a run;
@@ -196,6 +197,9 @@ func cloneOwned[T any](registry *CodecRegistry, value T) (T, error) {
 }
 
 func (r *CodecRegistry) add(value registeredValue) {
+	if value.codec == nil {
+		value.shape = newCodecShape(value.typ)
+	}
 	r.byType[value.typ] = value
 	r.byId[value.id] = value
 }
@@ -458,31 +462,30 @@ func (r *valueEncoder) encodeExpected(
 			r.status = valueEncodeIncompatible
 			return encodingValue{}, fmt.Errorf("gent: no codec for %s", v.Type())
 		}
-		fields := map[string]encodingValue{}
-		for i := 0; i < v.NumField(); i++ {
-			field := v.Type().Field(i)
-			if field.PkgPath != "" {
+		fields := make(map[string]encodingValue, registration.shape.valueCount)
+		for i, field := range registration.shape.fields {
+			if field.private {
 				return encodingValue{}, fmt.Errorf(
 					"gent: unexported field %s.%s",
 					v.Type(),
-					field.Name,
+					field.name,
 				)
 			}
-			if field.Type.Kind() == reflect.Func && field.Tag.Get("json") == "-" {
+			if field.callback {
 				if !v.Field(i).IsNil() {
 					return encodingValue{}, fmt.Errorf(
 						"gent: callback %s is not serializable",
-						field.Name,
+						field.name,
 					)
 				}
 				continue
 			}
-			value, err := r.encodeExpected(v.Field(i), depth+1, field.Type)
+			value, err := r.encodeExpected(v.Field(i), depth+1, field.typ)
 			if err != nil {
-				return encodingValue{}, fmt.Errorf("%s.%s: %w", v.Type(), field.Name, err)
+				return encodingValue{}, fmt.Errorf("%s.%s: %w", v.Type(), field.name, err)
 			}
-			value.DeclaredType = r.declaredFieldType(field.Type)
-			fields[field.Name] = value
+			value.DeclaredType = r.declaredFieldType(field.typ)
+			fields[field.name] = value
 		}
 		return encodingValue{Type: registration.id, Version: registration.version, Data: fields}, nil
 	case reflect.Float32, reflect.Float64:
@@ -496,10 +499,10 @@ func (r *valueEncoder) encodeExpected(
 			r.status = valueEncodeIncompatible
 			return encodingValue{}, fmt.Errorf("gent: no codec for %s", v.Type())
 		}
-		// Large built-in strings recur in effective requests and archive projections. Their
-		// JSON is immutable, so one per-call buffer avoids encoding the same text repeatedly.
+		// IDs, empty fields, and text recur within a document. Reuse their immutable JSON only
+		// within this call. Bound the cache so a long stream of unique text has a fixed overhead.
 		// Named values and application codecs keep their own encoding behavior.
-		if v.Type() == reflect.TypeFor[string]() && v.Len() >= 256 {
+		if v.Type() == reflect.TypeFor[string]() {
 			text := v.String()
 			if data, ok := r.strings[text]; ok {
 				return encodingValue{Type: registration.id, Version: registration.version, Data: data}, nil
@@ -511,10 +514,12 @@ func (r *valueEncoder) encodeExpected(
 			if err != nil {
 				return encodingValue{}, err
 			}
-			if r.strings == nil {
-				r.strings = make(map[string]json.RawMessage)
+			if len(r.strings) < 256 {
+				if r.strings == nil {
+					r.strings = make(map[string]json.RawMessage)
+				}
+				r.strings[text] = value.Data.(json.RawMessage)
 			}
-			r.strings[text] = value.Data.(json.RawMessage)
 			value.Version = registration.version
 			return value, nil
 		}
@@ -530,7 +535,7 @@ func (r *valueEncoder) encodeExpected(
 }
 
 func (r *CodecRegistry) typeName(t reflect.Type) (string, error) {
-	return newValueEncoder(r).typeName(t)
+	return newValueEncoder(r).typeNameAtDepth(t, 0)
 }
 
 // Bound type descriptions separately from value nesting. A nil container still needs a type,
@@ -539,7 +544,20 @@ func (r *CodecRegistry) typeName(t reflect.Type) (string, error) {
 const maxCodecTypeDepth = 100
 
 func (r *valueEncoder) typeName(t reflect.Type) (string, error) {
-	return r.typeNameAtDepth(t, 0)
+	if name, ok := r.typeNames[t]; ok {
+		return name, nil
+	}
+	// Cache only a complete, checked description. Recursive checks still start at the actual
+	// type depth, so a cached child cannot let an oversized parent bypass the depth bound.
+	name, err := r.typeNameAtDepth(t, 0)
+	if err != nil {
+		return "", err
+	}
+	if r.typeNames == nil {
+		r.typeNames = make(map[reflect.Type]string)
+	}
+	r.typeNames[t] = name
+	return name, nil
 }
 
 func (r *valueEncoder) typeNameAtDepth(t reflect.Type, depth int) (string, error) {
@@ -633,6 +651,9 @@ func (r *valueEncoder) encodeContainer(v reflect.Value, depth int) (encodingValu
 			return encodingValue{}, err
 		}
 		keys := mapKeyNormalizer{registry: r.CodecRegistry}
+		if v.Len() > 0 {
+			c.Items = make([]encodedMapItem[encodingValue], 0, min(v.Len(), codecInitialCapacity))
+		}
 		iter := v.MapRange()
 		for iter.Next() {
 			key, err := r.valueExpected(iter.Key().Interface(), depth+1, v.Type().Key())
@@ -662,6 +683,9 @@ func (r *valueEncoder) encodeContainer(v reflect.Value, depth int) (encodingValu
 	default:
 		if err := r.checkValueAllocation(v.Type().Elem(), v.Len()); err != nil {
 			return encodingValue{}, err
+		}
+		if v.Len() > 0 {
+			c.Values = make([]encodingValue, 0, min(v.Len(), codecInitialCapacity))
 		}
 		for i := 0; i < v.Len(); i++ {
 			item, err := r.encodeExpected(v.Index(i), depth+1, v.Type().Elem())

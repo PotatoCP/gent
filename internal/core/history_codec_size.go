@@ -28,8 +28,14 @@ func (registry *CodecRegistry) uncompressedSize(value any) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	size := len(`{"formatVersion":,"data":{"types":,"layouts":[],"shared":[],"root":},"digest":""}`)
-	size += len(strconv.Itoa(savedDocumentVersion)) + 64 + len(types)
+	size := documentEnvelopeSize(savedDocumentVersion) + builder.dataSize(root, len(types))
+	return size, registry.checkEncodedSize(size)
+}
+
+// Counting and storage use the same resolved layouts and shared IDs. This keeps queue limits
+// exact and lets storage allocate its output once instead of repeatedly copying a growing buffer.
+func (builder *tableBuilder) dataSize(root, typesSize int) int {
+	size := len(`{"types":,"layouts":[],"shared":[],"root":}`) + typesSize
 	for index, layout := range builder.layouts {
 		size += len(layout.wire)
 		if index > 0 {
@@ -49,7 +55,7 @@ func (registry *CodecRegistry) uncompressedSize(value any) (int, error) {
 		node.written = 5 + len(strconv.Itoa(node.shared))
 	}
 	size += builder.nodes[root].written
-	return size, registry.checkEncodedSize(size)
+	return size
 }
 
 func (builder *tableBuilder) nodeSize(node *tableBuildNode) int {

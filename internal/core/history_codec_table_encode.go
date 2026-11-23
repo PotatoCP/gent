@@ -70,6 +70,7 @@ type tableBuilder struct {
 	literalMemory map[tableLiteralMemory]int
 	nodes         []tableBuildNode
 	nodeIDs       map[uint64]int
+	indices       []int
 }
 
 // Reuse bounded scratch indexes across calls, never saved output or application values. Large
@@ -84,7 +85,8 @@ var tableNodeHashSeed = maphash.MakeSeed()
 
 func (builder *tableBuilder) release() {
 	if cap(builder.nodes) > 2048 || cap(builder.layouts) > 256 || cap(builder.types) > 256 ||
-		len(builder.schemas) > 256 || len(builder.literals) > 2048 || len(builder.literalMemory) > 2048 {
+		len(builder.schemas) > 256 || len(builder.literals) > 2048 || len(builder.literalMemory) > 2048 ||
+		cap(builder.indices) > 16384 {
 		return
 	}
 	// Clear every reference before pooling. In particular, literalMemory keys can otherwise
@@ -103,6 +105,7 @@ func (builder *tableBuilder) release() {
 	builder.layouts = builder.layouts[:0]
 	builder.nodes = builder.nodes[:0]
 	builder.measures = builder.measures[:0]
+	builder.indices = builder.indices[:0]
 	tableBuilders.Put(builder)
 }
 
@@ -122,11 +125,12 @@ func (encoder *valueEncoder) marshalDocument(value encodingValue) ([]byte, error
 func (builder *tableBuilder) document(root int) ([]byte, error) {
 	// Append already validated nodes directly. Passing these buffers through json.Marshal
 	// again would scan and copy the complete saved data at each outer envelope.
-	data := []byte(`{"types":`)
 	types, err := json.Marshal(builder.types)
 	if err != nil {
 		return nil, err
 	}
+	data := make([]byte, 0, builder.dataSize(root, len(types)))
+	data = append(data, `{"types":`...)
 	data = append(data, types...)
 	data = append(data, `,"layouts":[`...)
 	for i, layout := range builder.layouts {
@@ -151,7 +155,8 @@ func (builder *tableBuilder) document(root int) ([]byte, error) {
 	data = builder.appendValue(data, root, false)
 	data = append(data, '}')
 	version, data := builder.registry.compressDocument(data)
-	result := []byte(`{"formatVersion":`)
+	result := make([]byte, 0, documentEnvelopeSize(version)+len(data))
+	result = append(result, `{"formatVersion":`...)
 	result = strconv.AppendInt(result, int64(version), 10)
 	result = append(result, `,"data":`...)
 	result = append(result, data...)
@@ -218,6 +223,21 @@ func (builder *tableBuilder) object(id int, children []int, share bool) (int, er
 	return builder.intern(node), nil
 }
 
+// Nodes borrow integer ranges until this document is finished. Only these scratch indexes are
+// pooled; saved bytes and mutable application values never borrow this storage.
+func (builder *tableBuilder) reserveChildren(count int) []int {
+	start := len(builder.indices)
+	builder.indices = append(builder.indices, make([]int, count)...)
+	end := len(builder.indices)
+	return builder.indices[start:end:end]
+}
+
+func (builder *tableBuilder) copyChildren(values ...int) []int {
+	children := builder.reserveChildren(len(values))
+	copy(children, values)
+	return children
+}
+
 func (builder *tableBuilder) envelope(value encodingValue) (int, error) {
 	key := tableLayoutKey{kind: tableValueLayout, name: value.Type,
 		declared: value.DeclaredType, version: value.Version}
@@ -240,7 +260,7 @@ func (builder *tableBuilder) envelope(value encodingValue) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	return builder.object(id, []int{child}, true)
+	return builder.object(id, builder.copyChildren(child), true)
 }
 
 func (builder *tableBuilder) fields(name string, values map[string]encodingValue) (int, error) {
@@ -261,9 +281,9 @@ func (builder *tableBuilder) fields(name string, values map[string]encodingValue
 		return 0, err
 	}
 	fields := builder.layouts[id].fields
-	children := make([]int, len(fields))
+	children := builder.reserveChildren(len(fields))
 	for i, field := range fields {
-		children[i], err = builder.value(values[field.name])
+		children[i], err = builder.envelope(values[field.name])
 		if err != nil {
 			return 0, err
 		}
@@ -283,33 +303,11 @@ func (builder *tableBuilder) value(value any) (int, error) {
 	case savedStreamChunk:
 		return builder.chunk(value)
 	case []encodingValue:
-		values := make([]any, len(value))
-		for i := range value {
-			values[i] = value[i]
-		}
-		return builder.array(values)
+		return buildTableArray(builder, value, builder.envelope)
 	case encodedMapItem[encodingValue]:
-		id, err := builder.layout(tableLayoutKey{kind: tableMapItemLayout}, func() []tableBuildField {
-			return []tableBuildField{tableField("key"), tableField("value")}
-		})
-		if err != nil {
-			return 0, err
-		}
-		key, err := builder.value(value.Key)
-		if err != nil {
-			return 0, err
-		}
-		item, err := builder.value(value.Value)
-		if err != nil {
-			return 0, err
-		}
-		return builder.object(id, []int{key, item}, false)
+		return builder.mapItem(value)
 	case []encodedMapItem[encodingValue]:
-		values := make([]any, len(value))
-		for i := range value {
-			values[i] = value[i]
-		}
-		return builder.array(values)
+		return buildTableArray(builder, value, builder.mapItem)
 	case json.RawMessage:
 		return builder.literal(value)
 	default:
@@ -319,6 +317,25 @@ func (builder *tableBuilder) value(value any) (int, error) {
 		}
 		return builder.literal(data)
 	}
+}
+
+func (builder *tableBuilder) mapItem(value encodedMapItem[encodingValue]) (int, error) {
+	id, err := builder.layout(tableLayoutKey{kind: tableMapItemLayout}, func() []tableBuildField {
+		return []tableBuildField{tableField("key"), tableField("value")}
+	})
+	if err != nil {
+		return 0, err
+	}
+	key, err := builder.envelope(encodingValue{Type: value.Key.Type,
+		DeclaredType: value.Key.DeclaredType, Version: value.Key.Version, Data: value.Key.Data})
+	if err != nil {
+		return 0, err
+	}
+	item, err := builder.envelope(value.Value)
+	if err != nil {
+		return 0, err
+	}
+	return builder.object(id, builder.copyChildren(key, item), false)
 }
 
 func (builder *tableBuilder) container(value encodedContainer[encodingValue]) (int, error) {
@@ -422,11 +439,7 @@ func (builder *tableBuilder) literal(data json.RawMessage) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	indexed, err := indexSavedJSON(data)
-	if err != nil {
-		return 0, err
-	}
-	measure, err := builder.registry.measureLiteral(indexed, 0)
+	measure, err := builder.measureLiteral(data)
 	if err != nil {
 		return 0, err
 	}
@@ -440,11 +453,30 @@ func (builder *tableBuilder) literal(data json.RawMessage) (int, error) {
 	return id, nil
 }
 
-func (builder *tableBuilder) array(values []any) (int, error) {
+func (builder *tableBuilder) measureLiteral(data json.RawMessage) (tableMeasure, error) {
+	// json.Marshal has already validated and normalized this leaf. A scalar has no child
+	// values to index. Objects and arrays still need complete depth and expansion checks.
+	if data[0] != '{' && data[0] != '[' {
+		measure := tableMeasure{bytes: len(data), values: 1, depth: 1}
+		return measure, builder.registry.checkExpansion(measure)
+	}
+	indexed, err := indexSavedJSON(data)
+	if err != nil {
+		return tableMeasure{}, err
+	}
+	return builder.registry.measureLiteral(indexed, 0)
+}
+
+// Keep typed children typed until their table nodes are built. An intermediate []any would
+// allocate and box every envelope before the same traversal, including every stream event.
+func buildTableArray[T any](
+	builder *tableBuilder, values []T, encode func(T) (int, error),
+) (int, error) {
 	node := tableBuildNode{kind: tableArray, shared: -1, minimum: 4,
-		measure: tableMeasure{bytes: 2, values: 1, depth: 1}}
+		measure:  tableMeasure{bytes: 2, values: 1, depth: 1},
+		children: builder.reserveChildren(min(len(values), codecInitialCapacity))[:0]}
 	for i, value := range values {
-		child, err := builder.value(value)
+		child, err := encode(value)
 		if err != nil {
 			return 0, err
 		}

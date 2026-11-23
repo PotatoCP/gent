@@ -4,6 +4,12 @@ The owner requested this work on 2026-11-20. Keep all features and behavior whil
 SaveBatch bytes, delivery bytes, RunState and RunView costs, and the cost of running and restoring
 agent loops. The capacity target is thousands of concurrent business conversations on one t3.medium.
 
+This document records the initial local work. The [2026-11-23 host report][host] compares the
+reviewed baseline with the later encoding optimization, including 3,000 resident conversations
+and checked CPU quotas. Keep the two measurement baselines separate.
+
+[host]: reports/encoding-cost-20261123.md
+
 ## Constraints
 
 - Preserve complete accepted events, original prompts, tool results, native data, and custom state.

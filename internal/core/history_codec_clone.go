@@ -84,7 +84,7 @@ func (r *CodecRegistry) cloneValue(
 		if !registered {
 			return reflect.Value{}, false, nil
 		}
-		return r.cloneStruct(v, visiting, depth)
+		return r.cloneStruct(v, registration.shape.fields, visiting, depth)
 	case reflect.Pointer, reflect.Slice, reflect.Array, reflect.Map:
 		if v.Type().Name() != "" && !registered {
 			return reflect.Value{}, false, nil
@@ -102,7 +102,8 @@ func (r *CodecRegistry) cloneValue(
 		reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
 		// Scalar methods can change a value or reject it. Let the portable path handle the
 		// whole value, including containing-field diagnostics, before invoking these methods.
-		if scalarHasJSONMethods(v.Type()) {
+		if (registered && registration.shape.scalarMethods) ||
+			(!registered && scalarHasJSONMethods(v.Type())) {
 			return reflect.Value{}, false, nil
 		}
 		// json.Number also needs JSON syntax validation. Plain strings and numeric values are
@@ -121,15 +122,14 @@ func (r *CodecRegistry) cloneValue(
 }
 
 func (r *CodecRegistry) cloneStruct(
-	v reflect.Value, visiting map[any]bool, depth int,
+	v reflect.Value, fields []codecField, visiting map[any]bool, depth int,
 ) (reflect.Value, bool, error) {
 	result := reflect.New(v.Type()).Elem()
-	for i := range v.NumField() {
-		field := v.Type().Field(i)
-		if field.PkgPath != "" {
+	for i, field := range fields {
+		if field.private {
 			return reflect.Value{}, false, nil
 		}
-		if field.Type.Kind() == reflect.Func && field.Tag.Get("json") == "-" {
+		if field.callback {
 			if !v.Field(i).IsNil() {
 				return reflect.Value{}, false, nil
 			}
@@ -214,6 +214,13 @@ func (r *CodecRegistry) cloneMap(
 		return reflect.Value{}, false, nil
 	}
 	result := reflect.MakeMapWithSize(v.Type(), v.Len())
+	if v.Len() == 0 {
+		return result, true, nil
+	}
+	// Map insertion copies these assignment slots. The reachable mutable values are still
+	// cloned separately for each entry; reusing a slot does not share their owned storage.
+	key := reflect.New(v.Type().Key()).Elem()
+	value := reflect.New(v.Type().Elem()).Elem()
 	iter := v.MapRange()
 	for iter.Next() {
 		// Use the portable path's combined key check before returning a normalized map.
@@ -221,8 +228,6 @@ func (r *CodecRegistry) cloneMap(
 		if r.normalizedMapKey(iter.Key()) {
 			return reflect.Value{}, false, nil
 		}
-		key := reflect.New(v.Type().Key()).Elem()
-		value := reflect.New(v.Type().Elem()).Elem()
 		if ok, err := r.cloneInto(key, iter.Key(), visiting, depth+1); !ok || err != nil {
 			return reflect.Value{}, ok, err
 		}

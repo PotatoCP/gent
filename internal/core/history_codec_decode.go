@@ -337,6 +337,12 @@ func (r *valueDecoder) decodeContainer(value decodingValue, depth int,
 			return reflect.Value{}, err
 		}
 		result = reflect.MakeMapWithSize(typ, len(c.Items))
+		if len(c.Items) == 0 {
+			return result, nil
+		}
+		// SetMapIndex copies the assignment slots. Each decoded child still has independent
+		// mutable storage, including equal saved pointer keys and repeated shared wire values.
+		mapKey, mapValue := reflect.New(key).Elem(), reflect.New(element).Elem()
 		for _, item := range c.Items {
 			k, err := r.decodeExpected(item.Key, depth+1, key)
 			if err != nil {
@@ -346,7 +352,6 @@ func (r *valueDecoder) decodeContainer(value decodingValue, depth int,
 			if err != nil {
 				return reflect.Value{}, err
 			}
-			mapKey, mapValue := reflect.New(key).Elem(), reflect.New(element).Elem()
 			if err := setDecoded(mapKey, k); err != nil {
 				return reflect.Value{}, err
 			}

@@ -149,9 +149,22 @@ field diagnostics, and errors.Is with or without an encoded-byte limit that perm
 Explicit ValueCodec bindings keep precedence. Ordinary scalars keep direct copies. Frozen event
 data from Accepted/Live delivery and accepted archive data must contain the same logical value.
 
-Repeated long strings and binary buffers reuse their encoded leaves within that call. This avoids
-repeating JSON escaping or base64 conversion before the table builder compares equal typed values.
-These temporary buffers do not escape into decoded state.
+Repeated built-in strings and binary buffers reuse their encoded leaves within that call. A bounded
+string cache includes short IDs and empty fields as well as long text. This avoids repeated JSON
+escaping or base64 conversion before the table builder compares equal typed values. Named scalar
+methods and application codecs keep their own behavior. These buffers do not escape into decoded
+state.
+
+Reflection registrations keep immutable field and scalar-method descriptions. They contain no
+application values. Derived type names and field declarations are cached only within one encoding
+operation, after their normal checks. A later call can see newly registered application types.
+Typed table arrays avoid a temporary slice of boxed values. Initial container and child-index
+capacity is bounded before child validation. A large slice of invalid zero-size values must not
+allocate storage for every child before the first error. Valid larger values grow during traversal.
+Child indexes use bounded scratch storage; saved output never borrows it. Exact table sizing gives
+storage one output allocation and
+keeps event byte accounting equal to the uncompressed document. Scalar JSON leaves need no tree
+index after JSON marshaling has validated them; objects and arrays retain full expansion checks.
 
 Equal typed nodes share an internal identity after a hash lookup and an exact comparison. Hash
 equality alone is not sufficient. Wire sharing is selected only for a positive byte saving after
