@@ -108,9 +108,10 @@ func TestScenarioSelectionHTTP(t *testing.T) {
 	assert.NoError(t, json.Unmarshal(response.Body.Bytes(), &actual))
 	assert.Equal(t, "demo", actual.Provider)
 	assert.Equal(t, []scenarioInfo{
-		{scenarioAirline, "SkyWings Airlines", "Change a flight booking", airline.CustomerRequest},
+		{scenarioAirline, "SkyWings Airlines", "Change a flight booking", airline.CustomerRequest,
+			airline.InvestigationRequest},
 		{scenarioEcommerce, "TechGear Store", "Investigate a duplicate charge",
-			ecommerce.CustomerRequest},
+			ecommerce.CustomerRequest, ecommerce.InvestigationRequest},
 	}, actual.Scenarios)
 }
 

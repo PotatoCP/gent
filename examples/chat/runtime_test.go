@@ -292,6 +292,7 @@ func TestHTTPActionsAndStaleStop(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/api/action",
 				strings.NewReader(test.input.body))
 			response := httptest.NewRecorder()
+			request.Header.Set(serverHeader, app.serverId)
 			app.routes().ServeHTTP(response, request)
 			assert.Equal(t, test.expected, expected{response.Code, response.Body.String()})
 		})

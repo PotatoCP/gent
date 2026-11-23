@@ -62,10 +62,11 @@ func newStreamBufferWithClose(onClose func()) *streamBuffer {
 		chunks:       make(chan StreamChunk, 1), // Small buffer for efficiency
 		drainCancel:  make(chan struct{}),
 		drainDone:    make(chan struct{}),
-		queue:        make([]StreamChunk, 0, 64),
 		onClose:      onClose,
 		responseDone: make(chan struct{}),
 	}
+	// A provider can wait a long time before its first chunk. Allocate the queue on Send so
+	// each waiting provider and managed stream does not retain 64 unused chunk slots.
 	s.cond = sync.NewCond(&s.mu)
 
 	return s

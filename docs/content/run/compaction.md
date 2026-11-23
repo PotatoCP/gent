@@ -7,6 +7,9 @@ history from stored batches. System instructions stay outside compaction.
 
 The generic summarizer makes a normal LLM call. Recent and pinned non-user entries can remain in
 context. Native provider compaction is not part of this feature.
+The summarizer receives the current system prefix as read-only context. Text includes its role;
+structured data and media use attributed native attachments, including cache wrappers. The original
+prefix stays unchanged. Saved request evidence shows the content sent through the model adapter.
 
 ## Retain user input
 

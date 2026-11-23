@@ -12,7 +12,7 @@ import (
 
 const llmResponseTopic = "llm-response"
 
-// NewIntegrationTrace creates the trace configuration used by integration tests and the CLI.
+// NewIntegrationTrace creates the trace configuration used by integration tests.
 // Integration observability intentionally uses trace as the primary source so real scenarios
 // exercise the same event stream and snapshots that applications should consume.
 func NewIntegrationTrace(runID string) (*genttrace.Sequencer, error) {
@@ -27,7 +27,7 @@ func NewIntegrationTrace(runID string) (*genttrace.Sequencer, error) {
 	})
 }
 
-// StartTraceStreamOutput renders live trace events to the interactive integration output.
+// StartTraceStreamOutput renders live trace events to scenario test output.
 func StartTraceStreamOutput(seq *genttrace.Sequencer, w io.Writer) func() {
 	events, _ := seq.Subscribe()
 	done := make(chan struct{})

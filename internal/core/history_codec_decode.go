@@ -1,29 +1,22 @@
 package gent
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-func sortEncodedItems[T any](items []encodedMapItem[T]) {
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].Key.Type != items[j].Key.Type {
-			return items[i].Key.Type < items[j].Key.Type
-		}
-		return bytes.Compare(items[i].Key.Data, items[j].Key.Data) < 0
-	})
+func (r *valueDecoder) resolveType(name string) (reflect.Type, error) {
+	return r.resolveTypeAtDepth(name, 0)
 }
 
-func (r *valueDecoder) resolveType(name string, depth int) (reflect.Type, error) {
-	if depth > 100 {
-		return nil, errors.New("gent: type nesting exceeds 100")
+func (r *valueDecoder) resolveTypeAtDepth(name string, depth int) (reflect.Type, error) {
+	if depth > maxCodecTypeDepth {
+		return nil, fmt.Errorf("gent: type nesting exceeds %d", maxCodecTypeDepth)
 	}
 	switch name {
 	case "any":
@@ -34,17 +27,17 @@ func (r *valueDecoder) resolveType(name string, depth int) (reflect.Type, error)
 		return reflect.TypeFor[error](), nil
 	}
 	if value, ok := r.lookupId(name); ok {
-		return value.typ, nil
+		return value.typ, r.checkValueAllocation(value.typ, 1)
 	}
 	if strings.HasPrefix(name, "*") {
-		typ, err := r.resolveType(name[1:], depth+1)
+		typ, err := r.resolveTypeAtDepth(name[1:], depth+1)
 		if err != nil {
 			return nil, err
 		}
 		return reflect.PointerTo(typ), nil
 	}
 	if strings.HasPrefix(name, "[]") {
-		typ, err := r.resolveType(name[2:], depth+1)
+		typ, err := r.resolveTypeAtDepth(name[2:], depth+1)
 		if err != nil {
 			return nil, err
 		}
@@ -56,11 +49,16 @@ func (r *valueDecoder) resolveType(name string, depth int) (reflect.Type, error)
 			return nil, errors.New("gent: invalid array type")
 		}
 		length, err := strconv.Atoi(name[1:end])
-		if err != nil || length < 0 || length > 1000000 {
+		if err != nil || length < 0 {
 			return nil, errors.New("gent: invalid array size")
 		}
-		element, err := r.resolveType(name[end+1:], depth+1)
+		element, err := r.resolveTypeAtDepth(name[end+1:], depth+1)
 		if err != nil {
+			return nil, err
+		}
+		// Use the same byte-size bound as the writer. An independent length cap rejects valid
+		// large byte arrays and zero-size arrays after their checkpoint state is accepted.
+		if err := r.checkValueAllocation(element, length); err != nil {
 			return nil, err
 		}
 		return reflect.ArrayOf(length, element), nil
@@ -73,14 +71,14 @@ func (r *valueDecoder) resolveType(name string, depth int) (reflect.Type, error)
 		if len(pair) != 2 {
 			return nil, errors.New("gent: invalid map type")
 		}
-		key, err := r.resolveType(pair[0], depth+1)
+		key, err := r.resolveTypeAtDepth(pair[0], depth+1)
 		if err != nil {
 			return nil, err
 		}
 		if !key.Comparable() {
 			return nil, errors.New("gent: map key is not comparable")
 		}
-		element, err := r.resolveType(pair[1], depth+1)
+		element, err := r.resolveTypeAtDepth(pair[1], depth+1)
 		if err != nil {
 			return nil, err
 		}
@@ -99,8 +97,8 @@ func (r *valueDecoder) decode(value decodingValue, depth int) (reflect.Value, er
 func (r *valueDecoder) decodeExpected(value decodingValue, depth int,
 	expected reflect.Type,
 ) (reflect.Value, error) {
-	if depth > 100 {
-		return reflect.Value{}, errors.New("gent: value nesting exceeds 100")
+	if depth > maxCodecValueDepth {
+		return reflect.Value{}, fmt.Errorf("gent: value nesting exceeds %d", maxCodecValueDepth)
 	}
 	if !value.Data.present() {
 		return reflect.Value{}, errors.New("gent: invalid encoded JSON")
@@ -184,21 +182,20 @@ func (r *valueDecoder) decodeExpected(value decodingValue, depth int,
 		}
 		return reflect.ValueOf(v), nil
 	}
-	result := reflect.New(registration.typ).Elem()
-	switch result.Kind() {
+	if err := r.checkValueAllocation(registration.typ, 1); err != nil {
+		return reflect.Value{}, err
+	}
+	switch registration.typ.Kind() {
 	case reflect.Slice, reflect.Array, reflect.Map, reflect.Pointer:
-		container, err := value.Data.envelope()
-		if err != nil {
-			return reflect.Value{}, err
-		}
-		decoded, err := r.decodeExpected(container, depth+1, result.Type())
-		if err != nil {
-			return reflect.Value{}, err
-		}
-		if !decoded.IsValid() || !decoded.Type().ConvertibleTo(result.Type()) {
-			return reflect.Value{}, fmt.Errorf("gent: invalid named container %s", value.Type)
-		}
-		return decoded.Convert(result.Type()), nil
+		return r.decodeNamedContainer(value, registration.typ, depth)
+	}
+	result := reflect.New(registration.typ).Elem()
+	// Named strings can define JSON or text decode methods. Only built-in strings can bypass
+	// those methods and reuse a decoded literal without changing application behavior.
+	if registration.typ == reflect.TypeFor[string]() {
+		text, err := r.decodeString(value.Data)
+		result.SetString(text)
+		return result, err
 	}
 	if result.Kind() != reflect.Struct {
 		err := json.Unmarshal(value.Data.bytes(), result.Addr().Interface())
@@ -226,6 +223,37 @@ func (r *valueDecoder) decodeExpected(value decodingValue, depth int,
 		}
 	}
 	return result, nil
+}
+
+func (r *valueDecoder) decodeNamedContainer(value decodingValue, typ reflect.Type, depth int) (
+	reflect.Value, error,
+) {
+	container, err := value.Data.envelope()
+	if err != nil {
+		return reflect.Value{}, err
+	}
+	kind := typ.Kind().String()
+	if typ.Kind() == reflect.Pointer {
+		kind = "pointer"
+	}
+	if typ.Kind() == reflect.Slice && typ.Elem() == reflect.TypeFor[byte]() {
+		kind = "bytes"
+	}
+	// The named envelope describes this container; only its children add value depth. Require
+	// the writer's underlying kind before decoding at the same depth. Otherwise nested named
+	// envelopes could recurse without a depth check. The normal decoder still checks versions.
+	if container.Type != kind {
+		return reflect.Value{}, fmt.Errorf("gent: named container %s requires %s encoding, got %q",
+			value.Type, kind, container.Type)
+	}
+	decoded, err := r.decodeExpected(container, depth, typ)
+	if err != nil {
+		return reflect.Value{}, err
+	}
+	if !decoded.IsValid() || !decoded.Type().ConvertibleTo(typ) {
+		return reflect.Value{}, fmt.Errorf("gent: invalid named container %s", value.Type)
+	}
+	return decoded.Convert(typ), nil
 }
 
 func setDecoded(target, value reflect.Value) error {
@@ -258,7 +286,7 @@ func (r *valueDecoder) decodeContainer(value decodingValue, depth int,
 		element = expected.Elem()
 	} else {
 		var err error
-		element, err = r.resolveType(c.Element, depth+1)
+		element, err = r.resolveType(c.Element)
 		if err != nil {
 			return reflect.Value{}, err
 		}
@@ -275,7 +303,10 @@ func (r *valueDecoder) decodeContainer(value decodingValue, depth int,
 		if len(c.Values) != 1 {
 			return reflect.Value{}, errors.New("gent: invalid pointer encoding")
 		}
-		result = reflect.New(element)
+		result, err = r.newPointerValue(element)
+		if err != nil {
+			return reflect.Value{}, err
+		}
 		v, err := r.decodeExpected(c.Values[0], depth+1, element)
 		if err != nil {
 			return reflect.Value{}, err
@@ -287,7 +318,7 @@ func (r *valueDecoder) decodeContainer(value decodingValue, depth int,
 			key = expected.Key()
 		} else {
 			var err error
-			key, err = r.resolveType(c.Key, depth+1)
+			key, err = r.resolveType(c.Key)
 			if err != nil {
 				return reflect.Value{}, err
 			}
@@ -298,6 +329,12 @@ func (r *valueDecoder) decodeContainer(value decodingValue, depth int,
 		typ := reflect.MapOf(key, element)
 		if c.Nil {
 			return reflect.Zero(typ), nil
+		}
+		if err := r.checkValueAllocation(key, len(c.Items)); err != nil {
+			return reflect.Value{}, err
+		}
+		if err := r.checkValueAllocation(element, len(c.Items)); err != nil {
+			return reflect.Value{}, err
 		}
 		result = reflect.MakeMapWithSize(typ, len(c.Items))
 		for _, item := range c.Items {
@@ -326,10 +363,16 @@ func (r *valueDecoder) decodeContainer(value decodingValue, depth int,
 		}
 		return result, nil
 	case "array":
+		if err := r.checkValueAllocation(element, len(c.Values)); err != nil {
+			return reflect.Value{}, err
+		}
 		result = reflect.New(reflect.ArrayOf(len(c.Values), element)).Elem()
 	default:
 		if c.Nil {
 			return reflect.Zero(reflect.SliceOf(element)), nil
+		}
+		if err := r.checkValueAllocation(element, len(c.Values)); err != nil {
+			return reflect.Value{}, err
 		}
 		result = reflect.MakeSlice(reflect.SliceOf(element), len(c.Values), len(c.Values))
 	}

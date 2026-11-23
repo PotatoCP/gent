@@ -9,6 +9,10 @@ import (
 
 // SavedError preserves error text and the public classifications used during continuation.
 // Private implementation types must be rebound through an application codec when needed.
+// RegisterType does not change this normalization. Non-nil errors in concrete fields or containers
+// need an explicit ValueCodec if *SavedError is not assignable to their declared type. The writer
+// rejects that mismatch before checkpoint replacement or batch acceptance. Error and any interface
+// fields can receive the default representation.
 type SavedError struct {
 	Message string        `json:"message"`
 	Codes   []string      `json:"codes,omitempty"`

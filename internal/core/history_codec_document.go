@@ -6,11 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 )
 
 // Documents share wire values, never mutable Go objects. The tables belong to one document;
 // loading a saved value cannot depend on a process dictionary or an earlier archive file.
 const savedDocumentVersion = 1
+
+const compressedDocumentVersion = 2
 
 const (
 	maxTableDepth         = 512
@@ -78,10 +81,18 @@ type savedDocumentData struct {
 // Include the format marker in the digest. This detects changed storage bytes, not a writer
 // with permission to replace both the data and its digest. Storage trust remains with the app.
 func documentDigest(data []byte) string {
+	return versionedDocumentDigest(savedDocumentVersion, data)
+}
+
+func versionedDocumentDigest(version int, data []byte) string {
 	hash := sha256.New()
-	hash.Write([]byte("gent-saved-document:1\n"))
+	hash.Write([]byte("gent-saved-document:" + strconv.Itoa(version) + "\n"))
 	hash.Write(data)
 	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func documentEnvelopeSize(version int) int {
+	return len(`{"formatVersion":,"data":,"digest":""}`) + len(strconv.Itoa(version)) + 64
 }
 
 type tableMeasure struct {

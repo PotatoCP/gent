@@ -12,7 +12,7 @@ func TestDefaultModelName(t *testing.T) {
 }
 
 func TestAvailableModels(t *testing.T) {
-	// Compare the complete menu so older, duplicate, or extra entries cannot return unnoticed.
+	// Compare the complete provider set so older, duplicate, or extra entries cannot return unnoticed.
 	expected := []ModelOption{
 		{
 			Label: "xAI grok-4.7", Name: "grok-4.7",

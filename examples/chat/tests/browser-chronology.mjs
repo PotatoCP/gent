@@ -44,15 +44,14 @@ export async function checkChronology(page, expect, kind, decoded, live) {
   const repeatedCount = firstCall.payload.Request.Messages.length;
   const requestMessages = secondCall.payload.Request.Messages;
   assert.equal(requestMessages.length, 5);
-  assert.deepEqual(requestMessages.slice(0, 2), firstCall.payload.Request.Messages.slice(0, 2));
-  assert.deepEqual(requestMessages.at(-1), firstCall.payload.Request.Messages.at(-1));
+  assert.deepEqual(requestMessages.slice(0, 3), firstCall.payload.Request.Messages);
   const repeated = sent.locator('.ge-repeated-messages').first();
   await expect(repeated).not.toHaveAttribute('open');
   await expect(sent.locator('.ge-repeated-messages > summary')).toHaveText([
-    'Messages 1–2 · Already sent', 'Message 5 · Already sent']);
+    'Messages 1–3 · Already sent']);
   await expect(sent.locator('.ge-request-count')).toHaveText(
     `${requestMessages.length - repeatedCount} new or changed · ${repeatedCount} repeated`);
-  await expect(sent.locator('.ge-role')).toHaveText(['3 · Ai', '4 · Tool']);
+  await expect(sent.locator('.ge-role')).toHaveText(['4 · Ai', '5 · Tool']);
   await sent.getByRole('button', {name: 'Full request', exact: true}).click();
   await expect(sent.locator('.ge-model-message')).toHaveCount(requestMessages.length);
   await expect(sent.locator('.ge-request-count')).toHaveText(
@@ -62,7 +61,7 @@ export async function checkChronology(page, expect, kind, decoded, live) {
       (part.Content || part.Parts || []).flatMap(item => item.Text ? [item.Text] : []))));
   await sent.getByRole('button', {name: 'New content', exact: true}).click();
   await repeated.locator('summary').click();
-  await expect(repeated.locator('.ge-model-message')).toHaveCount(2);
+  await expect(repeated.locator('.ge-model-message')).toHaveCount(3);
   await repeated.locator('summary').click();
   await expect(returned.locator('.ge-part-label')).toHaveText(
     ['Reasoning', 'Final answer candidate', 'Final answer']);

@@ -230,19 +230,26 @@ func (s *SummarizationStrategy) summaryGroups(input *gent.CompactionInput,
 func summaryAttachments(entries []*gent.HistoryEntry) []*gent.ModelMessage {
 	var messages []*gent.ModelMessage
 	for _, entry := range entries {
-		for index, message := range entry.Messages {
-			var attachments []gent.ContentPart
-			for _, part := range message.Parts {
-				attachments = append(attachments, summaryNonText(part)...)
-			}
-			if len(attachments) == 0 {
-				continue
-			}
-			label := fmt.Sprintf("Attached context from entry %q, message %d, role %s:",
-				entry.Id, index, message.Role)
-			messages = append(messages, &gent.ModelMessage{Role: gent.ChatMessageTypeHuman,
-				Parts: append([]gent.ContentPart{gent.TextPart(label)}, attachments...)})
+		messages = append(messages, summaryEntryAttachments(entry,
+			fmt.Sprintf("entry %q", entry.Id))...)
+	}
+	return messages
+}
+
+func summaryEntryAttachments(entry *gent.HistoryEntry, source string) []*gent.ModelMessage {
+	var messages []*gent.ModelMessage
+	for index, message := range entry.Messages {
+		var attachments []gent.ContentPart
+		for _, part := range message.Parts {
+			attachments = append(attachments, summaryNonText(part)...)
 		}
+		if len(attachments) == 0 {
+			continue
+		}
+		label := fmt.Sprintf("Attached context from %s, message %d, role %s:",
+			source, index, message.Role)
+		messages = append(messages, &gent.ModelMessage{Role: gent.ChatMessageTypeHuman,
+			Parts: append([]gent.ContentPart{gent.TextPart(label)}, attachments...)})
 	}
 	return messages
 }

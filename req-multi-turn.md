@@ -788,6 +788,11 @@ The owner approved the type-table, record-layout, and shared-value proposal in t
 before considering compression. Preserve the reasoning in that report. The production wire contract
 is in [Saved document format](development/reports/saved-document-format.md).
 
+The owner's 2026-11-20 footprint goal extends this work to lossless storage compression and runtime
+cost reductions. Keep all logical content and behavior. Measurements, implementation reasons, and
+the limits of local capacity tests are recorded in
+[Persistence and execution footprint](development/performance-footprint.md).
+
 Keep the public Marshal, Unmarshal, MarshalRunState, and UnmarshalRunState calls. Each storage
 document is self-contained: full type names occur in local tables, layouts retain declared fields
 and versions, and equal typed values can use local references. Do not remove recovery evidence,

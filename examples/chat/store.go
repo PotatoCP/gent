@@ -53,6 +53,13 @@ func newMemoryStore(codecs *gent.CodecRegistry) *memoryStore {
 	return &memoryStore{codecs: codecs, values: map[string][]byte{}, runs: map[string]*savedRun{}}
 }
 
+func (store *memoryStore) clear() {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	clear(store.values)
+	clear(store.runs)
+}
+
 func (store *memoryStore) claim(runId string) *memoryRecorder {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -79,7 +86,12 @@ func (writer *memoryRecorder) Save(ctx context.Context, batch *gent.SaveBatch,
 	// operations visible in the example. All batches remain mandatory. Encode the capture before
 	// the storage transaction accepts it; its cursor must never lead its accepted batch.
 	writer.store.mu.Lock()
-	count := len(writer.store.runs[writer.runId].batches)
+	run := writer.store.runs[writer.runId]
+	if run == nil || run.lease != writer.lease {
+		writer.store.mu.Unlock()
+		return errors.New("storage: worker lease expired")
+	}
+	count := len(run.batches)
 	writer.store.mu.Unlock()
 	var captured []byte
 	if count%3 == 0 && batch.Checkpoint.Phase != gent.PhaseTerminal {
@@ -105,7 +117,7 @@ func (writer *memoryRecorder) commit(ctx context.Context, batch *gent.SaveBatch,
 		return err
 	}
 	run := store.runs[writer.runId]
-	if run.lease != writer.lease {
+	if run == nil || run.lease != writer.lease {
 		return errors.New("storage: worker lease expired")
 	}
 	key := writer.runId + "/batch/" + batch.BatchId

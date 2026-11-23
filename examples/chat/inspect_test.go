@@ -133,6 +133,7 @@ func TestMissingConversationHTTPStatus(t *testing.T) {
 			app, _ := testApplication(t, 0)
 			request := httptest.NewRequest(test.input.method, test.input.path,
 				strings.NewReader(test.input.body))
+			request.Header.Set(serverHeader, app.serverId)
 			response := httptest.NewRecorder()
 			app.routes().ServeHTTP(response, request)
 			assert.Equal(t, test.expected, expected{response.Code, response.Body.String()})

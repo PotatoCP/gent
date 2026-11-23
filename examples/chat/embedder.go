@@ -33,7 +33,7 @@ func scenarioEmbedder(provider string) (search.Embedder, error) {
 
 // Demo mode uses word counts in fixed hash buckets. This supplies a deterministic lexical signal
 // for the shared policy tools without a native model or download. It does not model semantic
-// similarity. Real providers use the same multilingual ONNX model as the integration CLI.
+// similarity. Real providers use the same multilingual ONNX model as the integration tests.
 type demoEmbedder struct{}
 
 func (demoEmbedder) TokenCount(text string) int { return len(strings.Fields(text)) }

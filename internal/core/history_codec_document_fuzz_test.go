@@ -9,6 +9,7 @@ import (
 
 func FuzzSavedDocument(f *testing.F) {
 	for _, payload := range []string{
+		oversizedArrayDocument,
 		`{"types":["nil"],"layouts":[[["type",{"type":0}],["version",{"constant":1}],` +
 			`["data"]]],"shared":[],"root":[0,null]}`,
 		`{"types":[],"layouts":[],"shared":[[-2,0]],"root":[-2,0]}`,
@@ -37,8 +38,9 @@ func FuzzSavedDocument(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		registry := NewCodecRegistry(WithCodecLimits(CodecLimits{MaxEncodedBytes: 32 * 1024,
-			MaxExpandedBytes: 128 * 1024, MaxExpandedValues: 8192, MaxBinaryBytes: 16 * 1024}))
+		registry := NewCodecRegistry(WithCodecCompression(CodecCompressionNone),
+			WithCodecLimits(CodecLimits{MaxEncodedBytes: 32 * 1024,
+				MaxExpandedBytes: 128 * 1024, MaxExpandedValues: 8192, MaxBinaryBytes: 16 * 1024}))
 		var value any
 		if err := registry.Unmarshal(data, &value); err != nil {
 			return
@@ -47,6 +49,9 @@ func FuzzSavedDocument(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		size, err := registry.uncompressedSize(value)
+		assert.NoError(t, err)
+		assert.Equal(t, len(encoded), size)
 		var restored any
 		if err := registry.Unmarshal(encoded, &restored); err != nil {
 			t.Fatal(err)

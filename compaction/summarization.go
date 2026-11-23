@@ -683,6 +683,7 @@ func (s *SummarizationStrategy) Compact(
 	}
 
 	newMessages := extractTextFromEntries(toSummarize)
+	var instructionAttachments []*gent.ModelMessage
 	if prefix := execCtx.Instructions(); len(prefix) != 0 {
 		context := &gent.HistoryEntry{}
 		for _, message := range prefix {
@@ -691,6 +692,9 @@ func (s *SummarizationStrategy) Compact(
 		}
 		newMessages = "## Current System Instructions (read-only context)\n\n" +
 			extractText(context) + "\n\n" + newMessages
+		// The text projection cannot carry structured data or media. Supply those parts through
+		// the same native path as covered activity, with an explicit read-only system source.
+		instructionAttachments = summaryEntryAttachments(context, "read-only system instructions")
 	}
 	userText := fmt.Sprintf(
 		s.userPrompt, existingText, newMessages,
@@ -737,6 +741,7 @@ func (s *SummarizationStrategy) Compact(
 			},
 		}
 	}
+	messages = append(messages, instructionAttachments...)
 	messages = append(messages, summaryAttachments(toSummarize)...)
 	streamID := fmt.Sprintf(
 		"compaction-summarization-%d",

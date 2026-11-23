@@ -6,8 +6,9 @@ action reads the completed result through a fresh worker. RunView and RunState i
 saved bytes without a worker. The server does not keep idle ExecutionContext values as saved state.
 
 This is a development example, not a hosted service. The memory store survives worker Release and
-Restore inside one server process. A process restart clears every run. No database or disk storage
-is used. The server binds to localhost by default and has no accounts or authentication.
+Restore inside one server process. A process restart or Server Reset clears every run. No database
+or disk storage is used. The server binds to localhost by default and has no accounts or
+authentication.
 
 ## Run
 
@@ -50,7 +51,7 @@ Mini, Claude Sonnet 4.6, Gemini 2.5 Flash, or Grok 4.3. The optional `_URL` sett
 endpoint. Credentials never enter browser data. The example does not select an unconfigured remote
 provider or download a local model automatically.
 
-For remote providers, policy search uses the same local multilingual model as the integration CLI.
+For remote providers, policy search uses the same local multilingual model as the integration tests.
 If it is not installed, run these commands once from the repository root:
 
 ```sh
@@ -103,19 +104,22 @@ Choose a scenario on the empty chat page:
 
 The starter button copies the integration scenario's full task into the composer. It does not send
 it until you select Send. A conversation keeps its scenario after refresh, restore, and NewTurn.
-Select **New chat** to choose another scenario.
+Select **New chat** to choose another scenario. **Investigate and compare** adds related checks to
+the same task: compare flights and fees before changing a booking, or reconcile payment records and
+follow the failed-refund path. Both variants ask for brief progress updates.
 
-Both the default CLI chat and one-shot integration tests use the same `NewChatConfig` functions in
+The server and automated integration tests use the same `NewChatConfig` functions in
 [integrationtest/airline](../../integrationtest/airline/chat.go) and
 [integrationtest/ecommerce](../../integrationtest/ecommerce/chat.go). The web server uses their tool
 registration callbacks, prompts, critical rules, policy suggestions, and iteration allowances. It
-uses a native registry with all scenario tools available. The integration CLI also retains its
-search and JavaScript tool modes.
+uses a native registry with all scenario tools available. The automated Go tests retain their
+SearchChain, compaction, and JavaScript tool coverage. The interactive terminal test interface was
+removed; the server is now the interactive integration interface.
 
 Each conversation owns one fixture. It represents an external service and stays alive across worker
 restores. A new conversation gets separate booking and payment data. Agent execution still restores
 from bytes on each attempt. Fixture data is not LoopData and does not enter the RunStateSnapshot.
-A server restart clears both the simulated services and the byte store.
+A server restart or Server Reset clears both the simulated services and the byte store.
 
 Try this sequence:
 
@@ -186,7 +190,54 @@ digest. The recovered JSON has separate Copy and Download controls.
 The JSON tree expands on demand and pages large containers. These controls inspect data; they do not
 execute models, tools, or custom restore callbacks. See the
 [codec size review](../../development/reports/run-state-codec-size.md) for measurements of the
-implemented type tables, layouts, and shared values. The codec uses no compression.
+implemented type tables, layouts, and shared values. The explorer preserves the exact encoded data
+supplied by the configured codec.
+
+## Chat history and reset
+
+**Your chats** lists conversations by recent activity. Titles come from the first user message;
+listing chats does not call a model or decode the archive. Select a chat to load its accepted
+history and reconnect to live output. The same RunId continues on the next prompt. Background work
+continues when you select another chat. **Chats** opens the list on a small screen. Drafts stay with
+their chat while you switch within the page; they are not saved across page reloads.
+
+**Server Reset** stops all workers and clears all chats, saved bytes, RunStateSnapshots, event
+buffers, and simulated booking/payment changes. The dialog states that it affects every chat.
+Provider settings and the shared search model remain available. Reset joins worker cleanup before
+it clears the data. A new server identity rejects delayed writes from before the reset, including
+first prompts with no RunId. The browser ignores old requests after a chat selection or reset.
+Other open pages clear their old state when they detect the new identity.
+The current composer keeps its unsent text so you can retry it as a new conversation.
+
+HTTP clients first read `/api/config` and return its `X-Gent-Server` header on each POST. A missing
+or old identity returns HTTP 409. This identity prevents stale writes; it is not authentication.
+
+## Reasoning and progress
+
+The main ReAct calls request readable reasoning where the selected provider supports it:
+
+| Provider | Default chat settings |
+| --- | --- |
+| OpenAI | Medium effort and `reasoning.summary: auto` |
+| Anthropic | Adaptive thinking, medium effort, and allowed sampling settings |
+| Gemini | Include available thought summaries |
+| xAI | The selected model's native defaults |
+
+These settings are on the loop, in [call_options.go](call_options.go). Main calls allow 8,192 output
+tokens so reasoning and tool input have room. A model override must support the selected settings.
+The system prompt asks for short customer-facing progress updates before tool work. It does not ask
+for private reasoning. Providers can return no readable reasoning for a simple task, and some
+models expose only usage counts or encrypted continuation. Those values stay in the inspector;
+the example never turns them into invented reasoning text.
+
+Gent preserves the provider's content types. Commentary and intermediate text before tool work are
+progress; exposed reasoning is separate; accepted final output remains separate from both. Demo
+reasoning is labeled fixture output. The browser does not rename ordinary prose as reasoning.
+
+Provider references: [OpenAI summaries](https://developers.openai.com/api/docs/guides/reasoning),
+[Claude thinking](https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking),
+[Gemini thinking](https://ai.google.dev/gemini-api/docs/thinking), and
+[xAI reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning).
 
 ## Interface flow
 
@@ -199,6 +250,8 @@ implemented type tables, layouts, and shared values. The codec uses no compressi
 | [runtime.go](runtime.go) | Config, NewTurn, Restore, Continue, GetLastTurnResult, Stop routing |
 | [events.go](events.go) | Typed public payload projection and bounded browser delivery |
 | [http.go](http.go) | HTTP actions and server-sent events |
+| [conversations.go](conversations.go) | Chat index, server reset, and stale-write checks |
+| [web/conversations.js](web/conversations.js) | Chat list, selection, and small-screen controls |
 | [inspect.go](inspect.go) | Read-only archive and RunStateSnapshot inspection |
 | [web/state.js](web/state.js) | Accepted/live reconciliation and complete-message replacement |
 | [web/chat.js](web/chat.js) | Visible progress text, nested tool toggles, and accepted answers |
@@ -241,7 +294,7 @@ cleanup and acceptance of the pause. Each action releases that worker before rem
 active map. NewTurn on idle unfinished state uses Gent's normal replacement contract. Live steering
 is outside this example's scope.
 
-The Hooks callback sets the effective model token allowance and adds local policy guidance to the
+The Hooks callback adds local policy guidance to the
 first three main model requests of each attempt. It derives search text from restored conversation
 messages. Guidance changes the effective request; it does not enter saved user input. Tool errors
 and model failures retain Gent's normal contracts. The chat uses safe tool
@@ -268,6 +321,7 @@ Browser checks reuse the repository's Playwright installation:
 ```sh
 npm --prefix ../../docs ci
 node tests/browser.mjs
+node tests/browser-live-fixture.mjs
 ```
 
 The browser script uses `/opt/google/chrome/chrome` by default. Set CHROME_PATH for another Chromium
@@ -275,9 +329,11 @@ binary. It verifies both scenarios, shared starter tasks, structured tool result
 grouped tools with keyboard toggles and focus retention, separate progress and final answers,
 later turns, refresh, both replay paths, original
 response inspection, event pagination, encoded and recovered JSON downloads, byte sizes, panel
-resizing, missing-run redirection with a retained draft,
+resizing, chat selection, draft retention, background work, server reset, stale replies,
+missing-run redirection with a retained draft,
 Stop/Continue/replacement, completed-result inspection, safe text rendering, mobile layout, browser
 errors, and memory-store lifetime. Screenshots go into the ignored screenshots directory.
+Set `CHAT_TEST_OUTPUT_DIR` to keep screenshots and saved evidence in a different directory.
 
 Exercise the same browser flow against a real model configured in the project `.env`:
 
@@ -287,6 +343,16 @@ CHAT_TEST_PROVIDER=openai node tests/browser.mjs
 
 Remote checks make paid model calls. Deterministic tests cover failures and interruption; the live
 flow proves that the configured endpoint accepts retained conversation input and native evidence.
+The live flow compares complete answers and each tool outcome by identity with the accepted
+archive. It checks earlier prompts in later effective requests. It does not require a model to
+choose exact words, arguments, or a successful first tool call. The local native-response fixture
+tests a handled error followed by success and different answer text. The demo keeps its exact
+expected answers. Each completed turn saves diagnostic JSON and encoded state for both replay
+paths. A failed browser check also saves available state and server logs before shutdown.
+`TestLiveChatScenarios` also runs each full investigation through HTTP/SSE, checks progress and
+accepted output, and compares both recovery paths. See the
+[integration guide](../../integrationtest/README.md) for provider commands. The release gate runs
+these tests for all configured chat providers.
 
 ## Release exclusion
 

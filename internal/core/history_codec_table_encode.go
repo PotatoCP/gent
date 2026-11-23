@@ -2,25 +2,28 @@ package gent
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"hash/maphash"
 	"sort"
 	"strconv"
+	"sync"
 )
 
 // A node is a typed encoder value, a container, or an opaque codec leaf. Nodes are built in
 // child-first order. Equal nodes use one internal ID, with exact comparison after hashing.
 type tableBuildNode struct {
-	kind     tableNodeKind
-	layout   int
-	raw      json.RawMessage
-	children []int
-	measure  tableMeasure
-	minimum  int
-	share    bool
-	uses     int
-	shared   int
+	kind      tableNodeKind
+	layout    int
+	raw       json.RawMessage
+	children  []int
+	measure   tableMeasure
+	minimum   int
+	share     bool
+	uses      int
+	shared    int
+	collision int
+	written   int
 }
 
 type tableLayoutKind string
@@ -59,41 +62,114 @@ type tableBuilder struct {
 	registry      *CodecRegistry
 	types         []string
 	typeIDs       map[string]int
-	layouts       [][][]any
+	layouts       []tableBuildLayout
 	layoutIDs     map[string]int
 	schemas       map[tableLayoutKey]int
 	measures      []tableMeasure
 	literals      map[string]int
 	literalMemory map[tableLiteralMemory]int
 	nodes         []tableBuildNode
-	nodeIDs       map[[32]byte][]int
+	nodeIDs       map[uint64]int
+}
+
+// Reuse bounded scratch indexes across calls, never saved output or application values. Large
+// archives do not set the idle memory cost of later small event encodings.
+var tableBuilders = sync.Pool{New: func() any {
+	return &tableBuilder{typeIDs: map[string]int{}, layoutIDs: map[string]int{},
+		nodeIDs: map[uint64]int{}, schemas: map[tableLayoutKey]int{}, literals: map[string]int{},
+		literalMemory: map[tableLiteralMemory]int{}}
+}}
+
+var tableNodeHashSeed = maphash.MakeSeed()
+
+func (builder *tableBuilder) release() {
+	if cap(builder.nodes) > 2048 || cap(builder.layouts) > 256 || cap(builder.types) > 256 ||
+		len(builder.schemas) > 256 || len(builder.literals) > 2048 || len(builder.literalMemory) > 2048 {
+		return
+	}
+	// Clear every reference before pooling. In particular, literalMemory keys can otherwise
+	// keep a large provider buffer alive after the returned document has been released.
+	builder.registry = nil
+	clear(builder.types)
+	clear(builder.layouts)
+	clear(builder.nodes)
+	clear(builder.typeIDs)
+	clear(builder.layoutIDs)
+	clear(builder.nodeIDs)
+	clear(builder.schemas)
+	clear(builder.literals)
+	clear(builder.literalMemory)
+	builder.types = builder.types[:0]
+	builder.layouts = builder.layouts[:0]
+	builder.nodes = builder.nodes[:0]
+	builder.measures = builder.measures[:0]
+	tableBuilders.Put(builder)
 }
 
 func (encoder *valueEncoder) marshalDocument(value encodingValue) ([]byte, error) {
-	builder := tableBuilder{registry: encoder.CodecRegistry, types: []string{},
-		typeIDs: map[string]int{}, layouts: [][][]any{}, layoutIDs: map[string]int{},
-		nodeIDs: map[[32]byte][]int{}, schemas: map[tableLayoutKey]int{}, literals: map[string]int{},
-		literalMemory: map[tableLiteralMemory]int{}}
+	builder := tableBuilders.Get().(*tableBuilder)
+	builder.registry = encoder.CodecRegistry
+	defer builder.release()
 	root, err := builder.value(value)
 	if err != nil {
 		return nil, err
 	}
 	builder.selectShared(root)
-	shared := []json.RawMessage{}
+	builder.assignShared()
+	return builder.document(root)
+}
+
+func (builder *tableBuilder) document(root int) ([]byte, error) {
+	// Append already validated nodes directly. Passing these buffers through json.Marshal
+	// again would scan and copy the complete saved data at each outer envelope.
+	data := []byte(`{"types":`)
+	types, err := json.Marshal(builder.types)
+	if err != nil {
+		return nil, err
+	}
+	data = append(data, types...)
+	data = append(data, `,"layouts":[`...)
+	for i, layout := range builder.layouts {
+		if i > 0 {
+			data = append(data, ',')
+		}
+		data = append(data, layout.wire...)
+	}
+	data = append(data, `],"shared":[`...)
+	shared := 0
 	for id := range builder.nodes {
 		if builder.nodes[id].shared < 0 {
 			continue
 		}
-		builder.nodes[id].shared = len(shared)
-		shared = append(shared, builder.appendValue(nil, id, true))
+		if shared > 0 {
+			data = append(data, ',')
+		}
+		shared++
+		data = builder.appendValue(data, id, true)
 	}
-	data, err := json.Marshal(savedDocumentData{Types: builder.types, Layouts: builder.layouts,
-		Shared: shared, Root: builder.appendValue(nil, root, false)})
-	if err != nil {
-		return nil, err
+	data = append(data, `],"root":`...)
+	data = builder.appendValue(data, root, false)
+	data = append(data, '}')
+	version, data := builder.registry.compressDocument(data)
+	result := []byte(`{"formatVersion":`)
+	result = strconv.AppendInt(result, int64(version), 10)
+	result = append(result, `,"data":`...)
+	result = append(result, data...)
+	result = append(result, `,"digest":"`...)
+	result = append(result, versionedDocumentDigest(version, data)...)
+	return append(result, '"', '}'), nil
+}
+
+// Shared IDs follow child-first order for both counting and writing. Counting must use the
+// exact same reference widths as storage, including the transition to multi-digit IDs.
+func (builder *tableBuilder) assignShared() {
+	shared := 0
+	for id := range builder.nodes {
+		if builder.nodes[id].shared >= 0 {
+			builder.nodes[id].shared = shared
+			shared++
+		}
 	}
-	return json.Marshal(savedDocument{FormatVersion: savedDocumentVersion, Data: data,
-		Digest: documentDigest(data)})
 }
 
 func (builder *tableBuilder) typeID(name string) int {
@@ -106,63 +182,26 @@ func (builder *tableBuilder) typeID(name string) int {
 	return id
 }
 
-func (builder *tableBuilder) typeField(name, value string) []any {
-	return []any{name, map[string]any{"type": builder.typeID(value)}}
-}
-
-func tableConstant(name string, value any) []any {
-	return []any{name, map[string]any{"constant": value}}
-}
-
-// Layout construction runs once per schema in this document. Rebuilding field metadata at
-// every occurrence would trade smaller files for unnecessary allocations and save latency.
-func (builder *tableBuilder) layout(key tableLayoutKey, fields func() [][]any) (int, error) {
+// Layout construction runs once per schema in this document. Typed fields avoid allocating
+// interface slices and maps for each fixed metadata field of each streamed event.
+func (builder *tableBuilder) layout(
+	key tableLayoutKey, fields func() []tableBuildField,
+) (int, error) {
 	if id, ok := builder.schemas[key]; ok {
 		return id, nil
 	}
-	layout := fields()
-	data, err := json.Marshal(layout)
+	layout, err := builder.buildLayout(fields())
 	if err != nil {
 		return 0, err
 	}
-	if id, ok := builder.layoutIDs[string(data)]; ok {
+	if id, ok := builder.layoutIDs[string(layout.wire)]; ok {
 		builder.schemas[key] = id
 		return id, nil
 	}
-	measure := tableMeasure{bytes: 2, values: 1, depth: 1}
-	for index, field := range layout {
-		name, err := json.Marshal(field[0])
-		if err != nil {
-			return 0, err
-		}
-		measure.bytes += len(name) + 1
-		if index > 0 {
-			measure.bytes++
-		}
-		if len(field) == 1 {
-			continue
-		}
-		constant := field[1].(map[string]any)
-		value, ok := constant["constant"]
-		if !ok {
-			value = builder.types[constant["type"].(int)]
-		}
-		data, err := json.Marshal(value)
-		if err != nil {
-			return 0, err
-		}
-		if err := builder.registry.addExpansion(&measure,
-			tableMeasure{bytes: len(data), values: 1, depth: 1}); err != nil {
-			return 0, err
-		}
-	}
-	if err := builder.registry.checkExpansion(measure); err != nil {
-		return 0, err
-	}
 	id := len(builder.layouts)
-	builder.schemas[key], builder.layoutIDs[string(data)] = id, id
+	builder.schemas[key], builder.layoutIDs[string(layout.wire)] = id, id
 	builder.layouts = append(builder.layouts, layout)
-	builder.measures = append(builder.measures, measure)
+	builder.measures = append(builder.measures, layout.measure)
 	return id, nil
 }
 
@@ -182,12 +221,12 @@ func (builder *tableBuilder) object(id int, children []int, share bool) (int, er
 func (builder *tableBuilder) envelope(value encodingValue) (int, error) {
 	key := tableLayoutKey{kind: tableValueLayout, name: value.Type,
 		declared: value.DeclaredType, version: value.Version}
-	id, err := builder.layout(key, func() [][]any {
-		fields := [][]any{builder.typeField("type", value.Type)}
+	id, err := builder.layout(key, func() []tableBuildField {
+		fields := []tableBuildField{builder.typeField("type", value.Type)}
 		if value.DeclaredType != "" {
 			fields = append(fields, builder.typeField("declaredType", value.DeclaredType))
 		}
-		return append(fields, tableConstant("version", value.Version), []any{"data"})
+		return append(fields, tableConstant("version", strconv.Itoa(value.Version)), tableField("data"))
 	})
 	if err != nil {
 		return 0, err
@@ -205,25 +244,26 @@ func (builder *tableBuilder) envelope(value encodingValue) (int, error) {
 }
 
 func (builder *tableBuilder) fields(name string, values map[string]encodingValue) (int, error) {
-	id, err := builder.layout(tableLayoutKey{kind: tableFieldsLayout, name: name}, func() [][]any {
+	key := tableLayoutKey{kind: tableFieldsLayout, name: name}
+	id, err := builder.layout(key, func() []tableBuildField {
 		names := make([]string, 0, len(values))
 		for name := range values {
 			names = append(names, name)
 		}
 		sort.Strings(names)
-		fields := make([][]any, len(names))
+		fields := make([]tableBuildField, len(names))
 		for i, name := range names {
-			fields[i] = []any{name}
+			fields[i] = tableField(name)
 		}
 		return fields
 	})
 	if err != nil {
 		return 0, err
 	}
-	fields := builder.layouts[id]
+	fields := builder.layouts[id].fields
 	children := make([]int, len(fields))
 	for i, field := range fields {
-		children[i], err = builder.value(values[field[0].(string)])
+		children[i], err = builder.value(values[field.name])
 		if err != nil {
 			return 0, err
 		}
@@ -249,8 +289,8 @@ func (builder *tableBuilder) value(value any) (int, error) {
 		}
 		return builder.array(values)
 	case encodedMapItem[encodingValue]:
-		id, err := builder.layout(tableLayoutKey{kind: tableMapItemLayout}, func() [][]any {
-			return [][]any{{"key"}, {"value"}}
+		id, err := builder.layout(tableLayoutKey{kind: tableMapItemLayout}, func() []tableBuildField {
+			return []tableBuildField{tableField("key"), tableField("value")}
 		})
 		if err != nil {
 			return 0, err
@@ -284,8 +324,8 @@ func (builder *tableBuilder) value(value any) (int, error) {
 func (builder *tableBuilder) container(value encodedContainer[encodingValue]) (int, error) {
 	key := tableLayoutKey{kind: tableContainerLayout, name: value.Element, declared: value.Key,
 		nilContainer: value.Nil, hasValues: len(value.Values) > 0, hasItems: len(value.Items) > 0}
-	id, err := builder.layout(key, func() [][]any {
-		fields := [][]any{}
+	id, err := builder.layout(key, func() []tableBuildField {
+		fields := []tableBuildField{}
 		if value.Element != "" {
 			fields = append(fields, builder.typeField("element", value.Element))
 		}
@@ -293,13 +333,13 @@ func (builder *tableBuilder) container(value encodedContainer[encodingValue]) (i
 			fields = append(fields, builder.typeField("key", value.Key))
 		}
 		if value.Nil {
-			fields = append(fields, tableConstant("nil", true))
+			fields = append(fields, tableConstant("nil", "true"))
 		}
 		if len(value.Values) > 0 {
-			fields = append(fields, []any{"values"})
+			fields = append(fields, tableField("values"))
 		}
 		if len(value.Items) > 0 {
-			fields = append(fields, []any{"items"})
+			fields = append(fields, tableField("items"))
 		}
 		return fields
 	})
@@ -326,14 +366,14 @@ func (builder *tableBuilder) container(value encodedContainer[encodingValue]) (i
 
 func (builder *tableBuilder) chunk(value savedStreamChunk) (int, error) {
 	key := tableLayoutKey{kind: tableChunkLayout, hasContent: value.Content != nil,
-		hasSources: len(value.SourceMessageIds) > 0}
-	id, err := builder.layout(key, func() [][]any {
-		fields := [][]any{}
+		hasSources: value.SourceMessageIds != nil}
+	id, err := builder.layout(key, func() []tableBuildField {
+		fields := []tableBuildField{}
 		if value.Content != nil {
-			fields = append(fields, []any{"content"})
+			fields = append(fields, tableField("content"))
 		}
-		if len(value.SourceMessageIds) > 0 {
-			fields = append(fields, []any{"sourceMessageIds"})
+		if value.SourceMessageIds != nil {
+			fields = append(fields, tableField("sourceMessageIds"))
 		}
 		return fields
 	})
@@ -348,7 +388,7 @@ func (builder *tableBuilder) chunk(value savedStreamChunk) (int, error) {
 		}
 		children = append(children, child)
 	}
-	if len(value.SourceMessageIds) > 0 {
+	if value.SourceMessageIds != nil {
 		child, err := builder.value(value.SourceMessageIds)
 		if err != nil {
 			return 0, err
@@ -422,18 +462,24 @@ func (builder *tableBuilder) array(values []any) (int, error) {
 }
 
 func (builder *tableBuilder) intern(node tableBuildNode) int {
-	key := append([]byte(node.kind), 0)
-	key = binary.AppendVarint(key, int64(node.layout))
+	// This hash only selects exact-comparison candidates within one encode call. It is not
+	// an integrity digest or a saved identity. Full comparison below handles collisions.
+	var hasher maphash.Hash
+	hasher.SetSeed(tableNodeHashSeed)
+	hasher.WriteString(string(node.kind))
+	var buffer [binary.MaxVarintLen64]byte
+	count := binary.PutVarint(buffer[:], int64(node.layout))
+	hasher.Write(buffer[:count])
 	for _, child := range node.children {
-		key = binary.AppendUvarint(key, uint64(child))
+		count = binary.PutUvarint(buffer[:], uint64(child))
+		hasher.Write(buffer[:count])
 	}
-	hasher := sha256.New()
-	hasher.Write(key)
 	hasher.Write(node.raw)
-	var hash [sha256.Size]byte
-	hasher.Sum(hash[:0])
-	for _, id := range builder.nodeIDs[hash] {
+	hash := hasher.Sum64()
+	for next := builder.nodeIDs[hash]; next != 0; {
+		id := next - 1
 		other := &builder.nodes[id]
+		next = other.collision
 		if other.kind != node.kind || other.layout != node.layout || !bytes.Equal(other.raw, node.raw) ||
 			len(other.children) != len(node.children) {
 			continue
@@ -451,8 +497,9 @@ func (builder *tableBuilder) intern(node tableBuildNode) int {
 		}
 	}
 	id := len(builder.nodes)
+	node.collision = builder.nodeIDs[hash]
 	builder.nodes = append(builder.nodes, node)
-	builder.nodeIDs[hash] = append(builder.nodeIDs[hash], id)
+	builder.nodeIDs[hash] = id + 1
 	return id
 }
 

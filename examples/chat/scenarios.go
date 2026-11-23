@@ -23,15 +23,18 @@ const (
 )
 
 type scenarioInfo struct {
-	Id          scenarioId `json:"id"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	Prompt      string     `json:"prompt"`
+	Id            scenarioId `json:"id"`
+	Name          string     `json:"name"`
+	Description   string     `json:"description"`
+	Prompt        string     `json:"prompt"`
+	Investigation string     `json:"investigation"`
 }
 
 var scenarios = []scenarioInfo{
-	{scenarioAirline, "SkyWings Airlines", "Change a flight booking", airline.CustomerRequest},
-	{scenarioEcommerce, "TechGear Store", "Investigate a duplicate charge", ecommerce.CustomerRequest},
+	{scenarioAirline, "SkyWings Airlines", "Change a flight booking", airline.CustomerRequest,
+		airline.InvestigationRequest},
+	{scenarioEcommerce, "TechGear Store", "Investigate a duplicate charge", ecommerce.CustomerRequest,
+		ecommerce.InvestigationRequest},
 }
 
 // This fixture represents the external service, not agent state. Keep it across worker restores.
@@ -59,18 +62,23 @@ func newScenario(id scenarioId, embedder search.Embedder) (*scenarioSession, err
 	return &scenarioSession{id: id, config: chat, tools: chain}, nil
 }
 
+const progressInstructions = `Give brief updates before tool work and when a finding changes
+the next action. State what you will check or what you found. Continue with the tools in the same
+response; a progress update alone does not complete the task. Keep the final customer answer
+separate. Do not disclose private reasoning or invent facts to fill a progress update.`
+
 func (session *scenarioSession) instructions() string {
-	return session.config.SystemPrompt + "\n\n" + session.config.CriticalRules
+	return session.config.SystemPrompt + "\n\n" + session.config.CriticalRules +
+		"\n\n" + progressInstructions
 }
 
-// The same policy suggester supplies guidance in the CLI. It changes the effective request only.
+// The shared scenario policy suggester changes the effective request only.
 // Derive its input from restored conversation messages so Continue needs no process-local history.
 func (session *scenarioSession) hooks() *gent.Hooks {
 	calls, suggestion := 0, ""
 	return &gent.Hooks{BeforeModelCall: func(
 		ctx context.Context, event *gent.BeforeModelCallEvent,
 	) error {
-		event.Request.Options.MaxTokens = 4096
 		if event.StreamTopicId != "llm-response" || calls >= 3 {
 			return nil
 		}
@@ -88,8 +96,17 @@ func (session *scenarioSession) hooks() *gent.Hooks {
 		}
 		calls++
 		if suggestion != "" {
-			event.Request.Messages = append(event.Request.Messages,
-				gent.TextParts(gent.ChatMessageTypeSystem, suggestion))
+			// Native Anthropic and Gemini requests require system messages in the prefix. Keep
+			// policy guidance after the original instructions, without changing saved user history.
+			prefix := 0
+			for prefix < len(event.Request.Messages) &&
+				event.Request.Messages[prefix].Role == gent.ChatMessageTypeSystem {
+				prefix++
+			}
+			messages := make([]*gent.ModelMessage, 0, len(event.Request.Messages)+1)
+			messages = append(messages, event.Request.Messages[:prefix]...)
+			messages = append(messages, gent.TextParts(gent.ChatMessageTypeSystem, suggestion))
+			event.Request.Messages = append(messages, event.Request.Messages[prefix:]...)
 		}
 		return nil
 	}}

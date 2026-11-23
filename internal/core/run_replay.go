@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"reflect"
 )
 
 // A compact projection retains absolute order separately from its remaining entry count.
@@ -347,7 +346,12 @@ func ValidateBundle(bundle RunView, registries ...*CodecRegistry) error {
 	if bundle.LastAppliedEventSequenceNumber != uint64(len(bundle.Activity)) {
 		return ErrEventGap
 	}
-	if !reflect.DeepEqual(history, bundle.History) {
+	encoder := newValueEncoder(registryOrDefault(registries))
+	equal, err := encoder.equalSavedValues(history, bundle.History)
+	if err != nil {
+		return fmt.Errorf("gent: compare archive history with recorded transitions: %w", err)
+	}
+	if !equal {
 		return errors.New("gent: history does not match recorded transitions")
 	}
 	if bundle.Checkpoint != nil {

@@ -29,32 +29,29 @@ func (run *executionRun) queueEvent(event *RecordedEvent) error {
 	// The event is a saved value. Remove process-local monotonic clock data before live delivery
 	// so the frozen envelope and its decoded archive form have the same timestamp representation.
 	candidate.Ts = candidate.Ts.Round(0)
-	data, err := run.codecs.Marshal(&candidate)
+	size, err := run.codecs.uncompressedSize(&candidate)
 	if err != nil {
 		return err
 	}
-	if len(
-		run.pending,
-	) >= run.policy.MaxPendingEvents || len(
-		data,
-	) > run.policy.MaxPendingBytes-run.pendingBytes {
+	if len(run.pending) >= run.policy.MaxPendingEvents ||
+		size > run.policy.MaxPendingBytes-run.pendingBytes {
 		return fmt.Errorf("gent: run %q recording allowance exceeded: events %d + 1, limit %d; "+
 			"encoded bytes %d + %d, limit %d", run.id, len(run.pending), run.policy.MaxPendingEvents,
-			run.pendingBytes, len(data), run.policy.MaxPendingBytes)
+			run.pendingBytes, size, run.policy.MaxPendingBytes)
 	}
 	// Only an event that fits receives a sequence and live delivery. Bounds never trigger a save
 	// outside an approved boundary, and an overflowing event cannot create a sequence gap.
 	*event = candidate
 	run.nextEventSequenceNumber = event.EventSequenceNumber
 	run.pending = append(run.pending, event)
-	run.pendingSizes = append(run.pendingSizes, len(data))
-	run.pendingBytes += len(data)
+	run.pendingSizes = append(run.pendingSizes, size)
+	run.pendingBytes += size
 	if event.Type == "execution_finished" || event.Type == "accepted_answer" ||
 		event.Type == "execution_paused" {
 		run.deferLive = true
 	}
 	if !run.deferLive {
-		run.publishLive(event, len(data))
+		run.publishLive(event, size)
 	}
 	return nil
 }

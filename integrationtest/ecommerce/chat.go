@@ -12,7 +12,15 @@ I just noticed that I was charged twice for a "Mighty Mouse" purchase I made abo
 	`ago. The charge shows up two times on my credit card statement, both for $79.99. Can you look ` +
 	`into this and help me get the duplicate charge resolved?`
 
-// NewChatConfig creates one fixture with the prompts and tools used by the interactive CLI.
+// InvestigationRequest adds reconciliation work with the same billing records and policy steps.
+const InvestigationRequest = CustomerRequest + `
+
+Reconcile the order, internal payment records, and live gateway status before choosing a remedy.
+Explain any difference between those records. Follow the required resolution steps and report
+what happens if a refund or adjustment fails. Give brief progress updates while you investigate,
+then summarize the current case status and what I must do next.`
+
+// NewChatConfig creates one fixture with the prompts and tools used by the server chat.
 // Keep this value for the conversation. Recreating it during recovery would reset the simulated
 // external service. Separate conversations need separate values so their changes stay isolated.
 func NewChatConfig(config testutil.TestConfig) testutil.ChatConfig {

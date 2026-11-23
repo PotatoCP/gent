@@ -76,7 +76,7 @@ func (decoder *valueDecoder) document(data []byte) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if version != savedDocumentVersion {
+	if version != savedDocumentVersion && version != compressedDocumentVersion {
 		decoder.status = valueDecodeIncompatible
 		return nil, fmt.Errorf("gent: unsupported saved document version %d", version)
 	}
@@ -84,11 +84,15 @@ func (decoder *valueDecoder) document(data []byte) (any, error) {
 	if err := tableString(fields["digest"], &digest); err != nil {
 		return nil, err
 	}
-	if digest != documentDigest(fields["data"].bytes()) {
+	if digest != versionedDocumentDigest(version, fields["data"].bytes()) {
 		return nil, errors.New("gent: saved document digest mismatch")
 	}
+	dataValue, err := decoder.documentData(version, fields["data"])
+	if err != nil {
+		return nil, err
+	}
 	reader := tableReader{registry: decoder.CodecRegistry}
-	root, err := reader.read(fields["data"])
+	root, err := reader.read(dataValue)
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +100,9 @@ func (decoder *valueDecoder) document(data []byte) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The physical document and its logical expansion have both passed their bounds. A
+	// compressed literal can be larger than MaxEncodedBytes without exceeding either bound.
+	decoder.documentRead = true
 	return decoder.decodedValue(value, 0)
 }
 

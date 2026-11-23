@@ -24,6 +24,10 @@ func (app *application) routes() http.Handler {
 		}{app.provider, scenarios})
 	})
 	mux.HandleFunc("POST /api/action", app.handleAction)
+	mux.HandleFunc("POST /api/reset", app.handleReset)
+	mux.HandleFunc("GET /api/conversations", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, app.conversations())
+	})
 	mux.HandleFunc("GET /api/state", func(w http.ResponseWriter, r *http.Request) {
 		runId := r.URL.Query().Get("runId")
 		if !app.requireRun(w, runId) {
@@ -54,6 +58,14 @@ func (app *application) routes() http.Handler {
 			origin := r.Header.Get("Origin")
 			if origin != "" && origin != "http://"+r.Host {
 				http.Error(w, "Cross-origin action rejected", http.StatusForbidden)
+				return
+			}
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/events" &&
+			r.URL.Path != "/api/reset" {
+			app.lifecycle.RLock()
+			defer app.lifecycle.RUnlock()
+			if !app.acceptServer(w, r) {
 				return
 			}
 		}
@@ -152,8 +164,10 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func (app *application) handleEvents(w http.ResponseWriter, r *http.Request) {
+	app.lifecycle.RLock()
 	runId := r.URL.Query().Get("runId")
 	if _, exists := app.store.read(runId); !exists {
+		app.lifecycle.RUnlock()
 		http.Error(w, "Conversation not found", 404)
 		return
 	}
@@ -162,6 +176,8 @@ func (app *application) handleEvents(w http.ResponseWriter, r *http.Request) {
 	queue, unsubscribe := app.hub.subscribe(runId)
 	defer unsubscribe()
 	state, err := app.snapshot(runId, replayCapture)
+	w.Header().Set(serverHeader, app.serverId)
+	app.lifecycle.RUnlock()
 	if err != nil {
 		log.Printf("stream restore: %v", err)
 		http.Error(w, "Could not restore display", 500)
@@ -193,6 +209,9 @@ func (app *application) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer ticker.Stop()
 	for {
 		select {
+		case <-app.ctx.Done():
+			// HTTP Shutdown waits for handlers. Idle SSE clients must leave when the server stops.
+			return
 		case <-r.Context().Done():
 			return
 		case data, ok := <-queue:

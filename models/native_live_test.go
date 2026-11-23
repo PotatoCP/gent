@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -66,6 +67,30 @@ func liveProgramCalls(execCtx *gent.ExecutionContext) ([][]liveProgramCall, erro
 	return programs, execCtx.RecordingError()
 }
 
+// A model can correct a script after an inner tool has already returned. Those calls remain
+// accepted evidence. Require the complete two-tool program and account for every real call;
+// neither a guessed answer, direct calls, nor two separate partial programs prove this feature.
+func validLiveProgramEvidence(calls []string, programs [][]liveProgramCall,
+	want []liveProgramCall,
+) bool {
+	var observed []string
+	complete := false
+	for _, program := range programs {
+		complete = complete || reflect.DeepEqual(program, want)
+		for _, call := range program {
+			valid := false
+			for _, expected := range want {
+				valid = valid || reflect.DeepEqual(call, expected)
+			}
+			if !valid {
+				return false
+			}
+			observed = append(observed, call.name+":"+call.input.(*responseInput).ID)
+		}
+	}
+	return complete && reflect.DeepEqual(observed, calls)
+}
+
 func liveToolChain(calls *[]string, withSearch bool) (*toolchain.JsToolChainWrapper, error) {
 	lookup := &liveIndexable[*responseInput, *responseOutput]{gent.DefineTool("lookup",
 		func(_ context.Context, input *responseInput) (*gent.ToolExecutionResponse, error) {
@@ -109,8 +134,7 @@ func TestNativeLive(t *testing.T) {
 		search   bool
 	}
 	type expected struct {
-		calls    []string
-		programs [][]liveProgramCall
+		program []liveProgramCall
 	}
 	type testCase struct {
 		name     string
@@ -118,11 +142,10 @@ func TestNativeLive(t *testing.T) {
 		expected expected
 	}
 	want := expected{
-		calls: []string{"lookup:start", "read:record-9"},
-		programs: [][]liveProgramCall{{
+		program: []liveProgramCall{
 			{"lookup", &responseInput{ID: "start"}, `{"next_id":"record-9"}`, nil},
 			{"read", &responseInput{ID: "record-9"}, "record-finished", nil},
-		}},
+		},
 	}
 	var cases []testCase
 	for _, provider := range liveProviders() {
@@ -192,7 +215,8 @@ The program and its tool calls are complete. Do not run them again.`)}}, nil
 			if !assert.NoError(t, err) {
 				return
 			}
-			assert.Equal(t, test.expected, expected{calls, programs})
+			assert.True(t, validLiveProgramEvidence(calls, programs, test.expected.program),
+				"calls: %#v; programs: %#v", calls, programs)
 			if test.input.search {
 				var catalogs [][]string
 				for _, event := range providerEvents(execCtx) {

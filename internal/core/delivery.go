@@ -12,7 +12,8 @@ import (
 type DeliveryConfig struct {
 	// MaxEvents includes the event currently waiting for the consumer. The default is 4096.
 	MaxEvents int
-	// MaxBytes bounds encoded queued data, including the current event. The default is 8 MiB.
+	// MaxBytes bounds uncompressed encoded data, including the current event. Default: 8 MiB.
+	// Storage compression does not increase this allowance.
 	// An event larger than this limit closes this subscription without stopping execution.
 	MaxBytes int
 	// Timeout limits each wait for the consumer, including after execution ends. Default: 30s.

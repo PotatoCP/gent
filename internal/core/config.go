@@ -31,7 +31,8 @@ type Config struct {
 type RecordingConfig struct {
 	// MaxPendingEvents defaults to 65,536 unsaved events.
 	MaxPendingEvents int
-	// MaxPendingBytes defaults to 64 MiB of encoded unsaved events, not total process memory.
+	// MaxPendingBytes defaults to 64 MiB of uncompressed encoded events, not total heap memory.
+	// Storage compression does not increase this allowance.
 	MaxPendingBytes int
 	// SaveTimeout defaults to 30 seconds. Save uses a context independent of model cancellation.
 	// A timeout does not prove storage rejection; the recorder must return its actual result.

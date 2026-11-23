@@ -10,6 +10,11 @@ accepted archive. Compaction changes active selection, not archived originals.
 Read RunView's events, history, requests, responses, tool evidence, and accepted outcomes as
 read-only values. EventSequenceNumber defines event order. Timestamps are for display and diagnosis.
 
+Use `CodecRegistry.Marshal` and `Unmarshal` to store and load a reconstructed RunView. The loaded
+view can accept later batches. Loading checks that its retained execution projection agrees with
+the archive. This check compares saved logical values, including pointer-keyed metadata. Decoded
+copies have separate mutable values; they do not need the same process addresses.
+
 ## Compare original and effective content
 
 The archive retains original tasks, effective Hook inputs, native response evidence, rejected

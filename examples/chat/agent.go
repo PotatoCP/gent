@@ -28,8 +28,9 @@ func (out *savedTextOutput) Process(execCtx *gent.ExecutionContext, parts []gent
 		Content: []gent.ContentPart{gent.TextPart(text)}}, nil
 }
 
-func newAgent(model gent.Model) *react.Agent[string] {
-	return react.NewWithOutput(model, &savedTextOutput{output.NewTextOutput()})
+func newAgent(model gent.Model, provider string) *react.Agent[string] {
+	return react.NewWithOutput(model, &savedTextOutput{output.NewTextOutput()}).
+		WithCallOptions(chatCallOptions(provider, model))
 }
 
 // The deterministic provider exercises the same managed stream, native tool, and output paths.

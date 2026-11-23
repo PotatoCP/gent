@@ -18,33 +18,30 @@ go -C scripts build -o "$REPORT_DIR/releasecheck" ./releasecheck
 ENV_RUN=("$REPORT_DIR/envrun" -env-file "$REPO_ROOT/.env")
 MODULES=(. docs examples examples/chat scripts)
 
-test_mode() {
-	local mode="$1" folder
-	local flags=()
+test_mode() (
+	local mode="$1" folder failed=0
+	local flags=(-p 1)
 	if [[ "$mode" == portable ]]; then export CGO_ENABLED=0; fi
 	if [[ "$mode" == race ]]; then flags+=(-race); fi
 	for folder in "${MODULES[@]}"; do
 		printf 'Testing %s (%s)\n' "$folder" "$mode"
-		"${ENV_RUN[@]}" -- go -C "$folder" test "${flags[@]}" ./... -count=1 -timeout 300s
+		if ! "${ENV_RUN[@]}" -- go -C "$folder" test "${flags[@]}" ./... -count=1 -timeout 300s; then
+			failed=1
+		fi
 	done
-}
+	return "$failed"
+)
 
-# Each mode has its own log. Collect every result before proceeding or reporting a failure.
-pids=()
-for mode in native portable race; do
-	test_mode "$mode" >"$REPORT_DIR/$mode.log" 2>&1 &
-	pids+=("$!")
-done
+# Large recovery suites can exceed their fixed deadline when modes and packages compete for CPU.
+# Run them in sequence, keep the same test deadlines, and collect every module's result.
 failed=0
-index=0
 for mode in native portable race; do
-	if wait "${pids[$index]}"; then
+	if test_mode "$mode" >"$REPORT_DIR/$mode.log" 2>&1; then
 		printf 'PASS %s suites\n' "$mode"
 	else
 		cat "$REPORT_DIR/$mode.log"
 		failed=1
 	fi
-	index=$((index + 1))
 done
 [[ "$failed" == 0 ]] || exit 1
 
@@ -59,6 +56,8 @@ npm --prefix docs run check:examples -- "$REPORT_DIR/docs.cover" \
 npm --prefix docs run browser >"$REPORT_DIR/docs-browser.log" 2>&1
 node --test examples/chat/tests/*.test.mjs >"$REPORT_DIR/chat-tests.log" 2>&1
 "${ENV_RUN[@]}" -- node examples/chat/tests/browser.mjs >"$REPORT_DIR/chat-browser.log" 2>&1
+"${ENV_RUN[@]}" -- node examples/chat/tests/browser-live-fixture.mjs \
+	>"$REPORT_DIR/chat-native-browser.log" 2>&1
 printf 'PASS documentation and chat browser checks\n'
 
 "$REPORT_DIR/releasecheck" -root "$REPO_ROOT" -version "$VERSION" \
@@ -74,20 +73,31 @@ mapfile -t providers <"$REPORT_DIR/providers.txt"
 
 # A provider can take several minutes to finish all features. Each feature keeps its own
 # 300-second test deadline; individual request contexts retain their shorter limits.
-live_list="$("${ENV_RUN[@]}" -- go test ./models -list '^TestLive(Providers|Images|Provider[A-Z])')"
+# NativeLive covers programmatic calls and search plus programmatic calls on every provider.
+# Keep it in both discovery and admission; fixture suites cannot verify those remote paths.
+live_list="$("${ENV_RUN[@]}" -- go test ./models \
+	-list '^Test(Live(Providers|Images|Provider[A-Z])|NativeLive$)')"
 live_tests=()
 while IFS= read -r name; do
-	case "$name" in TestLive*) live_tests+=("$name") ;; esac
+	case "$name" in TestLive*|TestNativeLive) live_tests+=("$name") ;; esac
 done <<<"$live_list"
 [[ "${#live_tests[@]}" -gt 0 ]] || { printf 'No live tests found.\n' >&2; exit 1; }
 
 live_provider() {
-	local provider="$1" pattern="${1//./\\.}" name
+	local provider="$1" pattern="${1//./\\.}" name scenario
 	for name in "${live_tests[@]}"; do
 		printf 'Checking %s: %s\n' "$provider" "$name"
 		"${ENV_RUN[@]}" -provider "$provider" -- go test ./models \
 			-run "^${name}$/^${pattern}$" -count=1 -timeout 300s
 	done
+	case "$provider" in
+		OpenAI|Anthropic|Gemini|xAI)
+			for scenario in airline ecommerce; do
+				printf 'Checking chat HTTP/SSE: %s/%s\n' "$provider" "$scenario"
+				"${ENV_RUN[@]}" -provider "$provider" -- go -C examples/chat test \
+					-run "^TestLiveChatScenarios$/^${provider,,}$/^${scenario}$" -count=1 -timeout 300s
+			done ;;
+	esac
 	if [[ "$provider" == xAI ]]; then
 		"${ENV_RUN[@]}" -provider xAI -- go test ./models \
 			-run '^TestStreaming' -count=1 -timeout 300s

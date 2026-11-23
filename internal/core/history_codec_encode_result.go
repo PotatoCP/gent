@@ -50,7 +50,13 @@ func newValueEncoder(codecs *CodecRegistry) *valueEncoder {
 }
 
 func (encoder *valueEncoder) value(value any, depth int) (EncodedValue, error) {
-	result, err := encoder.encode(reflect.ValueOf(value), depth)
+	return encoder.valueExpected(value, depth, nil)
+}
+
+func (encoder *valueEncoder) valueExpected(
+	value any, depth int, expected reflect.Type,
+) (EncodedValue, error) {
+	result, err := encoder.encodeExpected(reflect.ValueOf(value), depth, expected)
 	if err != nil {
 		return EncodedValue{}, err
 	}

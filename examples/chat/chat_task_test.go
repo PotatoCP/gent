@@ -1,11 +1,12 @@
-package testutil
+package main
 
 import (
-	"bytes"
 	"context"
 	"testing"
 
 	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/integrationtest/testutil"
+	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -31,20 +32,22 @@ func (model *chatTaskModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	return gent.PrepareModelRequest(execCtx, request, chain)
 }
 
-func TestInteractiveChatKeepsMessageRoles(t *testing.T) {
+type conversationMessage struct{ role, text string }
+
+func TestChatHTTPKeepsMessageRoles(t *testing.T) {
 	type input struct{ prompts []string }
-	type expected struct{ history []ConversationMessage }
+	type expected struct{ history []conversationMessage }
 	type testCase struct {
 		name     string
 		input    input
 		expected expected
 	}
 	cases := []testCase{
-		{"first turn", input{[]string{"Read."}}, expected{[]ConversationMessage{
+		{"first turn", input{[]string{"Read."}}, expected{[]conversationMessage{
 			{"user", "Read."}, {"agent", "Done."},
 		}}},
 		{"one conversation", input{[]string{"Earlier.", "Read.", "Check again."}},
-			expected{[]ConversationMessage{
+			expected{[]conversationMessage{
 				{"user", "Earlier."}, {"agent", "Done."}, {"user", "Read."}, {"agent", "Done."},
 				{"user", "Check again."}, {"agent", "Done."},
 			}}},
@@ -55,29 +58,44 @@ Use supplied facts.`
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			model := &chatTaskModel{}
-			var rendered bytes.Buffer
-			chat := &InteractiveChat{Model: model, Writer: &rendered,
-				Config: TestConfig{ToolChain: ToolChainRegistry}, ChatCfg: ChatConfig{
+			app, _ := testApplication(t, 0)
+			app.model = func() gent.Model { return model }
+			app.newSession = func(id scenarioId) (*scenarioSession, error) {
+				return &scenarioSession{id: id, tools: toolchain.New(), config: testutil.ChatConfig{
 					Name: "roles", SystemPrompt: "Help the customer.", CriticalRules: "Use supplied facts.",
-					MaxIterations: 3, RegisterTools: func(gent.ToolChain) {},
-				}}
-			t.Cleanup(chat.Close)
+					MaxIterations:   3,
+					PolicySuggester: func(context.Context, string) string { return "Check policy." },
+				}}, nil
+			}
+			var history []conversationMessage
 			var runId string
-			conversation := []*gent.ModelMessage{gent.TextParts(gent.ChatMessageTypeSystem, system)}
+			conversation := []*gent.ModelMessage{
+				gent.TextParts(gent.ChatMessageTypeSystem, system+"\n\n"+progressInstructions),
+				gent.TextParts(gent.ChatMessageTypeSystem, "Check policy."),
+			}
 			var requests [][]*gent.ModelMessage
 			for _, prompt := range test.input.prompts {
 				conversation = append(conversation, gent.TextParts(gent.ChatMessageTypeHuman, prompt))
 				requests = append(requests, append([]*gent.ModelMessage(nil), conversation...))
-				if !assert.NoError(t, chat.SendMessage(context.Background(), prompt)) {
+				next := submitHTTP(t, app, &actionRequest{Action: actionTurn,
+					RunId: runId, Prompt: prompt})
+				state := savedHTTP(t, app, next)
+				if runId == "" {
+					runId = next
+				}
+				assert.Equal(t, runId, next)
+				history = append(history, conversationMessage{"user", prompt},
+					conversationMessage{"agent", state.LastAnswer})
+				data, _ := app.store.read(runId)
+				runner := app.runner(nil, app.sessions[runId])
+				execCtx, err := app.restore(app.ctx, runner, runId, data, replayCapture)
+				if !assert.NoError(t, err) {
 					return
 				}
-				if runId == "" {
-					runId = chat.execCtx.RunId()
-				}
-				assert.Equal(t, runId, chat.execCtx.RunId())
+				defer execCtx.Release()
 				// The saved native answer supplies the generated message identity. Verify all other
 				// fields explicitly and require the next request to use this same logical item.
-				entries, err := chat.execCtx.Scratchpad()
+				entries, err := execCtx.Scratchpad()
 				if !assert.NoError(t, err) {
 					return
 				}
@@ -91,9 +109,8 @@ Use supplied facts.`
 					Continuation: last.Continuation})
 				conversation = append(conversation, answer)
 			}
-			chat.Close()
 			assert.Equal(t, requests, model.messages)
-			assert.Equal(t, test.expected, expected{chat.History})
+			assert.Equal(t, test.expected, expected{history})
 		})
 	}
 }

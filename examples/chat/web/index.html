@@ -12,6 +12,8 @@
 </head>
 <body>
   <header class="app-header">
+    <button id="chats-toggle" class="quiet-button" aria-controls="conversations"
+      aria-expanded="true">☰ Chats</button>
     <a class="brand" href="/" aria-label="Gent, new conversation">gent<span> / chat</span></a>
     <span class="header-divider"></span>
     <span class="header-title">Agent workspace</span>
@@ -23,6 +25,16 @@
     </div>
   </header>
   <main class="workspace">
+    <aside id="conversations" aria-label="Previous conversations">
+      <div class="chats-heading"><h2>Your chats</h2>
+        <button id="chats-close" class="icon-button" aria-label="Close chats">×</button></div>
+      <nav id="conversation-list" aria-label="Saved conversations"></nav>
+      <p id="chats-empty">Your conversations will appear here.</p>
+      <div class="chats-footer">
+        <p>Saved for this server session.</p>
+        <button id="server-reset" class="text-button">↻ Server Reset</button>
+      </div>
+    </aside>
     <section class="conversation" aria-label="Agent conversation">
       <div class="conversation-heading">
         <div><h1 id="agent-name">Gent assistant</h1>
@@ -46,6 +58,14 @@
               <small id="suggestion-detail">Use the integration test task.</small></span>
             <span aria-hidden="true">→</span>
           </button>
+          <button id="investigation" class="suggestion investigation">
+            <span class="suggestion-icon" aria-hidden="true">↗</span>
+            <span><strong>Investigate and compare</strong>
+              <small>Check related records, compare options, and report progress.</small></span>
+            <span aria-hidden="true">→</span>
+          </button>
+          <p class="scenario-note">Reasoning appears when the provider shares it.
+            Progress updates stay separate from the final answer.</p>
         </div>
         <div id="messages" aria-label="Messages"></div>
         <div id="working" class="working" hidden><span class="pulse" aria-hidden="true"></span>
@@ -150,5 +170,12 @@
         <span>Server restart clears all runs.</span></div>
     </aside>
   </main>
+  <dialog id="reset-dialog" aria-labelledby="reset-title" aria-describedby="reset-description">
+    <h2 id="reset-title">Reset this server?</h2>
+    <p id="reset-description">This stops active work and clears every chat and saved event.
+      The sample customer data will start over. Provider settings stay the same.</p>
+    <div class="reset-actions"><button id="reset-cancel">Cancel</button>
+      <button id="reset-confirm">Reset server</button></div>
+  </dialog>
 </body>
 </html>

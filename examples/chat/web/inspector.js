@@ -26,6 +26,7 @@ export function createInspector(request, notify) {
     const open = !document.body.classList.contains('inspector-hidden');
     document.querySelector('.conversation').inert = expanded || (open && mobile.matches);
     document.querySelector('.app-header').inert = expanded;
+    byId('conversations').inert = expanded || document.body.classList.contains('chats-hidden');
   }
   function expand(open) {
     expanded = open;
@@ -45,9 +46,12 @@ export function createInspector(request, notify) {
     if (!open) expand(false);
     document.body.classList.toggle('inspector-hidden', !open);
     byId('inspector-toggle').setAttribute('aria-expanded', String(open));
+    if (open) document.dispatchEvent(new Event('inspector-open'));
     updateFocusScope();
   }
   show(!mobile.matches);
+  // Small screens use one panel at a time so a chat list cannot cover inspector controls.
+  document.addEventListener('chat-list-open', () => { if (mobile.matches) show(false); });
   mobile.addEventListener('change', () => {
     if (!expanded) show(!mobile.matches);
   });
@@ -189,7 +193,7 @@ export function createInspector(request, notify) {
     try {
       const query = new URLSearchParams({runId: state.runId, kind: tab, path: byId('path').value});
       const response = await request(`/api/inspect?${query}`);
-      if (current !== generation || response.status === RequestStatus.MissingRun) return;
+      if (current !== generation || response.status !== RequestStatus.Ready) return;
       const result = response.data;
       savedData = result;
       explorer = createRunExplorer(byId('run-explorer'), {

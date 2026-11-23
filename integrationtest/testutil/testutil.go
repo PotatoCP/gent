@@ -21,7 +21,6 @@ import (
 	"github.com/rickchristie/gent/models"
 	"github.com/rickchristie/gent/search"
 	"github.com/rickchristie/gent/toolchain"
-	genttrace "github.com/rickchristie/gent/trace"
 )
 
 // ToolChainType specifies which toolchain to use.
@@ -131,40 +130,12 @@ func createEmbedder() search.Embedder {
 	return embedder
 }
 
-// InteractiveConfig returns a config for interactive CLI with streaming
-// and native registry.
-func InteractiveConfig() TestConfig {
-	return TestConfig{
-		ToolChain:            ToolChainRegistry,
-		ShowIterationHistory: false,
-		ShowEvents:           false,
-		Embedder:             createEmbedder(),
-	}
-}
-
-// InteractiveConfigSearch returns a config for interactive
-// CLI with streaming and SearchChain toolchain.
-func InteractiveConfigSearch() TestConfig {
-	return TestConfig{
-		ToolChain:            ToolChainSearch,
-		ShowIterationHistory: false,
-		ShowEvents:           false,
-		Embedder:             createEmbedder(),
-	}
-}
-
-// ConversationMessage represents a message in conversation history.
-type ConversationMessage struct {
-	Role    string // "user" or "agent"
-	Content string
-}
-
 // DefaultModelName is the default LLM model for integration tests.
 const DefaultModelName = gent.ModelXAIGrok47
 
 // ModelOption defines an LLM model available for integration tests.
 type ModelOption struct {
-	Label   string // display name in CLI menu
+	Label   string // provider label in test output
 	Name    string // model ID for API calls
 	EnvKey  string // env var for API key
 	BaseURL string // API base URL (empty = OpenAI default)
@@ -184,8 +155,8 @@ const (
 	envKeyAnthropic = "GENT_TEST_ANTHROPIC_KEY"
 )
 
-// AvailableModels keeps one current flagship per provider so the CLI stays easy to use.
-// Check provider docs when updating this list. See ../README.md for sources and selection rules.
+// AvailableModels supplies provider settings for scenario and native request tests.
+// The server example uses its own configured model selection and project .env settings.
 var AvailableModels = []ModelOption{
 	{
 		Label: "xAI grok-4.7", Name: gent.ModelXAIGrok47,
@@ -372,7 +343,7 @@ func CriticalRules(
 
 // PolicySuggestionHook adds policy guidance to the first three main model requests of a turn.
 // The request hook keeps generated guidance separate from saved user input. It does not change
-// accepted history. Create or reset this helper before a turn; SendMessage is serial.
+// accepted history. Create or reset this helper before each serial turn.
 type PolicySuggestionHook struct {
 	suggester  func(ctx context.Context, text string) string
 	text       string
@@ -616,10 +587,10 @@ func RunScenario(
 }
 
 // -------------------------------------------------------------------------
-// Interactive Chat
+// Shared chat configuration
 // -------------------------------------------------------------------------
 
-// ChatConfig defines domain-specific parameters for interactive chat.
+// ChatConfig defines the shared domain setup for the server chat and scenario tests.
 type ChatConfig struct {
 	Name          string
 	SystemPrompt  string
@@ -627,198 +598,10 @@ type ChatConfig struct {
 	MaxIterations float64
 	RegisterTools func(tc gent.ToolChain)
 	// PolicySuggester generates a policy suggestion section based
-	// on conversation history. Called on each SendMessage with
-	// the last 10 messages formatted as text. Returns empty string
+	// on conversation history. The server supplies recent saved messages as text.
+	// Returns an empty string
 	// if no policies are relevant.
 	PolicySuggester func(ctx context.Context, text string) string
-}
-
-// InteractiveChat holds state for an interactive chat session.
-type InteractiveChat struct {
-	History    []ConversationMessage
-	Model      gent.Model
-	Config     TestConfig
-	Writer     io.Writer
-	ChatCfg    ChatConfig
-	runner     *executor.Runner[string]
-	execCtx    *gent.ExecutionContext
-	trace      *genttrace.Sequencer
-	policy     *PolicySuggestionHook
-	streamWait func()
-	logWait    func()
-	closed     bool
-}
-
-// NewInteractiveChat creates a new interactive chat session.
-func NewInteractiveChat(
-	w io.Writer,
-	config TestConfig,
-	chatCfg ChatConfig,
-) (*InteractiveChat, error) {
-	model, err := CreateModel(config.ModelName)
-	if err != nil {
-		return nil, err
-	}
-
-	return &InteractiveChat{
-		History: make([]ConversationMessage, 0),
-		Model:   model,
-		Config:  config,
-		Writer:  w,
-		ChatCfg: chatCfg,
-	}, nil
-}
-
-// recentHistoryText formats the last N messages as text for policy suggestion.
-func (s *InteractiveChat) recentHistoryText(maxMessages int) string {
-	history := s.History
-	if len(history) > maxMessages {
-		history = history[len(history)-maxMessages:]
-	}
-	var sb strings.Builder
-	for _, msg := range history {
-		fmt.Fprintf(&sb, "- %s: %s\n", msg.Role, msg.Content)
-	}
-	return sb.String()
-}
-
-// SendMessage sends a user message and gets the agent response.
-func (s *InteractiveChat) SendMessage(
-	ctx context.Context, userMessage string,
-) error {
-	if s.closed {
-		return fmt.Errorf("chat is closed")
-	}
-	s.History = append(s.History, ConversationMessage{
-		Role:    "user",
-		Content: userMessage,
-	})
-
-	if s.execCtx == nil {
-		if err := s.start(ctx); err != nil {
-			return err
-		}
-	}
-	if s.policy != nil {
-		s.policy.text = s.recentHistoryText(10)
-		s.policy.calls = 0
-	}
-	task := gent.NewTask(gent.TextContent{Text: userMessage})
-	if s.execCtx.TurnId() == "" {
-		task.Instructions = []*gent.ModelMessage{gent.TextParts(gent.ChatMessageTypeSystem,
-			s.ChatCfg.SystemPrompt+"\n\n"+s.ChatCfg.CriticalRules)}
-	}
-
-	fmt.Fprintln(s.Writer)
-	PrintSection(s.Writer, "Your Input")
-	fmt.Fprintln(s.Writer, userMessage)
-
-	fmt.Fprintln(s.Writer)
-	PrintSection(s.Writer, "Agent Processing")
-	fmt.Fprintln(s.Writer)
-
-	_, result, executionErr := s.runner.NewTurn(s.execCtx, task)
-	if executionErr != nil {
-		return executionErr
-	}
-	execCtx := s.execCtx
-
-	fmt.Fprintln(s.Writer)
-	stats := execCtx.Stats()
-	fmt.Fprintf(s.Writer,
-		"[Stats: %d iterations, %d input tokens, "+
-			"%d output tokens, %v]\n",
-		execCtx.Iteration(),
-		stats.GetTotalInputTokens(),
-		stats.GetTotalOutputTokens(),
-		execCtx.Duration())
-
-	if result.TerminationReason != gent.TerminationSuccess {
-		fmt.Fprintf(s.Writer, "\nExecution: %s\n", result.TerminationReason)
-		return nil
-	}
-
-	var responseText string
-	for _, part := range result.Output {
-		if tc, ok := part.(gent.TextContent); ok {
-			responseText = tc.Text
-		}
-	}
-
-	if responseText != "" {
-		s.History = append(s.History, ConversationMessage{
-			Role:    "agent",
-			Content: responseText,
-		})
-
-		fmt.Fprintln(s.Writer)
-		PrintSection(s.Writer, "Agent Response")
-		fmt.Fprintln(s.Writer, responseText)
-	}
-
-	return nil
-}
-
-// start binds one conversation to the first SendMessage context. Keep that context alive for
-// the chat lifetime. All later prompts use the same run, tool state, and accepted history.
-func (s *InteractiveChat) start(ctx context.Context) error {
-	// Display and trace workers can write while the caller prints turn progress. Use one mutex
-	// for both destinations because an application can pass the same writer for both.
-	writeMu := &sync.Mutex{}
-	s.Writer = &serialWriter{mu: writeMu, target: s.Writer}
-	if s.Config.LogWriter != nil {
-		s.Config.LogWriter = &serialWriter{mu: writeMu, target: s.Config.LogWriter}
-	}
-	tc := CreateToolChain(s.Config)
-	s.ChatCfg.RegisterTools(tc)
-	if err := InitializeToolChain(tc, s.Config); err != nil {
-		return fmt.Errorf("initialize toolchain: %w", err)
-	}
-	seq, err := NewIntegrationTrace("")
-	if err != nil {
-		return err
-	}
-	config := &gent.Config{
-		ToolChain:   WrapToolChain(tc, s.Config),
-		Subscribers: []*gent.SubscriberRegistration{{Subscriber: seq, Delivery: gent.SubscriberLive}},
-		Limits: []gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations,
-			MaxValue: s.ChatCfg.MaxIterations}},
-	}
-	ConfigureCompaction(config, s.Config.Compaction, s.Model, format.NewXML())
-	if s.ChatCfg.PolicySuggester != nil {
-		s.policy = &PolicySuggestionHook{suggester: s.ChatCfg.PolicySuggester}
-		config.Hooks = &gent.Hooks{BeforeModelCall: s.policy.BeforeModelCall}
-	}
-	runner := executor.NewRunner(react.NewAgent(s.Model), config)
-	execCtx, err := runner.NewExecutionContext(ctx, s.ChatCfg.Name+"-chat")
-	if err != nil {
-		seq.Close()
-		return err
-	}
-	s.runner, s.execCtx, s.trace = runner, execCtx, seq
-	s.streamWait = StartTraceStreamOutput(seq, s.Writer)
-	if s.Config.LogWriter != nil {
-		s.logWait = StartTraceEventLogger(seq, s.Config.LogWriter)
-	}
-	return nil
-}
-
-// Close joins the chat's execution and trace workers. Call it when the conversation ends.
-func (s *InteractiveChat) Close() {
-	if s.closed {
-		return
-	}
-	s.closed = true
-	if s.execCtx == nil {
-		return
-	}
-	s.execCtx.Release()
-	s.trace.Close()
-	s.streamWait()
-	if s.logWait != nil {
-		s.logWait()
-		WriteTraceSnapshot(s.Config.LogWriter, s.trace.Snapshot())
-	}
 }
 
 // serialWriter protects application writers that do not support concurrent calls.

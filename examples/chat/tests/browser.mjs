@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {execFileSync, spawn} from 'node:child_process';
 import {once} from 'node:events';
-import {mkdir, mkdtemp, rm} from 'node:fs/promises';
+import {mkdir, mkdtemp, rm, writeFile} from 'node:fs/promises';
 import {createRequire} from 'node:module';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
@@ -11,16 +11,19 @@ import {checkAdditionalEvidence, checkChronology, checkFullscreen,
 import {checkToolGroups} from './browser-tool-groups.mjs';
 import {checkChatTranscript, watchLivePreview} from './browser-chat.mjs';
 import {checkDisclosureHierarchy} from './browser-disclosures.mjs';
+import {checkConversations} from './browser-conversations.mjs';
+import {saveRunEvidence, checkAcceptedChat, checkSavedTools} from './browser-evidence.mjs';
 
 const require = createRequire(new URL('../../../docs/package.json', import.meta.url));
 const {chromium, expect} = require('playwright/test');
 const folder = await mkdtemp(join(tmpdir(), 'gent-chat-browser-'));
 const binary = join(folder, 'chat');
-const shots = fileURLToPath(new URL('../screenshots/', import.meta.url));
+const shots = process.env.CHAT_TEST_OUTPUT_DIR ||
+  fileURLToPath(new URL('../screenshots/', import.meta.url));
 await mkdir(shots, {recursive: true});
 const provider = process.env.CHAT_TEST_PROVIDER || 'demo';
 const live = provider !== 'demo';
-let child, browser;
+let child, browser, currentURL, currentRunId;
 let logs = '';
 const errors = [];
 
@@ -52,6 +55,7 @@ try {
     cwd: fileURLToPath(new URL('../', import.meta.url)), env: process.env,
   });
   const url = await start();
+  currentURL = url;
   browser = await chromium.launch({headless: true, args: ['--no-sandbox'],
     executablePath: process.env.CHROME_PATH || '/opt/google/chrome/chrome'});
   const page = await browser.newPage({viewport: {width: 1440, height: 1000}});
@@ -78,7 +82,7 @@ try {
   await resize.press('ArrowRight');
   await expect(page.locator('#inspector')).toHaveCSS('width', '640px');
   await resize.press('End');
-  await expect(page.locator('#inspector')).toHaveCSS('width', '1120px');
+  await expect(page.locator('#inspector')).toHaveCSS('width', '900px');
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
   await resize.press('Home');
   await expect(page.locator('#inspector')).toHaveCSS('width', '280px');
@@ -113,23 +117,28 @@ try {
   await expect(page.locator('#status')).toHaveText('Turn complete', {timeout: 120000});
   const runId = new URL(page.url()).searchParams.get('run');
   assert.ok(runId);
-  const group = page.locator('.tool-group-toggle').first();
-  await expect(group.locator(':scope > summary')).toHaveText('Ran tools');
-  await expect(group).not.toHaveAttribute('open');
-  await group.locator(':scope > summary').click();
-  const tool = page.locator('.message.tool').first();
-  await expect(tool.locator('.tool-name')).toHaveText('get_customer_info');
-  await expect(tool.locator('.tool-status')).toHaveText('Complete');
-  await tool.locator('summary').click();
-  await expect(tool.locator('.tool-args')).toHaveText(
-    '{"customer_id":"","email":"john.smith@email.com"}');
-  assert.deepEqual(JSON.parse(await tool.locator('.message-body').innerText()), {
-    id: 'C001', name: 'John Smith', email: 'john.smith@email.com', phone: '+1-555-0123',
-    frequent_flyer_tier: 'gold', booking_ids: ['BK001', 'BK002'],
-  });
+  currentRunId = runId;
+  if (!live) {
+    const group = page.locator('.tool-group-toggle').first();
+    await expect(group.locator(':scope > summary')).toHaveText('Ran tools');
+    await expect(group).not.toHaveAttribute('open');
+    await group.locator(':scope > summary').click();
+    const tool = page.locator('.message.tool').first();
+    await expect(tool.locator('.tool-name')).toHaveText('get_customer_info');
+    await expect(tool.locator('.tool-status')).toHaveText('Complete');
+    await tool.locator('summary').click();
+    await expect(tool.locator('.tool-args')).toHaveText(
+      '{"customer_id":"","email":"john.smith@email.com"}');
+    assert.deepEqual(JSON.parse(await tool.locator('.message-body').innerText()), {
+      id: 'C001', name: 'John Smith', email: 'john.smith@email.com', phone: '+1-555-0123',
+      frequent_flyer_tier: 'gold', booking_ids: ['BK001', 'BK002'],
+    });
+  }
   const answers = page.locator('.message[data-type="final_answer"]');
   await expect(answers).toHaveCount(1);
-  await expect(answers.locator('.message-body')).toHaveText(live ? 'Customer checked.' :
+  const firstSaved = await saveRunEvidence(page.request, url, runId, shots, `${provider}-first`);
+  await checkAcceptedChat(page, expect, firstSaved, [first]);
+  if (!live) await expect(answers.locator('.message-body')).toHaveText(
     'I found John Smith (C001), using john.smith@email.com.');
   await expect(page.locator('.message[data-type="final_answer_candidate"]')).toHaveCount(0);
   if (!live) {
@@ -145,16 +154,19 @@ try {
   await expect(page.locator('#event-json > details')).toBeVisible();
   await page.locator('#event-search').fill('');
   await page.locator('#event-delivery').selectOption('');
-  await page.locator('#prompt').fill(live ? 'Reply with only the code I asked you to remember.' :
-    'What was my first message and the earlier lookup?');
+  const second = live ? 'Reply with only the code I asked you to remember.' :
+    'What was my first message and the earlier lookup?';
+  await page.locator('#prompt').fill(second);
   await page.locator('#send').click();
   await expect(answers).toHaveCount(2, {timeout: 120000});
   await expect(page.locator('#status')).toHaveText('Turn complete', {timeout: 120000});
   assert.equal(new URL(page.url()).searchParams.get('run'), runId);
-  await expect(answers.last().locator('.message-body')).toHaveText(live ? 'Cedar-742' :
+  if (!live) await expect(answers.last().locator('.message-body')).toHaveText(
     `Your first message was: ${first} ` +
     'Earlier lookup: I found John Smith (C001), using john.smith@email.com.');
-  const accepted = await (await page.request.get(`${url}/api/state?runId=${runId}`)).json();
+  const saved = await saveRunEvidence(page.request, url, runId, shots, `${provider}-second`);
+  await checkAcceptedChat(page, expect, saved, [first, second]);
+  const accepted = saved.state;
   // Inspection reads both complete archive data and replay state without starting a worker.
   for (const kind of ['view', 'state']) {
     await page.locator(`#tab-${kind}`).click();
@@ -188,15 +200,19 @@ try {
     await explorer.locator('.ge-source > summary').click();
     await expect(explorer.locator('.ge-path')).toHaveText(
       `${kind === 'view' ? '/history' : '/History'}/entries/0/Messages/0`);
-    await nav.getByRole('button', {name: 'Tools', exact: true}).click();
-    await expect(explorer.locator('.ge-row')).toHaveCount(1);
-    await explorer.locator('.ge-row').click();
-    await expect(explorer.locator('.ge-detail h5')).toHaveText([
-      'get_customer_info', 'Tool input', 'Tool result']);
-    await expect(explorer.locator('.json-tree').first().locator('.json-leaf')).toHaveText([
-      'email: "john.smith@email.com"', 'frequent_flyer_tier: "gold"', 'id: "C001"',
-      'name: "John Smith"', 'phone: "+1-555-0123"',
-    ]);
+    if (live) await checkSavedTools(page, expect, explorer,
+      kind === 'view' ? decoded.history : decoded.History);
+    else {
+      await nav.getByRole('button', {name: 'Tools', exact: true}).click();
+      await expect(explorer.locator('.ge-row')).toHaveCount(1);
+      await explorer.locator('.ge-row').click();
+      await expect(explorer.locator('.ge-detail h5')).toHaveText([
+        'get_customer_info', 'Tool input', 'Tool result']);
+      await expect(explorer.locator('.json-tree').first().locator('.json-leaf')).toHaveText([
+        'email: "john.smith@email.com"', 'frequent_flyer_tier: "gold"', 'id: "C001"',
+        'name: "John Smith"', 'phone: "+1-555-0123"',
+      ]);
+    }
     await nav.getByRole('button', {name: 'Activity', exact: true}).click();
     await expect(explorer.locator('.ge-row')).toHaveCount(kind === 'view' ? 12 : 0);
     if (kind === 'view') {
@@ -208,8 +224,7 @@ try {
     await nav.getByRole('button', {name: 'State', exact: true}).click();
     await expect(explorer.locator('.ge-state h5')).toHaveText([
       'Saved position', 'Last completed answer', 'Counters', 'Custom data & continuation']);
-    await expect(explorer.locator('.ge-content')).toHaveText(
-      await answers.last().locator('.message-body').innerText());
+    await expect(explorer.locator('.ge-content')).toHaveText(accepted.lastAnswer);
     await nav.getByRole('button', {name: 'Messages', exact: true}).click();
     await checkRawTabs(page, expect, explorer, inspected);
     await page.locator('.inspector-body').evaluate(node => { node.scrollTop = 0; });
@@ -230,7 +245,7 @@ try {
   await standalone.context().grantPermissions(['clipboard-read', 'clipboard-write'], {origin: url});
   const savedView = await (await page.request.get(`${url}/api/inspect?runId=${runId}` +
     '&kind=view&path=capture')).json();
-  await checkDisclosureHierarchy(browser, url, expect, savedView.decoded, shots, errors);
+  if (!live) await checkDisclosureHierarchy(browser, url, expect, savedView.decoded, shots, errors);
   await standalone.locator('#file').setInputFiles({name: 'recovered-view.json',
     mimeType: 'application/json', buffer: Buffer.from(savedView.decoded)});
   await expect(standalone.locator('.gent-run-explorer h4')).toHaveText('Accepted archive');
@@ -240,12 +255,11 @@ try {
   await standalone.locator('#encoded-file').setInputFiles({name: 'encoded-view.json',
     mimeType: 'application/json', buffer: Buffer.from(savedView.encoded)});
   await checkRawTabs(standalone, expect, standalone.locator('.gent-run-explorer'), savedView);
-  await standalone.getByRole('button', {name: 'Tools', exact: true}).click();
-  await standalone.locator('.ge-row').click();
-  await expect(standalone.locator('.ge-detail h5').first()).toHaveText('get_customer_info');
+  const standaloneTools = await checkSavedTools(standalone, expect,
+    standalone.locator('.gent-run-explorer'), JSON.parse(savedView.decoded).history);
   await standalone.screenshot({path: join(shots, `${provider}-explorer-tools.png`),
     fullPage: true});
-  await checkAdditionalEvidence(standalone, expect, savedView.decoded);
+  if (!live) await checkAdditionalEvidence(standalone, expect, savedView.decoded);
   await checkRequestPaging(standalone, expect, savedView.decoded);
   await checkToolGroups(standalone, expect, savedView.decoded,
     join(shots, `${provider}-tool-group.png`));
@@ -253,7 +267,8 @@ try {
     mimeType: 'application/json', buffer: Buffer.from('{}')});
   await expect(standalone.locator('#notice')).toHaveText(
     'Pass JSON of a recovered RunState or RunView, from Go json.Marshal.');
-  await expect(standalone.locator('.ge-detail h5').first()).toHaveText('get_customer_info');
+  if (standaloneTools.length) await expect(standalone.locator('.ge-detail h5').first())
+    .toHaveText(standaloneTools.at(-1).Name);
   // Instance state and lifecycle stay local. Unsafe content must stay text in both instances.
   const isolated = await standalone.evaluate(async json => {
     const {createRunExplorer} = await import('/explorer/index.js');
@@ -308,6 +323,10 @@ try {
       `event ${accepted.head}. ` +
       'The saved answer was read without running the agent.');
     await expect(answers).toHaveCount(2);
+    const restored = await saveRunEvidence(page.request, url, runId, shots,
+      `${provider}-restored-${path}`);
+    assert.deepEqual(restored, saved);
+    await checkAcceptedChat(page, expect, restored, [first, second]);
   }
   await page.locator('#continue').click();
   await expect(page.locator('#notice')).toHaveText('There is no unfinished task. ' +
@@ -387,8 +406,13 @@ try {
   await page.goto('about:blank');
   assert.deepEqual(errors, []);
   await checkChatTranscript(browser, url, expect, shots, errors);
+  if (!live) await checkConversations(page, url, expect, shots);
+  await page.goto('about:blank');
+  assert.deepEqual(errors, []);
   await stop();
   const fresh = await start();
+  currentURL = fresh;
+  currentRunId = undefined;
   const missing = await page.request.get(`${fresh}/api/state?runId=${runId}`);
   assert.equal(missing.status(), 404);
   let releaseRead, reachedRead;
@@ -426,13 +450,27 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log(`PASS ${provider}: shared scenarios, streaming text, nested tool groups, ` +
+    (!live ? 'chat history, background work, reset, draft retention, ' : '') +
     'retained input, ' +
     'both replay paths, chronology, full-screen control, working indicator, ' +
     'encoded and recovered JSON, byte sizes, resizing, missing-run redirect, and recovery');
 } catch (error) {
+  try { await writeFile(join(shots, `${provider}-server.log`), logs); }
+  catch (detailError) { console.error('Cannot save server log', detailError); }
+  currentRunId ||= browser?.contexts().flatMap(context => context.pages())
+    .map(page => new URL(page.url()).searchParams.get('run')).find(Boolean);
+  if (currentURL && currentRunId && browser) {
+    try {
+      await saveRunEvidence(browser.contexts()[0].request, currentURL, currentRunId, shots,
+        `${provider}-failure`);
+    } catch (detailError) { console.error('Cannot save all failure evidence', detailError); }
+  }
   for (const context of browser?.contexts() || []) {
     for (const page of context.pages()) {
       try {
+        const index = context.pages().indexOf(page);
+        await page.screenshot({path: join(shots, `${provider}-failure-${index}.png`),
+          fullPage: true});
         console.error('Browser failure state', await page.evaluate(() => ({
           url: location.href, status: document.querySelector('#status')?.textContent,
           notice: document.querySelector('#notice')?.textContent,

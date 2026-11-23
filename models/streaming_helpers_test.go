@@ -25,20 +25,11 @@ type StreamOutputConfig struct {
 	ShowStats bool
 }
 
-// TestOutputConfig returns a config suitable for go test (boundaries, escaped newlines, stats).
-func TestOutputConfig() StreamOutputConfig {
+// testOutputConfig returns a config suitable for go test (boundaries, escaped newlines, stats).
+func testOutputConfig() StreamOutputConfig {
 	return StreamOutputConfig{
 		ShowChunkBoundaries: true,
 		EscapeNewlines:      true,
-		ShowStats:           true,
-	}
-}
-
-// InteractiveOutputConfig returns a config for interactive CLI (natural streaming output).
-func InteractiveOutputConfig() StreamOutputConfig {
-	return StreamOutputConfig{
-		ShowChunkBoundaries: false,
-		EscapeNewlines:      false,
 		ShowStats:           true,
 	}
 }
@@ -52,16 +43,6 @@ type ChunkWriter struct {
 	contentLen   int
 	chunkCount   int
 	reasoningLen int
-}
-
-// NewChunkWriter creates a ChunkWriter with test output config.
-func NewChunkWriter() *ChunkWriter {
-	return NewChunkWriterWithConfig(os.Stdout, TestOutputConfig())
-}
-
-// NewChunkWriterTo creates a ChunkWriter with test output config writing to w.
-func NewChunkWriterTo(w io.Writer) *ChunkWriter {
-	return NewChunkWriterWithConfig(w, TestOutputConfig())
 }
 
 // NewChunkWriterWithConfig creates a ChunkWriter with the given config.
@@ -136,54 +117,6 @@ func (w *ChunkWriter) PrintStats() {
 	}
 	fmt.Fprintln(w.bw)
 	w.flush()
-}
-
-// StreamTestCase represents a streaming test that can be run.
-type StreamTestCase struct {
-	Name        string
-	Description string
-	Run         func(ctx context.Context, w io.Writer, config StreamOutputConfig) error
-}
-
-// GetStreamingTestCases returns all available streaming test cases.
-func GetStreamingTestCases() []StreamTestCase {
-	return []StreamTestCase{
-		{
-			Name:        "Basic",
-			Description: "Tests basic streaming functionality with a simple prompt",
-			Run:         RunStreamingBasic,
-		},
-		{
-			Name:        "WithReasoning",
-			Description: "Tests streaming with a reasoning model",
-			Run:         RunStreamingWithReasoning,
-		},
-		{
-			Name:        "SlowConsumer",
-			Description: "Tests that streaming works with a slow consumer",
-			Run:         RunStreamingSlowConsumer,
-		},
-		{
-			Name:        "NoListener",
-			Description: "Tests stream completion without reading chunks",
-			Run:         RunStreamingNoListener,
-		},
-		{
-			Name:        "Cancellation",
-			Description: "Tests context cancellation stops the stream",
-			Run:         RunStreamingCancellation,
-		},
-		{
-			Name:        "Concurrent",
-			Description: "Tests multiple concurrent streams",
-			Run:         RunStreamingConcurrent,
-		},
-		{
-			Name:        "ResponseInfo",
-			Description: "Tests response info is correctly populated",
-			Run:         RunStreamingResponseInfo,
-		},
-	}
 }
 
 // createXAIModel creates an xAI model for testing, returning an error if API key is missing.

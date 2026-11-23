@@ -62,8 +62,8 @@ func (r *CodecRegistry) registerValueType(typ reflect.Type, seen map[reflect.Typ
 	// parent apparently registered on the next attempt.
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, ok := r.byType[typ]; !ok {
-		if old, exists := r.byId[id]; exists && old.typ != typ {
+	if _, ok := r.registeredType(typ); !ok {
+		if old, exists := r.registeredID(id); exists && old.typ != typ {
 			return fmt.Errorf("gent: conflicting declared type %s", id)
 		}
 		r.add(registeredValue{id: id, version: 1, typ: typ})

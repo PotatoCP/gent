@@ -22,7 +22,9 @@ const (
 
 type valueDecoder struct {
 	*CodecRegistry
-	status valueDecodeStatus
+	status       valueDecodeStatus
+	documentRead bool
+	strings      map[savedJSONValue]string
 }
 
 // Framework codecs keep nested validation on the same decoder. Application codecs retain their
@@ -44,7 +46,7 @@ func (decoder *valueDecoder) value(value EncodedValue, depth int) (any, error) {
 }
 
 func (decoder *valueDecoder) decodedValue(value decodingValue, depth int) (any, error) {
-	if value.Data.table == nil {
+	if !decoder.documentRead && value.Data.table == nil {
 		if err := decoder.checkEncodedSize(len(value.Data.bytes())); err != nil {
 			return nil, err
 		}

@@ -1,43 +1,56 @@
-# Integration test CLI
+# Integration scenarios
 
-Run `go run ./integrationtest/cli` to select a scenario, toolchain, and model.
+Use the [streaming chat server](../examples/chat/README.md) to run the airline and e-commerce
+scenarios interactively:
 
-The terminal renderer reads ordered content parts from the trace. It shows provisional text,
-commentary, and reasoning as they arrive. Binary parts use MIME-type labels, and image references
-use URL labels, so file bytes and base64 data do not fill the terminal.
+```sh
+cd examples/chat
+go run .
+```
 
-The model menu has one current general-purpose flagship from each supported frontier provider.
-Choose the strongest model with public API access. Exclude older generations, small variants,
-specialized models, and models that need restricted access. This keeps the menu short and makes
-provider comparisons easier. Public model constants remain available for other callers.
+Select a provider from the credentials in the project `.env`. The browser shows model progress,
+tool calls, accepted answers, and saved evidence. The chat list lets you return to an earlier
+conversation. Server Reset clears conversations and their simulated service data.
 
-Model IDs checked on 2026-10-26:
+The server uses the shared `NewChatConfig` functions in [airline](airline/chat.go) and
+[ecommerce](ecommerce/chat.go). They supply the original tasks, prompts, rules, policy suggestions,
+tools, and fixtures. The additional investigation tasks use the same data. The interactive terminal
+menu and its conversation wrapper were removed to keep one interactive integration interface.
+The separate model streaming menu was also removed. Its Go scenarios remain in
+`models/streaming_test.go`, and their helpers now compile only for tests. The `gent` setup and
+model-management commands remain available.
 
-| Provider | Model | API key environment variable |
-| --- | --- | --- |
-| xAI | `grok-4.7` (default) | `GENT_TEST_XAI_KEY` |
-| OpenAI | `gpt-6-astra` | `GENT_TEST_OPENAI_KEY` |
-| Google | `gemini-4-argon` | `GENT_TEST_GEMINI_KEY` |
-| Anthropic | `claude-fable-5-1` | `GENT_TEST_ANTHROPIC_KEY` |
+## Automated coverage
 
-Use the provider model pages to review future changes:
+The existing Go tests still cover the scenario variants: native tools, SearchChain, policy
+suggestions, compaction, and programmatic tool calling. They also keep provider request-mapping
+checks and fixture assertions. Removing the terminal menu does not remove this coverage.
 
-- [Grok 4.7](https://docs.x.ai/developers/models/grok-4.7)
-- [OpenAI model guidance](https://developers.openai.com/api/docs/guides/latest-model)
-- [Gemini 4 Argon](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon)
-- [Claude Fable 5.1](https://platform.claude.com/docs/en/models/fable-5-1/overview)
+```sh
+go test ./integrationtest/... -count=1 -timeout 300s
+go -C examples/chat test ./... -count=1 -timeout 300s
+node examples/chat/tests/browser.mjs
+```
 
-Update `testutil.AvailableModels`, `testutil.DefaultModelName`, and the menu tests together.
-Check request settings as well as model names. A model change can make old settings invalid.
+Without configured provider keys, live Go tests skip their paid calls. Fixture and browser demo
+tests still run. The server module adds real HTTP/SSE tests for both investigation tasks with each
+configured chat provider. It verifies tool work, progress, accepted output, and equivalent replay
+from complete batches or a RunStateSnapshot plus its accepted tail.
 
-Grok 4.7 uses temperature 0.7 and top-p 0.95, as specified in the
-[xAI guide](https://docs.x.ai/developers/model-capabilities/text/best-practices).
-GPT-6 Astra uses the Responses API for tool calls and omits temperature and top-p.
-The native Anthropic adapter omits forbidden sampling values and preserves signed thinking blocks
-across tool calls. It currently sends API version `2023-06-01`. The Gemini adapter uses the native
-GenerateContent endpoint and preserves thought signatures. The CLI request tests check these
-request mappings. See [native model adapters](../docs/content/agent/models.md) for continuation behavior.
+Use the release environment helper to load one provider without executing `.env` as shell code:
 
-The local request tests check model IDs, endpoints, credentials, and complete request bodies.
-They do not make paid API calls. Live scenario tests need provider credentials and the ONNX setup
-described by `gent setup onnx` and `gent model download multilingual-e5-small`.
+```sh
+go -C scripts build -o /tmp/gent-envrun ./envrun
+/tmp/gent-envrun -env-file .env -provider OpenAI -- \
+  go -C examples/chat test -run '^TestLiveChatScenarios$/^openai$/^airline$' -count=1 -timeout 300s
+```
+
+Use `ecommerce` for the other task. Provider names are `OpenAI`, `Anthropic`, `Gemini`, and `xAI`;
+the matching Go subtest names are lowercase. These checks make paid calls. The release gate runs
+both tasks for all configured chat providers. Live policy search also needs the ONNX setup and
+`multilingual-e5-small` model described in the chat README.
+
+`testutil.AvailableModels` retains the model configurations used by the automated scenario and
+request tests. Change its settings with the associated request tests. The chat server has its own
+small default model selection in `examples/chat/providers.go`; `_MODEL` settings can override it.
+See [native model adapters](../docs/content/agent/models.md) for continuation behavior.

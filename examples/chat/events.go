@@ -233,6 +233,31 @@ type eventRoom struct {
 
 func newEventHub() *eventHub { return &eventHub{rooms: map[string]*eventRoom{}} }
 
+func (hub *eventHub) clear() {
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	for _, room := range hub.rooms {
+		for queue := range room.clients {
+			delete(room.clients, queue)
+			discardEvents(queue)
+			close(queue)
+		}
+	}
+	clear(hub.rooms)
+}
+
+// Reset drops pending display bytes before closing the channel. Otherwise an open browser
+// could drain old frames before it detects the reset. The hub lock excludes concurrent sends.
+func discardEvents(queue chan []byte) {
+	for {
+		select {
+		case <-queue:
+		default:
+			return
+		}
+	}
+}
+
 func (hub *eventHub) room(runId string) *eventRoom {
 	room := hub.rooms[runId]
 	if room == nil {

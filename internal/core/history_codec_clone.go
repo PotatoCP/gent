@@ -2,6 +2,7 @@ package gent
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/json"
 	"math"
 	"reflect"
@@ -9,12 +10,13 @@ import (
 )
 
 // A direct copy is used only where its result has the same type and value as a portable round
-// trip. Custom codecs, errors, and times retain their existing normalization. An unsupported
-// shape falls back to the portable path, which supplies its established validation error.
+// trip. Custom codecs, scalar methods, errors, and times retain their existing normalization.
+// An unsupported shape falls back to the portable path, which supplies its established validation
+// error.
 func (r *CodecRegistry) cloneValue(
 	v reflect.Value, visiting map[any]bool, depth int,
 ) (reflect.Value, bool, error) {
-	if depth > 100 {
+	if depth > maxCodecValueDepth {
 		return reflect.Value{}, false, nil
 	}
 	if !v.IsValid() {
@@ -24,7 +26,7 @@ func (r *CodecRegistry) cloneValue(
 		if v.IsNil() {
 			return reflect.Zero(v.Type()), true, nil
 		}
-		return r.cloneValue(v.Elem(), visiting, depth+1)
+		return r.cloneValue(v.Elem(), visiting, depth)
 	}
 	registration, registered := r.lookupType(v.Type())
 	if v.Type() == reflect.TypeFor[json.RawMessage]() {
@@ -35,6 +37,9 @@ func (r *CodecRegistry) cloneValue(
 	}
 	if v.Type() == reflect.TypeFor[EncodedValue]() {
 		value := v.Interface().(EncodedValue)
+		if err := validateEncodedValueText(value); err != nil {
+			return reflect.Value{}, true, err
+		}
 		// The portable wrapper compacts a nested JSON payload. Preserve that behavior without
 		// re-encoding its type and version or parsing its fields again.
 		if len(value.Data) > 0 {
@@ -53,8 +58,13 @@ func (r *CodecRegistry) cloneValue(
 	_, isError := v.Interface().(error)
 	if (registered && registration.codec != nil) || isError ||
 		v.Type() == reflect.TypeFor[time.Time]() {
-		value, err := r.cloneThroughCodec(v.Interface())
+		value, err := r.cloneThroughCodec(v.Interface(), depth)
 		return reflect.ValueOf(value), true, err
+	}
+	// Check the same whole-value bound as the writer before allocating a direct copy. Decline
+	// this path on failure so the portable writer reports the complete containing-field path.
+	if err := r.checkValueAllocation(v.Type(), 1); err != nil {
+		return reflect.Value{}, false, nil
 	}
 	if v.Kind() == reflect.Pointer || v.Kind() == reflect.Map || v.Kind() == reflect.Slice {
 		if !v.IsNil() {
@@ -90,11 +100,19 @@ func (r *CodecRegistry) cloneValue(
 		fallthrough
 	case reflect.Bool, reflect.String, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32,
 		reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		// Scalar methods can change a value or reject it. Let the portable path handle the
+		// whole value, including containing-field diagnostics, before invoking these methods.
+		if scalarHasJSONMethods(v.Type()) {
+			return reflect.Value{}, false, nil
+		}
 		// json.Number also needs JSON syntax validation. Plain strings and numeric values are
 		// immutable; returning their reflect.Value does not expose a mutable reference.
 		if v.Type() == reflect.TypeFor[json.Number]() {
-			value, err := r.cloneThroughCodec(v.Interface())
+			value, err := r.cloneThroughCodec(v.Interface(), depth)
 			return reflect.ValueOf(value), true, err
+		}
+		if err := validateStringValue(v); err != nil {
+			return reflect.Value{}, true, err
 		}
 		return v, registered, nil
 	default:
@@ -147,7 +165,10 @@ func (r *CodecRegistry) cloneContainer(
 		return reflect.Zero(v.Type()), true, nil
 	}
 	if v.Kind() == reflect.Pointer {
-		result := reflect.New(v.Type().Elem())
+		result, err := r.newPointerValue(v.Type().Elem())
+		if err != nil {
+			return reflect.Value{}, true, err
+		}
 		ok, err := r.cloneInto(result.Elem(), v.Elem(), visiting, depth+1)
 		return result.Convert(v.Type()), ok, err
 	}
@@ -156,6 +177,10 @@ func (r *CodecRegistry) cloneContainer(
 			return reflect.Value{}, true, err
 		}
 		return reflect.ValueOf(bytes.Clone(v.Bytes())).Convert(v.Type()), true, nil
+	}
+	// The element type can fit while the full backing array exceeds the allocation bound.
+	if err := r.checkValueAllocation(v.Type().Elem(), v.Len()); err != nil {
+		return reflect.Value{}, false, nil
 	}
 	var result reflect.Value
 	if v.Kind() == reflect.Array {
@@ -180,9 +205,22 @@ func (r *CodecRegistry) cloneMap(
 	if v.IsNil() {
 		return reflect.Zero(v.Type()), true, nil
 	}
+	// Bound keys and values separately, as on the portable path. Checking after MakeMapWithSize
+	// would reject the result only after the oversized copy had already consumed memory.
+	if err := r.checkValueAllocation(v.Type().Key(), v.Len()); err != nil {
+		return reflect.Value{}, false, nil
+	}
+	if err := r.checkValueAllocation(v.Type().Elem(), v.Len()); err != nil {
+		return reflect.Value{}, false, nil
+	}
 	result := reflect.MakeMapWithSize(v.Type(), v.Len())
 	iter := v.MapRange()
 	for iter.Next() {
+		// Use the portable path's combined key check before returning a normalized map.
+		// Distinct allocations from time decoding are not a saved location-identity contract.
+		if r.normalizedMapKey(iter.Key()) {
+			return reflect.Value{}, false, nil
+		}
 		key := reflect.New(v.Type().Key()).Elem()
 		value := reflect.New(v.Type().Elem()).Elem()
 		if ok, err := r.cloneInto(key, iter.Key(), visiting, depth+1); !ok || err != nil {
@@ -197,4 +235,18 @@ func (r *CodecRegistry) cloneMap(
 		result.SetMapIndex(key, value)
 	}
 	return result, true, nil
+}
+
+// The scalar encoder passes a value to json.Marshal, so pointer-only marshal methods do not apply.
+// Decoding uses a pointer and must honor its JSON or text method. JSON precedence stays in the
+// portable path. Built-in scalars have no such methods and keep the direct immutable copy.
+func scalarHasJSONMethods(typ reflect.Type) bool {
+	if typ.PkgPath() == "" {
+		return false
+	}
+	pointer := reflect.PointerTo(typ)
+	return typ.Implements(reflect.TypeFor[json.Marshaler]()) ||
+		typ.Implements(reflect.TypeFor[encoding.TextMarshaler]()) ||
+		pointer.Implements(reflect.TypeFor[json.Unmarshaler]()) ||
+		pointer.Implements(reflect.TypeFor[encoding.TextUnmarshaler]())
 }

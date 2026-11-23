@@ -150,7 +150,7 @@ func registerRunViewCodec(codecs *CodecRegistry) {
 					}
 					return RunView{}, fmt.Errorf("gent: invalid archive replay state: %s", result.Detail)
 				}
-				if err := view.validateReplayProjection(); err != nil {
+				if err := view.validateReplayProjection(decoder); err != nil {
 					return RunView{}, err
 				}
 			} else if _, result := view.replayState(); result != nil {
@@ -163,23 +163,35 @@ func registerRunViewCodec(codecs *CodecRegistry) {
 
 // Decode checks the saved compact reducer against the archive once. Normal Apply validates the
 // new batch without scanning earlier archive records. Execution restoration never loads RunView.
-func (view *RunView) validateReplayProjection() error {
+// Independent decoded projections can contain pointer-keyed metadata. Their saved content must
+// agree, but their process addresses must not: shared mutable values would violate load ownership.
+func (view *RunView) validateReplayProjection(decoder *valueDecoder) error {
 	data := &view.replay.data
 	if data.RunId != view.RunId || data.SchemaVersion != view.SchemaVersion ||
 		data.EventSequenceNumber != view.LastAppliedEventSequenceNumber ||
 		data.EventSequenceNumber != uint64(len(view.Activity)) ||
-		data.HistoryOrder != uint64(len(view.History.Entries)) ||
-		!reflect.DeepEqual(data.Runtime, view.Runtime) ||
-		!reflect.DeepEqual(data.Checkpoint, view.Checkpoint) {
+		data.HistoryOrder != uint64(len(view.History.Entries)) {
+		return fmt.Errorf("gent: archive and replay state disagree")
+	}
+	equal, err := decoder.equalSavedValues([]any{data.Runtime, data.Checkpoint},
+		[]any{view.Runtime, view.Checkpoint})
+	if err != nil {
+		return fmt.Errorf("gent: compare archive replay state: %w", err)
+	}
+	if !equal {
 		return fmt.Errorf("gent: archive and replay state disagree")
 	}
 	if data.EventSequenceNumber > 0 && view.Batches[data.LastBatchId] != data.LastBatchId {
 		return fmt.Errorf("gent: archive lacks its latest accepted receipt")
 	}
 	history := retainedHistory(view.History, view.Checkpoint)
-	if !reflect.DeepEqual(data.History, history) ||
-		!reflect.DeepEqual(data.HistorySources, retainedHistorySources(nil, view.History, history)) ||
-		!reflect.DeepEqual(data.Evidence, retainedEvidence(nil, view.Activity, view.Checkpoint)) {
+	equal, err = decoder.equalSavedValues([]any{data.History, data.HistorySources, data.Evidence},
+		[]any{history, retainedHistorySources(nil, view.History, history),
+			retainedEvidence(nil, view.Activity, view.Checkpoint)})
+	if err != nil {
+		return fmt.Errorf("gent: compare archive retained projection: %w", err)
+	}
+	if !equal {
 		return fmt.Errorf("gent: archive retained projection differs from its replay state")
 	}
 	return nil

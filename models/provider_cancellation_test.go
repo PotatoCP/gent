@@ -110,7 +110,7 @@ model HTTP 429: rejected`, 1, 1, 1}},
 				return response, nil
 			})}
 			model := fixtureModel("xai", &http.Client{Transport: tr})
-			err := runStreamingCancellation(context.Background(), io.Discard, TestOutputConfig(), model)
+			err := runStreamingCancellation(context.Background(), io.Discard, testOutputConfig(), model)
 			actual := expected{opened: tr.opened.Load(), closed: tr.closed.Load(),
 				finished: tr.finished.Load()}
 			if err != nil {
@@ -130,7 +130,7 @@ func TestLiveProviderCancellation(t *testing.T) {
 			config.HTTPClient = &http.Client{Transport: tr}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
-			err := runStreamingCancellation(ctx, io.Discard, TestOutputConfig(),
+			err := runStreamingCancellation(ctx, io.Discard, testOutputConfig(),
 				newLiveModel(t, provider, &config))
 			assert.NoError(t, err)
 			assert.Positive(t, tr.opened.Load())
@@ -179,7 +179,7 @@ unexpected EOF`}},
 						},
 					)
 				}
-				err := runStreamingCancellation(context.Background(), io.Discard, TestOutputConfig(),
+				err := runStreamingCancellation(context.Background(), io.Discard, testOutputConfig(),
 					liveCheckModel{chunks: chunks, err: test.input.cause})
 				actual := expected{}
 				if err != nil {

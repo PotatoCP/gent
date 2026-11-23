@@ -49,6 +49,11 @@ examples, site builds, npm advisories, browsers, package contents, and the CLI. 
 20 or later and Chromium. Use `CHROMIUM_PATH` for the docs browser and `CHROME_PATH` for the chat
 browser to select a Chromium path. `RELEASE_REPORT_DIR` selects the log folder.
 
+Go test modes run in sequence with one package at a time. Concurrent modes can make the large
+recovery suites exceed their 300-second package deadline through CPU contention. The gate keeps
+that deadline and all scenarios, collects each module's result, then reports failures. Each mode
+has its own process environment so CGO-disabled settings cannot enter the race suite.
+
 The gate reads `.env` as data and honors existing environment settings. It does not execute shell
 expressions or print credentials. Fixture suites receive no live-provider settings. Each configured
 provider then runs against its real endpoint. These calls use tokens or credits. xAI also runs the
@@ -58,9 +63,24 @@ Each live feature has its own 300-second test deadline. One shared package deadl
 before later features get their full request allowance. This does not change their assertions or
 the shorter request and scenario timeouts.
 
+Discovery includes `TestNativeLive` as well as the `TestLive` groups. `TestNativeLive` checks
+programmatic tool calls and search with programmatic calls for each configured provider. A failed
+group fails the gate. Fixture tests do not replace these calls to real providers.
+The programmatic-call check requires a complete program that uses the lookup result for the read.
+It also checks every actual inner call against saved evidence. A corrected script can follow a
+partial script failure; the earlier calls remain visible and must still match their full results.
+Direct calls, split programs without a complete program, and missing operations do not pass.
+
 The chat browser also runs with the first configured supported provider: OpenAI, Anthropic,
 Gemini, or xAI. Configure at least one of these providers. This verifies real streaming and recovery
 through the server and UI, in addition to the deterministic browser tests.
+
+Live browser checks compare complete displayed answers and tool outcomes with accepted archive
+evidence. They check original prompts in later effective requests and compare both replay paths.
+Exact model wording, tool arguments, and first-attempt tool success are not interface guarantees.
+A local native-response fixture checks a handled tool failure followed by success and nonliteral
+answers. The demo checks retain their exact expected values. Browser evidence is saved before the
+memory-only server stops; `CHAT_TEST_OUTPUT_DIR` selects its output directory.
 
 Missing provider configuration is reported. At least one live provider is required. A local provider
 needs both a URL and a model; a URL alone is not a configured test. Vertex needs a project and valid
@@ -71,3 +91,13 @@ Fix a failed check before publication. The release script verifies that the chec
 worktree did not change, then creates an annotated tag. After the push, it downloads the module from
 the Go proxy, checks its contents, installs the released CLI, and creates the GitHub release.
 If a check fails after the tag is pushed, keep the tag and investigate. Do not rewrite a public tag.
+
+## Interactive scenario coverage
+
+The streaming chat server replaces the interactive integration CLI. The original airline and
+billing Go scenarios remain in the gate, including SearchChain, compaction, and JavaScript tool
+variants. The gate also runs `TestLiveChatScenarios` over HTTP/SSE for both tasks with every
+configured chat provider: OpenAI, Anthropic, Gemini, and xAI. Run each task separately so it keeps
+its 300-second test deadline. These calls verify the configured provider, streamed content, accepted
+answers, and equivalent batch-only and RunStateSnapshot-plus-tail recovery. The demo browser gate
+checks chat selection, reset during execution, stale replies, and the existing inspector flows.

@@ -15,6 +15,11 @@ type frameworkValueCodec[T any] struct {
 	decode   func(*valueDecoder, decodingValue, int) (T, error)
 }
 
+func (c frameworkValueCodec[T]) bind(registry *CodecRegistry) ValueCodec {
+	c.registry = registry
+	return c
+}
+
 func (c frameworkValueCodec[T]) Type() string { return c.name }
 func (frameworkValueCodec[T]) Version() int   { return 1 }
 func (c frameworkValueCodec[T]) Encode(value any) (json.RawMessage, error) {

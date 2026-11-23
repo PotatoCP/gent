@@ -1,16 +1,5 @@
-// This file contains a single integration test for the
-// e-commerce scenario, using the most complex configuration:
-// SearchChain toolchain with summarization compaction.
-//
-// For other variations (native registry, sliding window
-// compaction, SimpleList hint type, interactive chat), use the
-// integration CLI instead:
-//
-//	go run ./integrationtest/cli
-//
-// The CLI provides a menu-driven interface to select scenarios,
-// toolchains, compaction strategies, and even an interactive
-// chat mode with real-time streaming output.
+// Keep the SearchChain, compaction, and JavaScript tool coverage in Go tests.
+// Use examples/chat for interactive integration checks through HTTP and streaming events.
 package ecommerce
 
 import (

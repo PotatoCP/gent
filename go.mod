@@ -5,8 +5,8 @@ go 1.24.10
 require (
 	cloud.google.com/go/auth v0.18.2
 	github.com/blevesearch/bleve/v2 v2.5.7
-	github.com/chzyer/readline v1.5.1
 	github.com/daulet/tokenizers v1.26.0
+	github.com/golang/snappy v0.0.4
 	github.com/grafana/sobek v0.0.0-20260219184149-bdae4a158e94
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	github.com/stretchr/testify v1.11.1
@@ -38,7 +38,6 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dlclark/regexp2 v1.11.5 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.4+incompatible // indirect
-	github.com/golang/snappy v0.0.4 // indirect
 	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.11 // indirect
 	github.com/googleapis/gax-go/v2 v2.17.0 // indirect

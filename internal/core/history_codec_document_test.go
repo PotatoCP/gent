@@ -151,9 +151,9 @@ func TestRunStateDocumentLoadResults(t *testing.T) {
 		expected expected
 	}
 	cases := []testCase{
-		{"unsupported format", input{func(value *savedDocument) { value.FormatVersion++ }},
+		{"unsupported format", input{func(value *savedDocument) { value.FormatVersion = 3 }},
 			expected{result: &RunStateLoadResult{Status: RunStateIncompatible,
-				Detail: "gent: unsupported saved document version 2"}}},
+				Detail: "gent: unsupported saved document version 3"}}},
 		{"changed table", input{func(value *savedDocument) {
 			value.Data = bytes.Replace(value.Data, []byte(`"run:document"`), []byte(`"run:changed"`), 1)
 		}}, expected{result: &RunStateLoadResult{Status: RunStateInvalid,
@@ -226,8 +226,12 @@ func expandTestDocument(t *testing.T, codecs *CodecRegistry, data []byte) []byte
 	if !assert.NoError(t, json.Unmarshal(data, &document)) {
 		t.FailNow()
 	}
-	assert.Equal(t, documentDigest(document.Data), document.Digest)
+	assert.Equal(t, versionedDocumentDigest(document.FormatVersion, document.Data), document.Digest)
 	indexed, err := indexSavedJSON(document.Data)
+	if !assert.NoError(t, err) {
+		t.FailNow()
+	}
+	indexed, err = codecs.documentData(document.FormatVersion, indexed)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
@@ -420,7 +424,7 @@ func TestSavedDocumentIntegrityAndTruncation(t *testing.T) {
 		}}, expected{"gent: saved document digest mismatch"}},
 		{"version", input{func(data []byte) []byte {
 			return bytes.Replace(data, []byte(`"formatVersion":1`), []byte(`"formatVersion":2`), 1)
-		}}, expected{"gent: unsupported saved document version 2"}},
+		}}, expected{"gent: saved document digest mismatch"}},
 		{"truncated", input{func(data []byte) []byte { return data[:len(data)-1] }},
 			expected{"gent: invalid encoded JSON"}},
 	}

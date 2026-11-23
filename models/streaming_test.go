@@ -13,7 +13,7 @@ func TestStreamingBasic(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := RunStreamingBasic(ctx, os.Stdout, TestOutputConfig()); err != nil {
+	if err := RunStreamingBasic(ctx, os.Stdout, testOutputConfig()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -25,7 +25,7 @@ func TestStreamingWithReasoning(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := RunStreamingWithReasoning(ctx, os.Stdout, TestOutputConfig()); err != nil {
+	if err := RunStreamingWithReasoning(ctx, os.Stdout, testOutputConfig()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -37,7 +37,7 @@ func TestStreamingSlowConsumer(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := RunStreamingSlowConsumer(ctx, os.Stdout, TestOutputConfig()); err != nil {
+	if err := RunStreamingSlowConsumer(ctx, os.Stdout, testOutputConfig()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -49,7 +49,7 @@ func TestStreamingNoListener(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := RunStreamingNoListener(ctx, os.Stdout, TestOutputConfig()); err != nil {
+	if err := RunStreamingNoListener(ctx, os.Stdout, testOutputConfig()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -61,7 +61,7 @@ func TestStreamingCancellation(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := RunStreamingCancellation(ctx, os.Stdout, TestOutputConfig()); err != nil {
+	if err := RunStreamingCancellation(ctx, os.Stdout, testOutputConfig()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -73,7 +73,7 @@ func TestStreamingConcurrent(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := RunStreamingConcurrent(ctx, os.Stdout, TestOutputConfig()); err != nil {
+	if err := RunStreamingConcurrent(ctx, os.Stdout, testOutputConfig()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -85,7 +85,7 @@ func TestStreamingResponseInfo(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	if err := RunStreamingResponseInfo(ctx, os.Stdout, TestOutputConfig()); err != nil {
+	if err := RunStreamingResponseInfo(ctx, os.Stdout, testOutputConfig()); err != nil {
 		t.Fatal(err)
 	}
 }

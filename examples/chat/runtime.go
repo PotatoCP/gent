@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log"
@@ -63,6 +64,10 @@ type browserState struct {
 }
 
 type application struct {
+	// HTTP reads hold this gate only while preparing a response, never for the SSE lifetime.
+	// Reset excludes admission and reads, then joins workers before removing their saved bytes.
+	lifecycle  sync.RWMutex
+	serverId   string
 	ctx        context.Context
 	store      *memoryStore
 	hub        *eventHub
@@ -73,23 +78,27 @@ type application struct {
 	mu         sync.Mutex
 	running    map[string]*gent.ExecutionContext
 	outcomes   map[string]*attemptOutcome
+	cancels    map[string]context.CancelFunc
+	chats      map[string]*conversationInfo
 	wait       sync.WaitGroup
 }
 
 func newApplication(ctx context.Context, model func() gent.Model, provider string,
 	embedder search.Embedder,
 ) *application {
-	return &application{ctx: ctx, store: newMemoryStore(gent.NewCodecRegistry()), hub: newEventHub(),
+	return &application{ctx: ctx, serverId: rand.Text(),
+		store: newMemoryStore(gent.NewCodecRegistry()), hub: newEventHub(),
 		model: model, provider: provider, sessions: map[string]*scenarioSession{},
 		newSession: func(id scenarioId) (*scenarioSession, error) { return newScenario(id, embedder) },
-		running:    map[string]*gent.ExecutionContext{}, outcomes: map[string]*attemptOutcome{}}
+		running:    map[string]*gent.ExecutionContext{}, outcomes: map[string]*attemptOutcome{},
+		cancels: map[string]context.CancelFunc{}, chats: map[string]*conversationInfo{}}
 }
 
 func (app *application) runner(recorder gent.Recorder,
 	session *scenarioSession,
 ) *executor.Runner[string] {
 	model := app.model()
-	return executor.NewRunner(newAgent(model), &gent.Config{
+	return executor.NewRunner(newAgent(model, app.provider), &gent.Config{
 		Codecs: app.store.codecs, Recorder: recorder, ToolChain: session.tools,
 		Limits: []gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations,
 			Scope: gent.LimitTurn, MaxValue: session.config.MaxIterations}},
@@ -189,6 +198,12 @@ func (app *application) start(input *actionRequest) (string, int, error) {
 	runId := execCtx.RunId()
 	app.sessions[runId] = session
 	app.running[runId] = execCtx
+	app.cancels[runId] = cancel
+	if app.chats[runId] == nil {
+		app.chats[runId] = &conversationInfo{RunId: runId, Scenario: session.id,
+			Title: conversationTitle(input.Prompt)}
+	}
+	app.chats[runId].UpdatedAt = time.Now()
 	delete(app.outcomes, runId)
 	app.wait.Add(1)
 	started = true
@@ -218,7 +233,9 @@ func (app *application) start(input *actionRequest) (string, int, error) {
 		}
 		app.mu.Lock()
 		delete(app.running, runId)
+		delete(app.cancels, runId)
 		app.outcomes[runId] = outcome
+		app.chats[runId].UpdatedAt = time.Now()
 		// Publish idle before another action can own this run. Its browser reload sees accepted
 		// storage, not an old pointer. The hub never calls back into the application lock.
 		if err := app.hub.publish(runId, &browserFrame{Kind: frameIdle}); err != nil {

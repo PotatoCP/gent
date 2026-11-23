@@ -16,7 +16,8 @@ export function setupInspectorResize() {
 
   function bounds() {
     const available = root.clientWidth;
-    const maximum = available <= 800 ? available : available - 320;
+    const chats = parseFloat(getComputedStyle(document.body).getPropertyValue('--chats-width'));
+    const maximum = available <= 800 ? available : available - chats - 320;
     return {minimum: Math.min(280, maximum), maximum};
   }
 

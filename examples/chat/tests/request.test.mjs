@@ -41,3 +41,41 @@ for (const scenario of cases) {
     assert.deepEqual({result, missing, error}, scenario.expected);
   });
 }
+
+// A request from an old chat cannot restore its UI after selection changes. A reset also
+// changes the write identity, so a delayed first prompt cannot create a conversation afterward.
+for (const operation of ['select', 'reset']) {
+  test(`fence pending responses after ${operation}`, async t => {
+    const previous = globalThis.location;
+    globalThis.location = new URL('http://localhost/');
+    t.after(() => { globalThis.location = previous; });
+    const missing = [], resets = [];
+    const request = createRequest(id => missing.push(id), () => resets.push('reset'));
+    let resolveOld;
+    const headers = {'X-Gent-Server': 'first'};
+    const calls = [];
+    t.mock.method(globalThis, 'fetch', async (url, options) => {
+      calls.push({url, options});
+      if (url === '/api/old') return new Promise(resolve => { resolveOld = resolve; });
+      if (url === '/api/reset') return new Response('{}', {
+        headers: {'X-Gent-Server': 'second'},
+      });
+      return new Response('{}', {headers});
+    });
+    await request('/api/config');
+    const pending = request('/api/old', {runId: 'old'});
+    if (operation === 'reset') {
+      assert.deepEqual(await request('/api/reset', {}), {status: RequestStatus.ServerReset});
+    } else request.invalidate();
+    resolveOld(new Response('{}', {status: 404, headers}));
+    assert.deepEqual(await pending, {status: RequestStatus.Superseded});
+    assert.deepEqual(missing, []);
+    assert.deepEqual(resets, operation === 'reset' ? ['reset'] : []);
+    // Use the retained identity for the next write, not the identity from the stale response.
+    headers['X-Gent-Server'] = operation === 'reset' ? 'second' : 'first';
+    await request('/api/action', {action: 'turn'});
+    assert.deepEqual(calls.at(-1), {url: '/api/action', options: {method: 'POST',
+      headers: {'Content-Type': 'application/json', 'X-Gent-Server': headers['X-Gent-Server']},
+      body: '{"action":"turn"}'}});
+  });
+}

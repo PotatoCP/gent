@@ -22,6 +22,7 @@
 }
 :root {
   --inspector-default-width: 410px;
+  --chats-width: 220px;
   --paper: #faf9f6;
   --panel: #f3f3ef;
   --ink: #252d28;
@@ -63,9 +64,45 @@ button:hover:not(:disabled), .quiet-button:hover { background: #e7e9e1; }
 #inspector-toggle { border: 1px solid var(--line); }
 #inspector-toggle span { margin-right: 5px; }
 .workspace { display: grid;
-  grid-template-columns: minmax(0, 1fr) var(--inspector-width, var(--inspector-default-width));
+  grid-template-columns: var(--chats-width) minmax(0, 1fr)
+    var(--inspector-width, var(--inspector-default-width));
   height: calc(100dvh - 64px); }
-body.inspector-hidden .workspace { grid-template-columns: minmax(0, 1fr); }
+body.inspector-hidden .workspace { grid-template-columns: var(--chats-width) minmax(0, 1fr); }
+body.chats-hidden { --chats-width: 0px; }
+body.chats-hidden #conversations { display: none; }
+#conversations { grid-column: 1; border-right: 1px solid var(--line); background: var(--panel);
+  display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.conversation { grid-column: 2; }
+.chats-heading { display: flex; align-items: center; justify-content: space-between;
+  padding: 20px 16px 12px; }
+.chats-heading h2 { font-size: 12px; margin: 0; font-weight: 600; }
+#conversation-list { flex: 1; min-height: 0; overflow: auto; padding: 0 8px 16px; }
+.conversation-link { display: block; padding: 11px 10px; border-radius: 7px;
+  text-decoration: none; margin-bottom: 4px; }
+.conversation-link:hover { background: #e7e9e1; }
+.conversation-link[aria-current="page"] { background: var(--accent-soft); color: var(--accent); }
+.conversation-link strong { display: block; font-size: 12px; font-weight: 400;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.conversation-meta { display: block; font-size: 10px; color: var(--muted); margin-top: 5px; }
+.conversation-link[data-active="true"] .conversation-meta { color: var(--accent); }
+#chats-empty { color: var(--muted); font-size: 12px; padding: 0 18px; }
+#conversation-list:empty { flex: 0; }
+.chats-footer { margin-top: auto; padding: 16px; border-top: 1px solid var(--line); }
+.chats-footer p { font-size: 10px; color: var(--muted); margin: 0 0 8px; }
+#server-reset { color: var(--orange); padding: 6px 0; }
+#reset-dialog { color: var(--ink); background: var(--paper); border: 1px solid var(--line);
+  border-radius: 12px; padding: 28px; max-width: min(440px, calc(100vw - 32px)); }
+#reset-dialog::backdrop { background: #17251d66; }
+#reset-dialog h2 { font-size: 19px; margin: 0 0 14px; }
+#reset-dialog p { color: var(--muted); font-size: 13px; }
+.reset-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 24px; }
+.reset-actions button { border-radius: 6px; padding: 8px 14px; }
+#reset-confirm { background: var(--ink); color: #fff; }
+@media (max-width: 1199px) {
+  body { --chats-width: 0px; }
+  #conversations { position: fixed; z-index: 6; top: 64px; bottom: 0; left: 0;
+    width: min(280px, 85vw); box-shadow: 20px 0 60px #1c302022; }
+}
 body.inspector-hidden #inspector { display: none; }
 .conversation { display: flex; flex-direction: column; min-height: 0; min-width: 0;
   container-type: inline-size; }
@@ -96,6 +133,7 @@ h1 { font-size: 14px; margin: 0; font-weight: 600; }
 .suggestion > span:last-child { margin-left: auto; color: var(--muted); }
 .suggestion strong, .suggestion small { display: block; }
 .suggestion strong { font-size: 13px; font-weight: 600; }
+.investigation { margin-top: 10px; }
 .suggestion small { color: var(--muted); font-size: 12px; padding-top: 3px; }
 #messages { padding-top: 10px; padding-bottom: 24px; }
 .message { margin: 24px 0; min-width: 0; overflow-wrap: anywhere; }
@@ -284,12 +322,14 @@ textarea::placeholder { color: #80867c; }
 }
 @media (max-width: 800px) {
   :root { --inspector-default-width: 420px; }
-  .workspace { grid-template-columns: minmax(0, 1fr); }
+  .workspace, body.inspector-hidden .workspace { grid-template-columns: 0 minmax(0, 1fr); }
   #inspector { position: fixed; z-index: 4; top: 64px; right: 0; bottom: 0;
     width: min(100%, var(--inspector-width, var(--inspector-default-width)));
     box-shadow: -20px 0 60px #1c302022; }
   #inspector-resize { left: 0; }
   .app-header { padding: 0 18px; gap: 12px; }
+  .brand { font-size: 23px; }
+  .brand span { display: none; }
   .header-title, .header-divider { display: none; }
   .header-actions { gap: 3px; }
   .quiet-button, #inspector-toggle { padding: 7px; font-size: 11px; }

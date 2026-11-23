@@ -13,7 +13,15 @@ I have a flight booked for tomorrow (flight AA100 from JFK to LAX) but my meetin
 Can you help me reschedule to a later flight on the same day? I'd prefer an evening flight if ` +
 	`possible.`
 
-// NewChatConfig creates one fixture with the prompts and tools used by the interactive CLI.
+// InvestigationRequest adds a comparison task without changing the original scenario fixture.
+const InvestigationRequest = CustomerRequest + `
+
+Before making a change, compare the available later flights, arrival times, seats, and total
+change cost under my fare rules. Explain the tradeoff between the lowest cost and the latest
+departure. Give brief progress updates while you check the records and policies. Do not change
+my booking until I choose an option.`
+
+// NewChatConfig creates one fixture with the prompts and tools used by the server chat.
 // Keep this value for the conversation. Recreating it during recovery would reset the simulated
 // external service. Separate conversations need separate values so their changes stay isolated.
 func NewChatConfig(config testutil.TestConfig) testutil.ChatConfig {

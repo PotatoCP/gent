@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"testing"
 
 	"github.com/rickchristie/gent"
@@ -64,6 +63,11 @@ if (second.kind !== "execution") throw new Error("read unavailable");
 			expected{calls, programs, output, gent.TerminationSuccess, 2, 1, true, nil}},
 		{"correct top-level return", input{[]string{`return;`, program}, false},
 			expected{calls, programs, output, gent.TerminationSuccess, 2, 1, true, nil}},
+		{"correct Promise after lookup", input{[]string{
+			`tool.call({tool:"lookup",args:{id:"start"}}).then(() => {});`, program,
+		}, false}, expected{[]string{"lookup:start", "lookup:start", "read:record-9"},
+			[][]liveProgramCall{{lookup}, {lookup, read}}, output,
+			gent.TerminationSuccess, 2, 1, true, nil}},
 		{"reject no-op program then direct calls", input{[]string{`console.log("no tools");`}, true},
 			expected{calls, nil, output, gent.TerminationSuccess, 1, 0, false, nil}},
 		{"reject direct calls only", input{nil, true},
@@ -157,7 +161,7 @@ if (second.kind !== "execution") throw new Error("read unavailable");
 				actual.programs, actual.err = liveProgramCalls(execCtx)
 				actual.codeRuns = execCtx.Stats().GetCounter(gent.SCCodeExecutions)
 				actual.codeErrors = execCtx.Stats().GetCounter(gent.SCCodeExecutionsError)
-				actual.accepted = reflect.DeepEqual(programs, actual.programs)
+				actual.accepted = validLiveProgramEvidence(actual.calls, actual.programs, programs[0])
 				assert.Equal(t, test.expected, actual)
 			},
 		)
@@ -167,4 +171,46 @@ func (m *liveEvidenceModel) PrepareRequest(execCtx *gent.ExecutionContext,
 	request *gent.ModelCallRequest, chain gent.ToolChain,
 ) (*gent.ModelCallRequest, error) {
 	return gent.PrepareModelRequest(execCtx, request, chain)
+}
+
+func TestNativeLiveProgramValidation(t *testing.T) {
+	type input struct {
+		calls    []string
+		programs [][]liveProgramCall
+	}
+	type expected struct{ accepted bool }
+	type testCase struct {
+		name     string
+		input    input
+		expected expected
+	}
+	lookup := liveProgramCall{"lookup", &responseInput{ID: "start"}, `{"next_id":"record-9"}`, nil}
+	read := liveProgramCall{"read", &responseInput{ID: "record-9"}, "record-finished", nil}
+	want := []liveProgramCall{lookup, read}
+	calls := []string{"lookup:start", "read:record-9"}
+	wrong := liveProgramCall{"lookup", &responseInput{ID: "wrong"}, `{"next_id":"record-9"}`, nil}
+	changed := liveProgramCall{"lookup", &responseInput{ID: "start"}, `{"next_id":"other"}`, nil}
+	cases := []testCase{
+		{"complete program", input{calls, [][]liveProgramCall{want}}, expected{true}},
+		{"partial correction kept", input{[]string{"lookup:start", "lookup:start", "read:record-9"},
+			[][]liveProgramCall{{lookup}, want}}, expected{true}},
+		{"lost earlier operation", input{[]string{"lookup:start", "lookup:start", "read:record-9"},
+			[][]liveProgramCall{want}}, expected{false}},
+		{"no complete program", input{calls, [][]liveProgramCall{{lookup}, {read}}}, expected{false}},
+		{"direct calls", input{calls, nil}, expected{false}},
+		{"wrong input before correction", input{[]string{"lookup:wrong", "lookup:start", "read:record-9"},
+			[][]liveProgramCall{{wrong}, want}}, expected{false}},
+		{"changed result before correction",
+			input{[]string{"lookup:start", "lookup:start", "read:record-9"},
+				[][]liveProgramCall{{changed}, want}}, expected{false}},
+		{"wrong operation order", input{[]string{"read:record-9", "lookup:start"},
+			[][]liveProgramCall{want}}, expected{false}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.expected, expected{
+				validLiveProgramEvidence(test.input.calls, test.input.programs, want),
+			})
+		})
+	}
 }
