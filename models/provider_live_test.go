@@ -25,14 +25,20 @@ func TestLiveProviders(t *testing.T) {
 		t.Run(provider.name, func(t *testing.T) {
 			config := liveConfig(t, provider, false)
 			t.Parallel()
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
 			model := newLiveModel(t, provider, &config)
-			t.Run("TextStream", func(t *testing.T) { checkLiveText(t, ctx, model) })
-			t.Run("NativeTools", func(t *testing.T) { checkLiveTools(t, ctx, model) })
-			checkLiveOutputs(t, ctx, model, provider.prefix != "DEEPSEEK")
+			t.Run("TextStream", func(t *testing.T) { checkLiveText(t, liveFeatureContext(t), model) })
+			t.Run("NativeTools", func(t *testing.T) { checkLiveTools(t, liveFeatureContext(t), model) })
+			checkLiveOutputs(t, model, provider.prefix != "DEEPSEEK")
 		})
 	}
+}
+
+// Each feature has its own deadline. A slow tool or text response must not use the time
+// available for a later output test. The go test deadline still bounds the whole group.
+func liveFeatureContext(t *testing.T) context.Context {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
+	t.Cleanup(cancel)
+	return ctx
 }
 
 type liveTextCheck interface {
@@ -181,7 +187,7 @@ type liveOutputValue struct {
 	Value int `json:"value"`
 }
 
-func checkLiveOutputs(t *testing.T, ctx context.Context, model gent.Model, native bool) {
+func checkLiveOutputs(t *testing.T, model gent.Model, native bool) {
 	t.Helper()
 	type input struct {
 		build func(gent.OutputCustomValidator[liveOutputValue]) (gent.Output[liveOutputValue], error)
@@ -224,6 +230,7 @@ func checkLiveOutputs(t *testing.T, ctx context.Context, model gent.Model, nativ
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
+			ctx := liveFeatureContext(t)
 			actual := expected{}
 			out, err := test.input.build(func(_ *gent.ExecutionContext, value liveOutputValue) (
 				*gent.OutputValidationResult, error,
