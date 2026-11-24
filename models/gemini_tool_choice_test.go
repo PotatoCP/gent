@@ -166,3 +166,33 @@ func TestGeminiToolChoiceWithJSONOutput(t *testing.T) {
 		}
 	}
 }
+
+// A forced choice constrains the request. A completed response must still identify its tool.
+func TestGeminiRejectsNamelessCompletedCall(t *testing.T) {
+	const reply = `data: {"candidates":[{"content":{"parts":[{"functionCall":{}}]}}]}
+
+data: {"candidates":[{"finishReason":"STOP"}]}
+
+`
+	client := &http.Client{Transport: responseTransport(func(*http.Request) (*http.Response, error) {
+		return fixtureHTTP(reply, "text/event-stream"), nil
+	})}
+	model := fixtureModel("gemini", client)
+	request := gent.NewModelCallRequest([]*gent.ModelMessage{
+		gent.TextParts(gent.ChatMessageTypeHuman, "Read the record."),
+	})
+	request.Options.Tools = []*gent.ToolDefinition{{Type: "function",
+		Function: &gent.FunctionDefinition{Name: "lookup", Parameters: responseInputSchema()}}}
+	request.Options.ToolChoice = gent.ToolChoice{Type: "function",
+		Function: &gent.FunctionReference{Name: "lookup"}}
+	stream, err := model.GenerateContentStream(context.Background(), request)
+	if !assert.NoError(t, err) {
+		return
+	}
+	defer stream.Close()
+	for range stream.Chunks() {
+	}
+	response, err := stream.Response()
+	assert.Nil(t, response)
+	assert.EqualError(t, err, "Gemini function call has no name")
+}

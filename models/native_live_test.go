@@ -163,12 +163,14 @@ func TestNativeLive(t *testing.T) {
 			if !assert.NoError(t, err) {
 				return
 			}
+			firstTool := "run_code"
 			task := `Use one run_code call to call lookup with id "start", then call read with
 id from lookupReply.parts.find(part => part.kind === "data").data.next_id.
 Check each reply's kind and executionStatus. Use tool.call for both calls.
 Do not call lookup or read directly. The code is a script; do not use a top-level return.
 Return only the text from read as the final answer, without quotes or formatting.`
 			if test.input.search {
+				firstTool = "tool_registry_search"
 				task = `First use tool_registry_search with regex query "lookup|read".
 Wait for that result before the next request. Then follow these instructions:
 ` + task
@@ -185,7 +187,22 @@ The program and its tool calls are complete. Do not run them again.`)}}, nil
 			agent := react.NewWithOutput(model, out).WithCallOptions(gent.WithMaxTokens(3000))
 			worker, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
+			// The program-only case requires run_code on its first call. The search case
+			// also tests whether the model can find the search tool among the catalog entries.
+			var hooks *gent.Hooks
+			if !test.input.search && test.input.provider.prefix != "OLLAMA" {
+				hooks = &gent.Hooks{BeforeModelCall: func(_ context.Context,
+					event *gent.BeforeModelCallEvent,
+				) error {
+					if event.Iteration == 1 {
+						event.Request.Options.ToolChoice = gent.ToolChoice{Type: "function",
+							Function: &gent.FunctionReference{Name: firstTool}}
+					}
+					return nil
+				}}
+			}
 			runner, execCtx := newModelExecution(t, worker, agent, &gent.Config{ToolChain: program,
+				Hooks:  hooks,
 				Limits: []gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 6}}})
 			t.Cleanup(func() {
 				if !t.Failed() {
@@ -211,6 +228,14 @@ The program and its tool calls are complete. Do not run them again.`)}}, nil
 			assert.Equal(t, gent.TerminationSuccess, result.TerminationReason)
 			assert.Equal(t, "record-finished", value)
 			assert.Equal(t, "record-finished", gent.ContentText(result.Output))
+			var firstCall string
+			for _, event := range providerEvents(execCtx) {
+				if before, ok := event.(*gent.BeforeToolCallEvent); ok {
+					firstCall = before.ToolName
+					break
+				}
+			}
+			assert.Equal(t, firstTool, firstCall)
 			programs, err := liveProgramCalls(execCtx)
 			if !assert.NoError(t, err) {
 				return
