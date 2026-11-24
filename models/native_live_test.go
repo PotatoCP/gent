@@ -185,7 +185,9 @@ The program and its tool calls are complete. Do not run them again.`)}}, nil
 					return &gent.OutputValidationResult{Accepted: true}, nil
 				})
 			agent := react.NewWithOutput(model, out).WithCallOptions(gent.WithMaxTokens(3000))
-			worker, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			// Search, program execution, and the final answer need separate remote calls.
+			// Use the same whole-turn deadline as the other multi-turn provider checks.
+			worker, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 			defer cancel()
 			// The program-only case requires run_code on its first call. The search case
 			// also tests whether the model can find the search tool among the catalog entries.

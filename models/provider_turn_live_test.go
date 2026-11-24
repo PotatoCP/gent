@@ -113,20 +113,33 @@ func TestLiveProviderMultiTurn(t *testing.T) {
 			defer cancel()
 			codecs := gent.NewCodecRegistry()
 			store := &liveConversationStore{modelTestStore: modelTestStore{codecs: codecs}}
+			code := "gent-" + rand.Text()
+			prompt := "Remember this code for later: " + code + ". Return only that code."
+			copyErrors := 0
 			build := func() *executor.Runner[string] {
 				out := output.NewTextOutput().SetCustomValidator("repeat-validation",
-					func(execCtx *gent.ExecutionContext, _ string) (*gent.OutputValidationResult, error) {
-						if execCtx.Stats().GetCounter(gent.SCOutputCustomRejectedTotal) < 2 {
+					func(execCtx *gent.ExecutionContext, value string) (*gent.OutputValidationResult, error) {
+						rejected := execCtx.Stats().GetCounter(gent.SCOutputCustomRejectedTotal)
+						if rejected < int64(test.expected.rejected) {
 							return &gent.OutputValidationResult{Steering: []gent.ContentPart{
 								gent.TextPart("Confirm the saved code. Return only that code again."),
+							}}, nil
+						}
+						// A model can miscopy the code even when Gent supplied the full prompt.
+						// Keep the expected code out of steering so only history can supply it.
+						if value != code {
+							copyErrors++
+							return &gent.OutputValidationResult{Steering: []gent.ContentPart{gent.TextPart(
+								"Read the first user message. Copy its code exactly, including every character."),
 							}}, nil
 						}
 						return &gent.OutputValidationResult{Accepted: true}, nil
 					})
 				loop := react.NewWithOutput(newLiveModel(t, test.input.provider, &settings), out).
 					WithCallOptions(gent.WithMaxTokens(2048))
-				return executor.NewRunner(loop, &gent.Config{
-					Codecs: codecs, Recorder: store, Limits: liveLimits()})
+				// Allow two planned rejections and up to two corrections before the final save.
+				return executor.NewRunner(loop, &gent.Config{Codecs: codecs, Recorder: store,
+					Limits: []gent.Limit{{Type: gent.LimitExactKey, Key: gent.SCIterations, MaxValue: 6}}})
 			}
 			runner := build()
 			execCtx, err := runner.NewExecutionContext(ctx, "live multi-turn")
@@ -141,10 +154,9 @@ func TestLiveProviderMultiTurn(t *testing.T) {
 					execCtx.Stop()
 				}
 			}
-			code := "gent-" + rand.Text()
 			value, result, err := runner.NewTurn(execCtx, liveTask(
 				"Follow the user instructions. Return exact text with no added formatting.",
-				"Remember this code for later: "+code+". Return only that code."))
+				prompt))
 			if !assert.NoError(t, err) || !assert.NotNil(t, result) {
 				return
 			}
@@ -196,13 +208,30 @@ func TestLiveProviderMultiTurn(t *testing.T) {
 			assert.Equal(t, runId, execCtx.RunId())
 			assert.NotEqual(t, turnId, execCtx.TurnId())
 			actual := expected{}
+			requests := 0
 			for _, event := range store.view.Activity {
 				if event.Type == "accepted_answer" {
 					actual.answers++
 				}
+				before, ok := event.Payload.(*gent.BeforeModelCallEvent)
+				if !ok {
+					continue
+				}
+				requests++
+				matches := 0
+				for _, message := range before.Request.Messages {
+					if message.Role == gent.ChatMessageTypeHuman && gent.ContentText(message.Parts) == prompt {
+						matches++
+						assert.Equal(t, []gent.ContentPart{gent.TextPart(prompt)}, message.Parts)
+					}
+				}
+				assert.Equal(t, 1, matches, "original prompt in model call %s", before.ModelCallId)
 			}
 			actual.rejected = int(execCtx.Stats().GetCounter(gent.SCOutputCustomRejectedTotal))
-			assert.Equal(t, test.expected, actual)
+			want := test.expected
+			want.rejected += copyErrors
+			assert.Equal(t, want, actual)
+			assert.Equal(t, want.answers+want.rejected, requests)
 		})
 	}
 }
