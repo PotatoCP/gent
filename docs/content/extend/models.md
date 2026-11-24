@@ -11,9 +11,13 @@ This deterministic adapter is useful for tests:
 
 {{example:custom-model-response}}
 
-MessageId connects chunks and complete content. A provider tool request is a separate ordered part.
-Retain native completion, refusals, tool IDs, phases, signatures, and continuation data. Do not
-label a model candidate as an accepted final answer.
+`MessageId` connects chunks and complete content. When you return `ModelStatusAnswer` with
+final-answer candidates, select the items for output in `CandidateSource.MessageIds`. For example,
+if an earlier item was a draft, select only the final candidate. An empty selection in that
+response is an adapter error. A response with only commentary has no answer candidate.
+
+A provider tool request is a separate ordered part. Retain native completion, refusals, tool IDs,
+phases, signatures, and continuation data. Only the loop can accept a candidate as a final answer.
 
 ## Complete a producer
 

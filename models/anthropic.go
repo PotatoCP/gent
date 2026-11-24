@@ -247,7 +247,7 @@ func anthropicMetadata(body, metadata map[string]any) error {
 func anthropicMessages(messages []*gent.ModelMessage) ([]any, []any, error) {
 	result := make([]any, 0, len(messages))
 	var system []any
-	for _, message := range messages {
+	for _, message := range groupToolResults(messages) {
 		role, err := messageRole(message.Role)
 		if err != nil {
 			return nil, nil, err

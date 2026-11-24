@@ -27,6 +27,9 @@ func (m *Ollama) Provider() string  { return "ollama" }
 func (m *Ollama) GenerateContentStream(ctx context.Context,
 	request *gent.ModelCallRequest,
 ) (gent.Stream, error) {
+	if err := checkOllamaFunctions(request.Options.Tools); err != nil {
+		return nil, err
+	}
 	request, err := prepareMedia(ctx, m.config.HTTPClient, request, "ollama")
 	if err != nil {
 		return nil, err
@@ -47,6 +50,15 @@ func (m *Ollama) GenerateContentStream(ctx context.Context,
 			recordSchema(result, decision)
 			return result, err
 		})
+}
+
+func checkOllamaFunctions(tools []*gent.ToolDefinition) error {
+	for _, tool := range tools {
+		if tool == nil || tool.Type != "function" || tool.Function == nil || tool.Function.Strict {
+			return errors.New("Ollama requires non-strict function tools")
+		}
+	}
+	return nil
 }
 
 func (m *Ollama) requestBody(request *gent.ModelCallRequest) (
@@ -102,11 +114,6 @@ func (m *Ollama) requestBody(request *gent.ModelCallRequest) (
 		body["options"] = options
 	}
 	if len(o.Tools) > 0 {
-		for _, tool := range o.Tools {
-			if tool.Type != "function" || tool.Function == nil || tool.Function.Strict {
-				return nil, decision, errors.New("Ollama requires non-strict function tools")
-			}
-		}
 		definitions, err := describedTools(o.Tools)
 		if err != nil {
 			return nil, decision, err

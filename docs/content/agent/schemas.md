@@ -7,8 +7,9 @@ Use field rules when the inferred type needs more constraints.
 
 {{example:schema-fields}}
 
-`Strict(true)` requests provider argument enforcement where supported. Gent still performs local
-validation before the handler and after mutable input Hooks.
+`Strict(true)` requires the provider to enforce the tool's input schema. Gemini, Vertex AI, and
+Ollama reject this setting during `PrepareRequest`, after the tool catalog is resolved. Gent
+validates tool arguments locally before the handler and after mutable input Hooks.
 
 ## Give the tool to the Runner
 

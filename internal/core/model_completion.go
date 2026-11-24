@@ -49,6 +49,17 @@ func (choice *ContentChoice) ValidateCompletion() error {
 		if len(choice.ToolCalls()) > 0 {
 			return fmt.Errorf("gent: answer completion contains tool calls")
 		}
+		// An output processor can request a correction for empty content. It cannot repair
+		// an adapter that supplied candidates without selecting any of them.
+		if choice.CandidateSource == nil || len(choice.CandidateSource.MessageIds) == 0 {
+			for _, part := range choice.Parts {
+				item, ok := part.(*AssistantContent)
+				if ok && item.Type == AssistantContentFinalAnswerCandidate {
+					return fmt.Errorf("gent: answer contains candidate %q but "+
+						"CandidateSource.MessageIds is empty", item.MessageId)
+				}
+			}
+		}
 	case ModelStatusToolCalls:
 		if len(choice.ToolCalls()) == 0 {
 			return fmt.Errorf("gent: tool completion has no calls")

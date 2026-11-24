@@ -2,12 +2,33 @@ package react
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/rickchristie/gent"
 	"github.com/rickchristie/gent/toolchain"
 	"github.com/stretchr/testify/assert"
 )
+
+func TestUnselectedAnswerStopsBeforeOutputCorrection(t *testing.T) {
+	choice := answerChoice("Done.")
+	choice.CandidateSource = nil
+	model := newMockModel(nativeTestResponse(choice), nativeTestResponse(answerChoice("Done.")))
+	agent := NewAgent(model)
+	runner, execCtx := newTestExecution(t, agent, &gent.Config{})
+	value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Answer me.")))
+	callID := execCtx.ContextId() + ":model:1"
+	want := fmt.Sprintf("gent: Loop.Next %T failed in run %q turn %q iteration 1: "+
+		"model call failed: gent: model stream/response for call %q in run %q turn %q context %q: "+
+		"gent: model call %q choice 0: "+
+		`gent: answer contains candidate "answer" but CandidateSource.MessageIds is empty`,
+		agent, execCtx.RunId(), execCtx.TurnId(), callID, execCtx.RunId(), execCtx.TurnId(),
+		execCtx.ContextId(), callID)
+	assert.EqualError(t, err, want)
+	assert.Equal(t, "", value)
+	assert.Nil(t, result)
+	assert.Equal(t, 1, model.callCount)
+}
 
 func TestNativeAgent_CompletionStates(t *testing.T) {
 	type input struct {

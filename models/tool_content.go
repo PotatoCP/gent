@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -207,6 +208,66 @@ func loadImage(base context.Context, client *http.Client, address string) (
 		return gent.BinaryContent{}, fmt.Errorf("URL did not return an image")
 	}
 	return gent.BinaryContent{MIMEType: mime, Data: data}, nil
+}
+
+// Gemini and Anthropic expect one user turn for all replies to an assistant's parallel calls.
+// Build that turn for the wire. The archive keeps the separate tool records and their metadata.
+func groupToolResults(messages []*gent.ModelMessage) []*gent.ModelMessage {
+	var turns []*gent.ModelMessage
+	start := 0
+	for i := 0; i < len(messages); i++ {
+		message := messages[i]
+		if message.Role != gent.ChatMessageTypeTool || message.Continuation != nil {
+			continue
+		}
+		end := i + 1
+		for end < len(messages) && messages[end].Role == gent.ChatMessageTypeTool &&
+			messages[end].Continuation == nil {
+			end++
+		}
+		if end == i+1 && len(message.Parts) < 2 {
+			continue
+		}
+		var parts []gent.ContentPart
+		for _, reply := range messages[i:end] {
+			parts = append(parts, reply.Parts...)
+		}
+		if i > 0 && messages[i-1].Role == gent.ChatMessageTypeAI {
+			orderToolResults(parts, messages[i-1].Parts)
+		}
+		turns = append(turns, messages[start:i]...)
+		turns = append(turns, &gent.ModelMessage{Role: gent.ChatMessageTypeTool, Parts: parts})
+		start = end
+		i = end - 1
+	}
+	if turns == nil {
+		return messages
+	}
+	return append(turns, messages[start:]...)
+}
+
+// Call IDs associate replies with the original calls even if a caller supplies them in completion
+// order. An endpoint can omit IDs on the wire, so two calls to the same function need this order.
+func orderToolResults(parts, calls []gent.ContentPart) {
+	order := make(map[string]int, len(calls))
+	for i, part := range calls {
+		if call, ok := partValue(part).(gent.ModelToolCallRequest); ok {
+			order[call.ID] = i
+		}
+	}
+	for _, part := range parts {
+		reply, ok := part.(*gent.ModelToolCallResponse)
+		if !ok {
+			return
+		}
+		if _, known := order[reply.ToolCallID()]; !known {
+			return
+		}
+	}
+	slices.SortStableFunc(parts, func(a, b gent.ContentPart) int {
+		return order[a.(*gent.ModelToolCallResponse).ToolCallID()] -
+			order[b.(*gent.ModelToolCallResponse).ToolCallID()]
+	})
 }
 
 // Text-only tool protocols require media in a following user message. Flush after the whole

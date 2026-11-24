@@ -62,7 +62,10 @@ func TestNativeToolMediaEncoding(t *testing.T) {
 			case "anthropic":
 				value, err = anthropicPart(reply)
 			case "gemini":
-				value, err = geminiToolResponse(reply, map[string]bool{"call-1": true})
+				var response map[string]any
+				var guidance []any
+				response, guidance, err = geminiToolResponse(reply, map[string]bool{"call-1": true})
+				value = append([]any{response}, guidance...)
 			}
 			assert.NoError(t, err)
 			actual, err := json.Marshal(value)

@@ -33,6 +33,11 @@ The [capability fixtures](/source/models/provider_capability_test.go.html),
 [image fixtures](/source/models/provider_image_test.go.html) check these adapter paths.
 The [restoration fixtures](/source/models/provider_resume_history_test.go.html) check native replay.
 
+When one assistant message requests several tools, Gemini, Vertex AI, and Anthropic receive the
+results together in the original call order. Gent keeps each tool result in the run history.
+OpenAI Responses receives one result item per call. Chat Completions receives one tool message
+per call.
+
 The xAI image path requires JPEG output. Do not use the PNG-only setting from the image-limit
 example with that adapter. Gemini and Vertex AI use their own allowed MIME list. OpenRouter checks
 its model metadata before applying supported output controls. See the [Gemini media

@@ -88,6 +88,14 @@ The order is paid.
 The order is paid.
 </prior_work_summary>`},
 		},
+		{"unselected summary", input{&gent.ContentChoice{
+			Completion: gent.ModelCompletion{Status: gent.ModelStatusAnswer},
+			Parts: []gent.ContentPart{&gent.AssistantContent{
+				Type: gent.AssistantContentFinalAnswerCandidate, MessageId: "summary",
+				Content: []gent.ContentPart{gent.TextPart("The order is paid.")},
+			}},
+		}}, expected{modelFailure: true,
+			err: `gent: answer contains candidate "summary" but CandidateSource.MessageIds is empty`}},
 		{"commentary only",
 			input{&gent.ContentChoice{Completion: gent.ModelCompletion{
 				Status:         gent.ModelStatusAnswer,

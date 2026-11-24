@@ -36,7 +36,7 @@ func geminiMessages(messages []*gent.ModelMessage, provider string, nativeMedia 
 		return true
 	}
 	var err error
-	messages, err = separateSelectedToolMedia(messages, move)
+	messages, err = separateSelectedToolMedia(groupToolResults(messages), move)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -82,18 +82,19 @@ func geminiMessages(messages []*gent.ModelMessage, provider string, nativeMedia 
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		var parts []any
+		var parts, guidance []any
 		readable, err := readableAssistantParts(message.Parts)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		for _, part := range readable {
 			if reply, ok := part.(*gent.ModelToolCallResponse); ok {
-				values, err := geminiToolResponse(reply, callIDs)
+				response, text, err := geminiToolResponse(reply, callIDs)
 				if err != nil {
 					return nil, nil, nil, err
 				}
-				parts = append(parts, values...)
+				parts = append(parts, response)
+				guidance = append(guidance, text...)
 				continue
 			}
 			value, err := geminiPart(partValue(part), callIDs)
@@ -118,6 +119,8 @@ func geminiMessages(messages []*gent.ModelMessage, provider string, nativeMedia 
 		if role == "tool" {
 			role = "user"
 		}
+		// Match all calls before sending text guidance from any one result.
+		parts = append(parts, guidance...)
 		result = append(result, map[string]any{"role": role, "parts": parts})
 	}
 	return result, system, pending, nil
@@ -177,7 +180,9 @@ func geminiNativeToolMedia(selected, configured string) bool {
 	return strings.HasPrefix(name, "gemini-3")
 }
 
-func geminiToolResponse(reply *gent.ModelToolCallResponse, callIDs map[string]bool) ([]any, error) {
+func geminiToolResponse(reply *gent.ModelToolCallResponse, callIDs map[string]bool) (
+	map[string]any, []any, error,
+) {
 	response := map[string]any{"name": reply.Name()}
 	if callIDs[reply.ToolCallID()] {
 		response["id"] = reply.ToolCallID()
@@ -202,7 +207,7 @@ func geminiToolResponse(reply *gent.ModelToolCallResponse, callIDs map[string]bo
 				"displayName": name}})
 			data = append(data, map[string]any{"$ref": name})
 		default:
-			return nil, fmt.Errorf("unsupported Gemini function response content %T", part)
+			return nil, nil, fmt.Errorf("unsupported Gemini function response content %T", part)
 		}
 	}
 	if dataCount == 1 && domain != nil && len(media) == 0 && len(data) > 0 &&
@@ -215,8 +220,7 @@ func geminiToolResponse(reply *gent.ModelToolCallResponse, callIDs map[string]bo
 	if len(media) > 0 {
 		response["parts"] = media
 	}
-	result := []any{map[string]any{"functionResponse": response}}
-	return append(result, guidance...), nil
+	return map[string]any{"functionResponse": response}, guidance, nil
 }
 
 func geminiToolMIME(mime string) bool {

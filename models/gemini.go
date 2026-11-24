@@ -36,6 +36,9 @@ func (m *generateContentModel) Provider() string  { return m.provider }
 func (m *generateContentModel) GenerateContentStream(ctx context.Context,
 	request *gent.ModelCallRequest,
 ) (gent.Stream, error) {
+	if err := checkGeminiFunctions(request.Options.Tools); err != nil {
+		return nil, err
+	}
 	request, err := prepareMedia(ctx, m.config.HTTPClient, request, "gemini")
 	if err != nil {
 		return nil, err
@@ -302,14 +305,23 @@ func geminiMetadata(body, config, metadata map[string]any) error {
 	return nil
 }
 
+func checkGeminiFunctions(tools []*gent.ToolDefinition) error {
+	for _, tool := range tools {
+		if tool == nil || tool.Type != "function" || tool.Function == nil {
+			return errors.New("Gemini requires function tool definitions")
+		}
+		if tool.Function.Strict {
+			return errors.New("Gemini does not support per-function strict settings")
+		}
+	}
+	return nil
+}
+
 func geminiTools(body map[string]any, options *gent.CallOptions,
 	messages []*gent.ModelMessage,
 ) (bool, error) {
 	var declarations []any
 	for _, tool := range options.Tools {
-		if tool.Type != "function" || tool.Function == nil {
-			return false, errors.New("Gemini requires function tool definitions")
-		}
 		f := tool.Function
 		declaration := map[string]any{"name": f.Name, "description": f.Description,
 			"parametersJsonSchema": f.Parameters}
@@ -326,9 +338,6 @@ func geminiTools(body map[string]any, options *gent.CallOptions,
 			declaration["description"] = description
 		}
 		declarations = append(declarations, declaration)
-		if f.Strict {
-			return false, errors.New("Gemini does not support per-function strict settings")
-		}
 	}
 	if len(declarations) > 0 {
 		body["tools"] = []any{map[string]any{"functionDeclarations": declarations}}
