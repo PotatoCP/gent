@@ -3,11 +3,13 @@ package models
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
 	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/output"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -37,12 +39,32 @@ func TestLiveProviderHistory(t *testing.T) {
 
 func checkLiveAssistantHistory(t *testing.T, ctx context.Context, model gent.Model) {
 	t.Helper()
+	type historyAnswer struct {
+		Area      string `json:"area"`
+		Reference string `json:"reference"`
+	}
+	// Only the saved assistant message contains the reference. The schema fixes the reply
+	// format while leaving both values to be read from history.
+	var nonce [4]byte
+	if _, err := rand.Read(nonce[:]); !assert.NoError(t, err) {
+		return
+	}
+	want := historyAnswer{Area: "Tebet", Reference: fmt.Sprintf("R-%x", nonce)}
+	out, err := output.NewJsonOutput[historyAnswer]()
+	if !assert.NoError(t, err) {
+		return
+	}
 	request := gent.NewModelCallRequest([]*gent.ModelMessage{
-		gent.TextParts(gent.ChatMessageTypeSystem, "Answer with the saved area name only."),
-		gent.TextParts(gent.ChatMessageTypeHuman, "Keep the area from the following summary."),
-		gent.TextParts(gent.ChatMessageTypeAI, "SUMMARY: the customer asked about a room in Tebet."),
-		gent.TextParts(gent.ChatMessageTypeHuman, "Which area did I ask about?"),
+		gent.TextParts(gent.ChatMessageTypeSystem, out.Instructions()),
+		gent.TextParts(gent.ChatMessageTypeHuman, "Keep the following booking summary."),
+		gent.TextParts(gent.ChatMessageTypeAI,
+			fmt.Sprintf("Booking summary. Area: %s. Reference: %s.", want.Area, want.Reference)),
+		gent.TextParts(gent.ChatMessageTypeHuman,
+			"Return the area name and the booking reference from the summary. Copy each value exactly."),
 	}, gent.WithMaxTokens(2048))
+	if !assert.NoError(t, out.Configure(request)) {
+		return
+	}
 	stream, err := model.GenerateContentStream(ctx, request)
 	if !assert.NoError(t, err) {
 		return
@@ -55,5 +77,8 @@ func checkLiveAssistantHistory(t *testing.T, ctx context.Context, model gent.Mod
 		return
 	}
 	assert.Equal(t, gent.ModelStatusAnswer, response.Choices[0].Completion.Status)
-	assert.Equal(t, "Tebet", gent.ContentText(response.Choices[0].CandidateContent()))
+	encoded, err := json.Marshal(want)
+	if assert.NoError(t, err) {
+		assert.JSONEq(t, string(encoded), gent.ContentText(response.Choices[0].CandidateContent()))
+	}
 }
