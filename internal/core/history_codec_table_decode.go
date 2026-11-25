@@ -38,56 +38,20 @@ type tableReader struct {
 	shared   []tableReadValue
 }
 
-func (decoder *valueDecoder) document(data []byte) (any, error) {
-	if err := decoder.checkEncodedSize(len(data)); err != nil {
-		return nil, err
-	}
-	indexed, err := indexSavedJSON(data)
-	if err != nil {
-		return nil, err
-	}
-	// The previous storage format was a component envelope without a document marker. Report
-	// this known, unsupported format as incompatibility; do not mislabel it as damaged storage.
-	if indexed.kind() == '{' {
-		var marker, oldType, oldVersion bool
-		if err := indexed.object(func(name string, _ savedJSONValue) error {
-			switch name {
-			case "formatVersion":
-				marker = true
-			case "type":
-				oldType = true
-			case "version":
-				oldVersion = true
-			}
-			return nil
-		}); err != nil {
-			return nil, err
-		}
-		if !marker && oldType && oldVersion {
-			decoder.status = valueDecodeIncompatible
-			return nil, errors.New("gent: unsupported saved envelope format")
-		}
-	}
+// V3 tables belong to one document. Loading never needs another document or process dictionary.
+func (decoder *valueDecoder) documentV3(indexed savedJSONValue) (any, error) {
 	fields, err := tableObject(indexed, "formatVersion", "data", "digest")
 	if err != nil {
 		return nil, err
-	}
-	version, err := tableInteger(fields["formatVersion"])
-	if err != nil {
-		return nil, err
-	}
-	if version != savedDocumentVersion && version != compressedDocumentVersion {
-		decoder.status = valueDecodeIncompatible
-		return nil, fmt.Errorf("gent: unsupported saved document version %d", version)
 	}
 	var digest string
 	if err := tableString(fields["digest"], &digest); err != nil {
 		return nil, err
 	}
-	if digest != versionedDocumentDigest(version, fields["data"].bytes()) {
+	if digest != v3DocumentDigest(fields["data"].bytes()) {
 		return nil, errors.New("gent: saved document digest mismatch")
 	}
-	dataValue, err := decoder.documentData(version, fields["data"])
+	dataValue, err := decoder.v3DocumentData(fields["data"])
 	if err != nil {
 		return nil, err
 	}

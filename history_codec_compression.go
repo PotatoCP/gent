@@ -3,7 +3,7 @@ package gent
 import core "github.com/rickchristie/gent/internal/core"
 
 // CodecCompression selects lossless storage compression. It does not change batch receipts,
-// content types, native bytes, or logical expansion limits. Decoding accepts both formats.
+// content types, native bytes, or logical expansion limits. V3 readers accept both representations.
 type CodecCompression = core.CodecCompression
 
 const (

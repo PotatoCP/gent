@@ -49,6 +49,12 @@ examples, site builds, npm advisories, browsers, package contents, and the CLI. 
 20 or later and Chromium. Use `CHROMIUM_PATH` for the docs browser and `CHROME_PATH` for the chat
 browser to select a Chromium path. `RELEASE_REPORT_DIR` selects the log folder.
 
+The root suites read the fixed persistence corpus in
+[`internal/multiturntest/testdata/storage`](../internal/multiturntest/testdata/storage/README.md).
+Keep every released corpus. Add files for a new storage representation or a changed run schema.
+Verify old receipts, archive content, and continuation with the current writer before release.
+An encoder and decoder built from the same revision cannot establish upgrade compatibility alone.
+
 Go test modes run in sequence with one package at a time. Concurrent modes can make the large
 recovery suites exceed their 300-second package deadline through CPU contention. The gate keeps
 that deadline and all scenarios, collects each module's result, then reports failures. Each mode

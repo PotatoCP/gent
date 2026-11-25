@@ -40,6 +40,8 @@ type registeredValue struct {
 
 // CodecRegistry binds wire names to concrete types. Register custom types before starting a run;
 // decoding never loads code or guesses a Go type from an untrusted checkpoint.
+// Gent upgrades read durable storage v3 and later without application data migrations.
+// Application codecs remain responsible for reading their own saved representations.
 type CodecRegistry struct {
 	mu     sync.RWMutex
 	byType map[reflect.Type]registeredValue

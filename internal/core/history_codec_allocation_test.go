@@ -1,8 +1,6 @@
 package gent
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -93,7 +91,7 @@ func TestCodecRejectsOversizedSavedTypes(t *testing.T) {
 				err = codecs.Unmarshal(data, &target)
 				assert.EqualError(t, err, test.expected.errorText)
 				assert.Equal(t, "unchanged target", target)
-				result, err := codecs.UnmarshalRunState(savedTypeRunState(t, data))
+				result, err := codecs.UnmarshalRunState(data)
 				assert.NoError(t, err)
 				assert.Equal(t, &RunStateLoadResult{Status: RunStateInvalid,
 					Detail: test.expected.errorText}, result)
@@ -112,17 +110,6 @@ func savedTypeDocument(t *testing.T, value EncodedValue) []byte {
 ["version",{"constant":1}],["data"]]],"shared":[],"root":[0,[-3,%s]]}`,
 		value.Type, value.Data)
 	return testDocument(t, data)
-}
-
-func savedTypeRunState(t *testing.T, data []byte) []byte {
-	t.Helper()
-	digest := sha256.Sum256(data)
-	result, err := json.Marshal(runStateSnapshotEncoding{SchemaVersion: RunSchemaVersion,
-		State: data, Digest: hex.EncodeToString(digest[:])})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return result
 }
 
 type allocationEmpty struct{}

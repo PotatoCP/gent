@@ -144,10 +144,7 @@ func TestRecorderSetupExamples(t *testing.T) {
 		) *executor.Runner[string] {
 			interval := uint64(1)
 			// docs:start snapshot-runner
-			recorder := &SnapshotRecorder{
-				BatchRecorder: BatchRecorder{Codecs: codecs, Store: store},
-				Every:         interval,
-			}
+			recorder := &BatchRecorder{Codecs: codecs, Store: store, Every: interval}
 			loop := react.NewAgent(model)
 			runner := executor.NewRunner(loop, &gent.Config{Codecs: codecs, Recorder: recorder})
 			// docs:end snapshot-runner

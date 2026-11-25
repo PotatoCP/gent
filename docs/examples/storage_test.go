@@ -5,16 +5,20 @@ import (
 	"testing"
 
 	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/agents/react"
+	"github.com/rickchristie/gent/compaction"
 	"github.com/rickchristie/gent/executor"
 	"github.com/rickchristie/gent/output"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type pauseLoop struct{}
 
 type firstCaptureStore struct {
 	*MemoryStore
-	first []byte
+	first  []byte
+	phases []gent.ExecutionPhase
 }
 
 func (store *firstCaptureStore) Commit(ctx context.Context, batch *gent.SaveBatch,
@@ -23,10 +27,88 @@ func (store *firstCaptureStore) Commit(ctx context.Context, batch *gent.SaveBatc
 	if err := store.MemoryStore.Commit(ctx, batch, data, state); err != nil {
 		return err
 	}
-	if store.first == nil && state != nil {
-		store.first = state
+	if state != nil {
+		store.phases = append(store.phases, batch.Checkpoint.Phase)
+		if store.first == nil {
+			store.first = state
+		}
 	}
 	return nil
+}
+
+type stopAtCompaction struct {
+	LengthTrigger
+	returnCancellation bool
+}
+
+func (trigger *stopAtCompaction) NotifyCompacted(execCtx *gent.ExecutionContext) error {
+	execCtx.Stop()
+	if trigger.returnCancellation {
+		return execCtx.Context().Err()
+	}
+	return nil
+}
+
+func TestRecorderCapturesCompaction(t *testing.T) {
+	type input struct{ trigger gent.CompactionTrigger }
+	type expected struct {
+		answer   string
+		status   gent.ExecutionStatus
+		captures []gent.ExecutionPhase
+	}
+	type testCase struct {
+		name     string
+		input    input
+		expected expected
+	}
+	for _, test := range []testCase{
+		{"completed", input{&LengthTrigger{}}, expected{"Ready.", gent.ExecutionFinished,
+			[]gent.ExecutionPhase{gent.PhaseCompactionCompleted}}},
+		{"completed before pause", input{&stopAtCompaction{}}, expected{"", gent.ExecutionPaused,
+			[]gent.ExecutionPhase{gent.PhaseCompactionCompleted}}},
+		{"event in pause batch", input{&stopAtCompaction{returnCancellation: true}},
+			expected{"", gent.ExecutionPaused, []gent.ExecutionPhase{gent.PhasePaused}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			codecs := gent.NewCodecRegistry()
+			store := &firstCaptureStore{MemoryStore: NewMemoryStore()}
+			runner := executor.NewRunner(react.NewAgent(&FixedModel{Text: "Ready."}), &gent.Config{
+				Codecs: codecs, Recorder: &BatchRecorder{Codecs: codecs, Store: store},
+				CompactionTrigger: test.input.trigger, CompactionStrategy: compaction.NewSlidingWindow(1),
+			})
+			execCtx, err := runner.NewExecutionContext(context.Background(), "capture at compaction")
+			require.NoError(t, err)
+			defer execCtx.Release()
+			value, result, err := runner.NewTurn(execCtx, gent.NewTask(gent.TextPart("Work.")))
+			require.NoError(t, err)
+			assert.Equal(t, test.expected.answer, value)
+			assert.Equal(t, test.expected.status, result.Status)
+			require.Equal(t, test.expected.captures, store.phases)
+
+			saved := store.Read(execCtx.RunId())
+			full, err := replayBatches(execCtx.RunId(), saved.Batches, codecs)
+			require.NoError(t, err)
+			loaded, err := codecs.UnmarshalRunState(saved.State)
+			require.NoError(t, err)
+			require.Equal(t, gent.RunStateReady, loaded.Status)
+			var replayedCaptures []gent.ExecutionPhase
+			for _, data := range saved.Batches {
+				var batch gent.SaveBatch
+				require.NoError(t, codecs.Unmarshal(data, &batch))
+				if batch.ShouldCaptureRunStateSnapshot(0) {
+					replayedCaptures = append(replayedCaptures, batch.Checkpoint.Phase)
+				}
+				if batch.PreviousEventSequenceNumber < loaded.State.LastAppliedEventSequenceNumber() {
+					continue
+				}
+				applied, err := loaded.State.Apply(&batch, codecs)
+				require.NoError(t, err)
+				require.Equal(t, gent.ApplyApplied, applied.Status)
+			}
+			assert.Equal(t, test.expected.captures, replayedCaptures)
+			assert.Equal(t, full, loaded.State)
+		})
+	}
 }
 
 func (*pauseLoop) Output() gent.Output[string] { return output.NewTextOutput() }
@@ -71,8 +153,7 @@ func TestReplayExamples(t *testing.T) {
 			captures := &firstCaptureStore{MemoryStore: store}
 			config.Recorder = &base
 			if test.input.capture {
-				base.Store = captures
-				config.Recorder = &SnapshotRecorder{BatchRecorder: base, Every: 1}
+				config.Recorder = &BatchRecorder{Codecs: config.Codecs, Store: captures, Every: 1}
 			}
 			accepted := &EventLog{}
 			config.Subscribers = []*gent.SubscriberRegistration{{Subscriber: accepted}}

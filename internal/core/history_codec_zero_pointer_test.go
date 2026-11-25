@@ -1,7 +1,6 @@
 package gent
 
 import (
-	"encoding/json"
 	"reflect"
 	"sort"
 	"strings"
@@ -108,19 +107,13 @@ func TestZeroSizePointerMapIdentity(t *testing.T) {
 				if !assert.NoError(t, err) {
 					return
 				}
-				// Padding makes the compressed case use format 2, rather than only its policy.
+				// Padding makes the default writer produce a Snappy block.
 				inputValue := []any{test.input.value, strings.Repeat("saved map content ", 2048)}
 				data, err := codecs.Marshal(inputValue)
 				if !assert.NoError(t, err) {
 					return
 				}
-				var document struct{ FormatVersion int }
-				assert.NoError(t, json.Unmarshal(data, &document))
-				version := 1
-				if compression == CodecCompressionSnappy {
-					version = 2
-				}
-				assert.Equal(t, version, document.FormatVersion)
+				assert.Equal(t, compression == CodecCompressionSnappy, v3Compressed(t, data))
 				component, err := codecs.Decode(encoded)
 				if !assert.NoError(t, err) {
 					return

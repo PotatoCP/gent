@@ -13,8 +13,9 @@ import (
 	"time"
 )
 
-// RunSchemaVersion identifies the saved format used by SaveBatch, RunView, and Checkpoint.
-// Batch application and recovery require this version; it is separate from custom codec versions.
+// RunSchemaVersion identifies the current logical schema for saved runs. Storage v3 started
+// with schema 7. Future releases must read and replay that schema, including its batch receipts.
+// The storage discriminator and versions of individual component codecs are independent.
 const RunSchemaVersion = 7
 
 // RecordedEvent carries ordered execution evidence with a concrete, frozen payload.
@@ -98,9 +99,10 @@ type ContextRuntime struct {
 // There is no separate save-request sequence number. BatchId identifies the request for retries.
 //
 // SaveBatch must be stored atomically. Adapters enforce PreviousEventSequenceNumber and accept
-// the same
-// BatchId/digest only once. The application also checks its worker lease in that transaction.
+// the same BatchId/digest only once. The application also checks its worker lease in that
+// transaction.
 // Use CodecRegistry.Marshal for portable JSON that preserves concrete content and metadata types.
+// Use SaveBatch.ShouldCaptureRunStateSnapshot to choose when to save optional recovery state.
 type SaveBatch struct {
 	// SchemaVersion identifies this request's saved format and must equal RunSchemaVersion.
 	SchemaVersion int `json:"schemaVersion"`
@@ -134,6 +136,30 @@ type SaveBatch struct {
 	Runtime RuntimeState `json:"runtime"`
 }
 
+// ShouldCaptureRunStateSnapshot recommends a capture for a completed compaction savepoint or a
+// batch that carries a CompactionEvent. A positive everyNEvents also selects batches that reach
+// or cross a new multiple of the interval. If the saved cursor is 95 and the batch ends at 103,
+// an interval of 100 selects one capture at 103. Zero selects compaction only. The decision uses
+// only the fixed batch and the interval. Recorder.Save must store the batch for either result.
+func (batch *SaveBatch) ShouldCaptureRunStateSnapshot(everyNEvents uint64) bool {
+	if batch.Checkpoint != nil && batch.Checkpoint.Phase == PhaseCompactionCompleted {
+		return true
+	}
+	if everyNEvents > 0 && len(batch.Events) > 0 {
+		last := batch.Events[len(batch.Events)-1].EventSequenceNumber
+		if last/everyNEvents > batch.PreviousEventSequenceNumber/everyNEvents {
+			return true
+		}
+	}
+	// A pause can accept the queued compaction event before the completed compaction savepoint.
+	for _, event := range batch.Events {
+		if _, ok := event.Payload.(*CompactionEvent); ok {
+			return true
+		}
+	}
+	return false
+}
+
 // Recorder is the application's persistence boundary. Configure it in Config when execution
 // must survive worker replacement. Without a recorder, accepted state remains only in memory.
 // Storage reads and worker ownership belong to the application; Gent owns capture and replay.
@@ -149,6 +175,8 @@ type SaveBatch struct {
 // continuation and recovery evidence. A RunStateSnapshot is optional replay acceleration; it must
 // never be the only saved copy of custom data or the last completed turn's result. The application
 // stores complete batches through Save; Gent owns coherent state capture, encoding, and replay.
+// This invariant applies across Gent upgrades from storage v3 onward. Store each document once.
+// Gent reads old framework data and preserves receipt identities without a storage migration.
 //
 // The invariant restores saved logical state, not a Go stack or identical future model output.
 // Custom Next restarts at its entry point on restored data. Its author owns safe repeated local
@@ -386,7 +414,8 @@ func batchDigest(batch *SaveBatch, encoder *valueEncoder) (string, error) {
 	copy.BatchId = ""
 	// Receipt identity uses the complete typed value, independent of storage tables or sharing.
 	// A wire optimization must not change an accepted batch's receipt. Numeric and custom types
-	// still distinguish values which ordinary JSON would render alike.
+	// still distinguish values which ordinary JSON would render alike. If a later run schema adds
+	// a field, keep this historical encoding for schema 7 or old retries will change identity.
 	value, err := encoder.encode(reflect.ValueOf(&copy), 0)
 	if err != nil {
 		return "", err

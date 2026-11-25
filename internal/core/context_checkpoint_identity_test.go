@@ -2,7 +2,6 @@ package gent
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -127,9 +126,7 @@ func TestCheckpointValueIdentityAndRejectedReplacement(t *testing.T) {
 				execCtx.Release()
 				compressed := false
 				for _, data := range recorder.batches {
-					var format struct{ FormatVersion int }
-					assert.NoError(t, json.Unmarshal(data, &format))
-					compressed = compressed || format.FormatVersion == 2
+					compressed = v3Compressed(t, data) || compressed
 				}
 				assert.Equal(t, compression == CodecCompressionSnappy, compressed)
 				for _, path := range []string{"full batches", "RunStateSnapshot plus tail",

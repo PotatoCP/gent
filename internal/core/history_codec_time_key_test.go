@@ -1,7 +1,6 @@
 package gent
 
 import (
-	"encoding/json"
 	"math"
 	"reflect"
 	"strings"
@@ -89,13 +88,7 @@ func TestTimeMapKeyNormalization(t *testing.T) {
 					!assert.NoError(t, storageError) {
 					return
 				}
-				var format struct{ FormatVersion int }
-				assert.NoError(t, json.Unmarshal(data, &format))
-				version := 1
-				if compression == CodecCompressionSnappy {
-					version = 2
-				}
-				assert.Equal(t, version, format.FormatVersion)
+				assert.Equal(t, compression == CodecCompressionSnappy, v3Compressed(t, data))
 				decoded, err := codecs.Decode(component)
 				if !assert.NoError(t, err) {
 					return

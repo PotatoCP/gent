@@ -1,6 +1,8 @@
 Register current codecs and bind current services before loading state. Gent permits changed code
 and configuration when saved data remains usable. Restore does not require an identical Runner
-version.
+version. For runs saved in storage v3 or later, a Gent upgrade uses the same restore procedure.
+The application keeps its original bytes.
+See [Storage compatibility](/storage/codecs/#upgrade-gent-with-saved-runs).
 
 > Full batch replay and a RunStateSnapshot plus its accepted tail restore the same accepted logical
 > state at the same position. Continue resumes that state. Future model output can differ.

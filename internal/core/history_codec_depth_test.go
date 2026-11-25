@@ -251,7 +251,7 @@ func TestCodecNamedEnvelopeValidation(t *testing.T) {
 				var target any = "unchanged"
 				assert.EqualError(t, codecs.Unmarshal(data, &target), test.expected.errorText)
 				assert.Equal(t, "unchanged", target)
-				result, err := codecs.UnmarshalRunState(savedTypeRunState(t, data))
+				result, err := codecs.UnmarshalRunState(data)
 				assert.NoError(t, err)
 				assert.Equal(t, &RunStateLoadResult{Status: test.expected.status,
 					Detail: test.expected.errorText}, result)

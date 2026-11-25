@@ -24,8 +24,8 @@ func FuzzSavedDocument(f *testing.F) {
 		}
 		// Seal mutated bodies so the fuzzer reaches reference and layout validation as well as
 		// the JSON parser. A storage digest alone is not an allocation or schema check.
-		data, err := json.Marshal(savedDocument{FormatVersion: savedDocumentVersion,
-			Data: payload, Digest: documentDigest(payload)})
+		data, err := json.Marshal(savedDocument{FormatVersion: savedDocumentV3,
+			Data: payload, Digest: v3DocumentDigest(payload)})
 		if err != nil {
 			return
 		}
@@ -33,7 +33,7 @@ func FuzzSavedDocument(f *testing.F) {
 		if err := json.Unmarshal(data, &document); err != nil {
 			t.Fatal(err)
 		}
-		document.Digest = documentDigest(document.Data)
+		document.Digest = v3DocumentDigest(document.Data)
 		data, err = json.Marshal(document)
 		if err != nil {
 			t.Fatal(err)

@@ -19,6 +19,7 @@ type ByteStore interface {
 type BatchRecorder struct {
 	Codecs *gent.CodecRegistry
 	Store  ByteStore
+	Every  uint64 // Optional event interval for runs with infrequent compaction.
 }
 
 func (recorder *BatchRecorder) Save(ctx context.Context, batch *gent.SaveBatch,
@@ -28,33 +29,8 @@ func (recorder *BatchRecorder) Save(ctx context.Context, batch *gent.SaveBatch,
 	if err != nil {
 		return err
 	}
-	// Commit checks the writer, previous position, and exact retry receipt together.
-	// Return nil only after the complete write succeeds.
-	return recorder.Store.Commit(ctx, batch, data, nil)
-}
-
-// docs:end recorder-save
-
-// docs:start snapshot-recorder-type
-type SnapshotRecorder struct {
-	BatchRecorder
-	Every uint64
-}
-
-// docs:end snapshot-recorder-type
-
-func (recorder *SnapshotRecorder) Save(ctx context.Context, batch *gent.SaveBatch,
-	captureRunStateSnapshot func() (*gent.RunState, error),
-) error {
-	data, err := recorder.Codecs.Marshal(batch)
-	if err != nil {
-		return err
-	}
-	// docs:start recorder-capture
 	var stateBytes []byte
-	// Capture at selected accepted boundaries. Earlier batches remain the archive.
-	if batch.Events[len(batch.Events)-1].EventSequenceNumber/recorder.Every >
-		batch.PreviousEventSequenceNumber/recorder.Every {
+	if batch.ShouldCaptureRunStateSnapshot(recorder.Every) {
 		state, err := captureRunStateSnapshot()
 		if err != nil {
 			return err
@@ -64,10 +40,12 @@ func (recorder *SnapshotRecorder) Save(ctx context.Context, batch *gent.SaveBatc
 			return err
 		}
 	}
-	// Store the RunStateSnapshot with its batch, never ahead of that batch.
+	// Commit always stores the complete batch. A RunStateSnapshot can share that transaction.
+	// The store checks the writer, previous position, and exact retry receipt before acceptance.
 	return recorder.Store.Commit(ctx, batch, data, stateBytes)
-	// docs:end recorder-capture
 }
+
+// docs:end recorder-save
 
 // MemoryStore is for tests and local examples. It does not survive a process exit.
 // One process holds the writer; a distributed database must also check a writer lease.

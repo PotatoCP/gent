@@ -3,8 +3,14 @@ queue, socket write, or partial batch does not satisfy this contract.
 
 ## Implement the recorder
 
-This adapter has a `CodecRegistry` and an application `ByteStore`. The store's Commit method takes
-the batch metadata, encoded batch, and optional encoded RunStateSnapshot.
+Gent calls `Save` with one fixed batch. Store every complete batch. The example uses
+`batch.ShouldCaptureRunStateSnapshot(recorder.Every)` to decide when to call the capture callback.
+Zero selects compaction, including a compaction event saved during a pause. A positive interval
+also selects batches that cross a multiple of that many events.
+[Choose when to capture](/storage/run-state-snapshots/#choose-when-to-capture).
+
+The application supplies a `CodecRegistry` and a `ByteStore`. The store's Commit method takes the
+batch metadata, encoded batch, and optional encoded RunStateSnapshot.
 
 {{example:recorder-save}}
 

@@ -20,8 +20,8 @@ func TestCodecCompression(t *testing.T) {
 		compression CodecCompression
 	}
 	type expected struct {
-		version int
-		value   any
+		compressed bool
+		value      any
 	}
 	type testCase struct {
 		name     string
@@ -34,11 +34,11 @@ func TestCodecCompression(t *testing.T) {
 	assert.NoError(t, err)
 	native := json.RawMessage(` { "signature": "\u0061<&>", "original": "` + text + `" } `)
 	cases := []testCase{
-		{"small", input{"short", CodecCompressionSnappy}, expected{1, "short"}},
-		{"plain", input{text, CodecCompressionNone}, expected{1, text}},
-		{"compressed", input{text, CodecCompressionSnappy}, expected{2, text}},
-		{"native bytes", input{native, CodecCompressionSnappy}, expected{2, native}},
-		{"incompressible", input{noise, CodecCompressionSnappy}, expected{1, noise}},
+		{"small", input{"short", CodecCompressionSnappy}, expected{false, "short"}},
+		{"plain", input{text, CodecCompressionNone}, expected{false, text}},
+		{"compressed", input{text, CodecCompressionSnappy}, expected{true, text}},
+		{"native bytes", input{native, CodecCompressionSnappy}, expected{true, native}},
+		{"incompressible", input{noise, CodecCompressionSnappy}, expected{false, noise}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -48,13 +48,12 @@ func TestCodecCompression(t *testing.T) {
 			if !assert.NoError(t, err) {
 				return
 			}
-			var document savedDocument
-			assert.NoError(t, json.Unmarshal(data, &document))
+			compressed := v3Compressed(t, data)
 			// Decoding does not depend on the writer's compression preference or process state.
 			var restored any
 			assert.NoError(t, NewCodecRegistry(WithCodecCompression(CodecCompressionNone)).
 				Unmarshal(data, &restored))
-			assert.Equal(t, test.expected, expected{document.FormatVersion, restored})
+			assert.Equal(t, test.expected, expected{compressed, restored})
 			// Storage policy must not change the queue allowance for the same logical value.
 			plain, err := NewCodecRegistry(WithCodecCompression(CodecCompressionNone)).
 				Marshal(test.input.value)
@@ -66,12 +65,31 @@ func TestCodecCompression(t *testing.T) {
 	}
 }
 
+// Check the saved representation itself. Enabling compression can still produce plain tables.
+func v3Compressed(t *testing.T, data []byte) bool {
+	t.Helper()
+	var document savedDocument
+	if !assert.NoError(t, json.Unmarshal(data, &document)) ||
+		!assert.Equal(t, 3, document.FormatVersion) || !assert.NotEmpty(t, document.Data) {
+		t.FailNow()
+	}
+	switch document.Data[0] {
+	case '{':
+		return false
+	case '"':
+		return true
+	default:
+		t.Fatalf("unexpected v3 data %s", document.Data)
+		return false
+	}
+}
+
 func compressedTestDocument(t *testing.T, compressed []byte) []byte {
 	t.Helper()
 	payload, err := json.Marshal(base64.StdEncoding.EncodeToString(compressed))
 	assert.NoError(t, err)
-	data, err := json.Marshal(savedDocument{FormatVersion: compressedDocumentVersion,
-		Data: payload, Digest: versionedDocumentDigest(compressedDocumentVersion, payload)})
+	data, err := json.Marshal(savedDocument{FormatVersion: savedDocumentV3,
+		Data: payload, Digest: v3DocumentDigest(payload)})
 	assert.NoError(t, err)
 	return data
 }
@@ -94,7 +112,11 @@ func TestCompressedDocumentBoundsAndIntegrity(t *testing.T) {
 	value := strings.Repeat("saved ", 4096)
 	data, err := registry.Marshal(value)
 	assert.NoError(t, err)
-	changed := bytes.Replace(data, []byte(`"formatVersion":2`), []byte(`"formatVersion":1`), 1)
+	var changed savedDocument
+	assert.NoError(t, json.Unmarshal(data, &changed))
+	changed.Data = json.RawMessage(`{}`)
+	changedEncoding, err := json.Marshal(changed)
+	assert.NoError(t, err)
 	cases := []testCase{
 		{"encoded boundary", input{data, CodecLimits{MaxEncodedBytes: len(data)}},
 			expected{value: value}},
@@ -108,7 +130,7 @@ func TestCompressedDocumentBoundsAndIntegrity(t *testing.T) {
 			expected{value: "unchanged", errorText: "gent: decompressed document exceeds 268435456 bytes"}},
 		{"truncated block", input{compressedTestDocument(t, []byte{20}), CodecLimits{}},
 			expected{value: "unchanged", errorText: "gent: decompress document: snappy: corrupt input"}},
-		{"changed format marker", input{changed, CodecLimits{}},
+		{"changed compression representation", input{changedEncoding, CodecLimits{}},
 			expected{value: "unchanged", errorText: "gent: saved document digest mismatch"}},
 		{"invalid expanded tables", input{compressedTestDocument(t, snappy.Encode(nil,
 			[]byte(`{"types":[],"layouts":[],"shared":[],"root":[-2,0]}`))), CodecLimits{}},

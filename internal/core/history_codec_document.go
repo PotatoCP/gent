@@ -3,17 +3,86 @@ package gent
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 )
 
-// Documents share wire values, never mutable Go objects. The tables belong to one document;
-// loading a saved value cannot depend on a process dictionary or an earlier archive file.
-const savedDocumentVersion = 1
+// All durable formats use a JSON object with one unsigned formatVersion field. Only this
+// discriminator is permanent. Select the reader before interpreting any version-specific fields.
+// Keep the v3 reader and its receipt rules when a later writer uses a different representation.
+const savedDocumentV3 = 3
 
-const compressedDocumentVersion = 2
+const v3DocumentPrefix = `{"formatVersion":3,"data":`
+const v3EnvelopeSize = len(v3DocumentPrefix) + len(`,"digest":""}`) + sha256.Size*2
+
+func (decoder *valueDecoder) document(data []byte) (any, error) {
+	if err := decoder.checkEncodedSize(len(data)); err != nil {
+		return nil, err
+	}
+	object, err := indexSavedJSON(data)
+	if err != nil {
+		return nil, err
+	}
+	version, err := decoder.documentVersion(object)
+	if err != nil {
+		return nil, err
+	}
+	switch version {
+	case savedDocumentV3:
+		return decoder.documentV3(object)
+	default:
+		decoder.status = valueDecodeIncompatible
+		return nil, fmt.Errorf("gent: unsupported saved document version %d", version)
+	}
+}
+
+func (decoder *valueDecoder) documentVersion(object savedJSONValue) (uint64, error) {
+	if object.kind() != '{' {
+		return 0, errors.New("gent: expected a saved document object")
+	}
+	var marker savedJSONValue
+	var oldType, oldVersion, oldState, oldSchema bool
+	err := object.object(func(name string, field savedJSONValue) error {
+		switch name {
+		case "formatVersion":
+			if marker.present() {
+				return errors.New(`gent: duplicate saved document field "formatVersion"`)
+			}
+			marker = field
+		case "type":
+			oldType = true
+		case "version":
+			oldVersion = true
+		case "state":
+			oldState = true
+		case "schemaVersion":
+			oldSchema = true
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if !marker.present() {
+		// The pre-baseline component and RunStateSnapshot wrappers have no storage version.
+		if (oldType && oldVersion) || (oldState && oldSchema) {
+			decoder.status = valueDecodeIncompatible
+			return 0, errors.New("gent: unsupported saved envelope format")
+		}
+		return 0, errors.New(`gent: missing saved document field "formatVersion"`)
+	}
+	const invalidVersion = "gent: formatVersion must be a positive unsigned 64-bit integer"
+	raw := marker.bytes()
+	if len(raw) > 20 || raw[0] < '1' || raw[0] > '9' {
+		return 0, errors.New(invalidVersion)
+	}
+	version, err := strconv.ParseUint(string(raw), 10, 64)
+	if err != nil {
+		return 0, errors.New(invalidVersion)
+	}
+	return version, nil
+}
 
 const (
 	maxTableDepth         = 512
@@ -65,34 +134,13 @@ func tableKind(tag int) (tableNodeKind, error) {
 	}
 }
 
-type savedDocument struct {
-	FormatVersion int             `json:"formatVersion"`
-	Data          json.RawMessage `json:"data"`
-	Digest        string          `json:"digest"`
-}
-
-type savedDocumentData struct {
-	Types   []string          `json:"types"`
-	Layouts [][][]any         `json:"layouts"`
-	Shared  []json.RawMessage `json:"shared"`
-	Root    json.RawMessage   `json:"root"`
-}
-
 // Include the format marker in the digest. This detects changed storage bytes, not a writer
 // with permission to replace both the data and its digest. Storage trust remains with the app.
-func documentDigest(data []byte) string {
-	return versionedDocumentDigest(savedDocumentVersion, data)
-}
-
-func versionedDocumentDigest(version int, data []byte) string {
+func v3DocumentDigest(data []byte) string {
 	hash := sha256.New()
-	hash.Write([]byte("gent-saved-document:" + strconv.Itoa(version) + "\n"))
+	hash.Write([]byte("gent-saved-document:3\n"))
 	hash.Write(data)
 	return hex.EncodeToString(hash.Sum(nil))
-}
-
-func documentEnvelopeSize(version int) int {
-	return len(`{"formatVersion":,"data":,"digest":""}`) + len(strconv.Itoa(version)) + 64
 }
 
 type tableMeasure struct {

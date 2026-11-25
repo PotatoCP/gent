@@ -1,25 +1,30 @@
 A RunStateSnapshot is a captured `RunState` or its encoded form. It is not a second public state
 type. Batches remain sufficient for recovery. The RunStateSnapshot is optional replay acceleration.
 
+## Choose when to capture
+
+In `Recorder.Save`, call `batch.ShouldCaptureRunStateSnapshot(0)` to capture after compaction.
+The method also detects a compaction event saved in a pause batch. This can occur when a custom
+`NotifyCompacted` requests `Stop` and returns the attempt's cancellation error.
+
+Use `batch.ShouldCaptureRunStateSnapshot(100)` to also capture when a batch crosses a multiple of
+100 events. For example, a batch that advances from event 95 to event 103 recommends one capture
+at 103. The same fixed batch and interval give the same result on a retry.
+
+A capture lets recovery skip all batches through that position. Compaction can also reduce the
+history retained in the RunStateSnapshot. Each complete batch is still required for the full
+`RunView`. Complete batches alone are sufficient for recovery.
+
 ## Capture at a save boundary
 
-Extend the BatchRecorder from [Save batches](/storage/save-batches/):
-
-{{example:snapshot-recorder-type}}
-
-Insert this after encoding `batch` into `data` in a Recorder.Save implementation. `Every` is a
-positive interval of event positions chosen by the application.
-
-{{example:recorder-capture}}
-
-The capture callback is valid only during its Save invocation. Do not retain the callback. The
-returned RunState is independent and stable. It can be encoded after Save returns, but it must not
-be published ahead of the accepted batch it describes.
+Call `captureRunStateSnapshot()` during the `Save` call for the selected batch. The returned
+`RunState` is independent and stable. Encode it with `MarshalRunState`. Publish the bytes in the
+batch transaction or after that batch commits. The complete recorder shows these calls.
+[Recorder.Save example](/storage/save-batches/#implement-the-recorder).
 
 ## Use the recorder
 
-The complete source defines `SnapshotRecorder`, which adds this capture step to `BatchRecorder`.
-Use your `store`, the shared `codecs` registry, and a positive `interval` such as 100:
+Use your `store`, the shared `codecs` registry, and an event `interval` such as 100.
 
 {{example:snapshot-runner}}
 

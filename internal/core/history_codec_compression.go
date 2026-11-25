@@ -10,7 +10,7 @@ import (
 )
 
 // CodecCompression selects lossless storage compression. It does not change batch receipts,
-// content types, native bytes, or logical expansion limits. Decoding accepts both formats.
+// content types, native bytes, or logical expansion limits. V3 readers accept both representations.
 type CodecCompression string
 
 const (
@@ -35,31 +35,39 @@ func (registry *CodecRegistry) canCompressDocument(size int) bool {
 	return registry.compression == CodecCompressionSnappy && size >= 8*1024 && size <= limit
 }
 
-func (registry *CodecRegistry) compressDocument(data []byte) (int, []byte) {
+func (registry *CodecRegistry) compressDocument(data []byte) []byte {
 	if !registry.canCompressDocument(len(data)) {
-		return savedDocumentVersion, data
+		return data
 	}
 	compressed := snappy.Encode(nil, data)
 	size := 2 + base64.StdEncoding.EncodedLen(len(compressed))
 	// Include base64 and JSON quoting in the decision. Media that is already compressed must
 	// not grow in storage. Do not pay an extra retained buffer cost for a small byte reduction.
-	plainSize := documentEnvelopeSize(savedDocumentVersion) + len(data)
-	storedSize := documentEnvelopeSize(compressedDocumentVersion) + size
+	plainSize := v3EnvelopeSize + len(data)
+	storedSize := v3EnvelopeSize + size
 	if storedSize > plainSize-plainSize/8 {
-		return savedDocumentVersion, data
+		return data
 	}
 	wire := make([]byte, size)
 	wire[0], wire[size-1] = '"', '"'
 	base64.StdEncoding.Encode(wire[1:size-1], compressed)
-	return compressedDocumentVersion, wire
+	return wire
 }
 
-func (registry *CodecRegistry) documentData(
-	version int, data savedJSONValue,
-) (savedJSONValue, error) {
-	if version == savedDocumentVersion {
+// The JSON kind selects plain tables or a Snappy block inside v3. The digest covers this kind
+// because it includes the exact bytes of data, including the quotes around a compressed block.
+func (registry *CodecRegistry) v3DocumentData(data savedJSONValue) (savedJSONValue, error) {
+	switch data.kind() {
+	case '{':
 		return data, nil
+	case '"':
+		return registry.decompressV3(data)
+	default:
+		return savedJSONValue{}, errors.New("gent: v3 data must be a table object or a Snappy string")
 	}
+}
+
+func (registry *CodecRegistry) decompressV3(data savedJSONValue) (savedJSONValue, error) {
 	var text string
 	if err := tableString(data, &text); err != nil {
 		return savedJSONValue{}, err

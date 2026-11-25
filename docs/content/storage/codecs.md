@@ -113,7 +113,7 @@ digest, type names, record layouts, and values. Repeated typed values can use re
 that same document.
 Loading does not need a dictionary from another file or process. Large documents use lossless Snappy
 compression when the final JSON is at least one eighth smaller. Documents below 8 KiB and documents
-without that saving keep plain tables. The same reader accepts both formats.
+without that saving keep plain tables. The v3 reader accepts both representations.
 
 For directly readable tables, create the registry with
 `gent.WithCodecCompression(gent.CodecCompressionNone)`. Compression is a storage choice. It does not
@@ -131,9 +131,21 @@ or another component. These envelopes remain self-contained. Do not use `json.Ma
 replacement for a complete storage document. Diagnostic `json.Marshal(state)` is also not a saved
 format.
 
-This development format replaces the previous storage encoding. It does not add a migration reader
-for saved files from that encoding. Batch receipts still identify the same complete typed values;
-table allocation and shared-value selection do not change their identities.
+## Upgrade Gent with saved runs
+
+**Starting with storage v3, upgrading Gent requires no data migration.** Keep the bytes you stored.
+Every later Gent release must read those batches, RunStateSnapshots, and archives. Restore the
+accepted state with your usual calls. Use Continue for an unfinished task or NewTurn after a
+completed turn. You can append new batches to the same run. Existing receipts stay valid.
+
+Every document has a top-level integer `formatVersion`. V3 stores plain tables as an object or a
+Snappy block as a base64 string in `data`. The run schema and component versions are independent.
+Gent reads its old types and representations. Your application supplies compatible readers for its
+own custom data and the recovery binding for any unfinished tool operation. A provider can still
+decline a new request that uses expired provider context.
+
+V1 and v2 were development formats. The compatibility guarantee starts with v3. An older Gent
+reader can report a newer format as incompatible. Diagnostic JSON remains separate from storage.
 
 ## Set payload bounds
 

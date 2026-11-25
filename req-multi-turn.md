@@ -764,6 +764,19 @@ retain it for asynchronous use or let it reenter acceptance. The returned stable
 outlive Save and can be encoded asynchronously under its ownership contract. No public context
 capture or transfer method is needed. Same-process transfer also uses a Recorder. (D40/D64)
 
+**Locked capture recommendation (D145).** This read-only method recommends a capture for a batch.
+
+```go
+func (batch *SaveBatch) ShouldCaptureRunStateSnapshot(everyNEvents uint64) bool
+```
+
+Return true for a completed compaction savepoint or a batch that carries a CompactionEvent. A
+pause can accept the event before the Runner reaches the completed compaction savepoint. A positive
+interval also selects a batch that crosses a multiple of that many events. For example, with 100,
+the move from event 95 to 103 selects one capture at 103. Zero selects compaction only. An exact
+retry with the same interval gives the same answer. The decision adds no stored fields. The
+application chooses whether to call the capture callback and must still store each complete batch.
+
 A captured value is a candidate until its batch is accepted. Store batch and RunStateSnapshot
 atomically where possible, or commit the batch before publishing the RunStateSnapshot. Never publish
 a RunStateSnapshot ahead of durable evidence. A later RunStateSnapshot publication failure must not
@@ -808,7 +821,30 @@ independent of storage-table choices. Component EncodedValue APIs retain their e
 
 Measure stored bytes, CPU time, allocations, and replay behavior. Run the full native, CGO-disabled,
 and race suites. Review the completed change against this requirements document before claiming
-completion, as the owner requested. Compression and external dictionaries are outside this change.
+completion, as the owner requested. The later footprint decision includes lossless compression.
+External dictionaries remain outside the saved document contract.
+
+### Locked persistence compatibility from storage v3 — D144, 2026-11-24
+
+Every subsequent Gent release must read and use complete documents written in v3 or later.
+The application stores the same bytes and uses its normal recovery calls after an upgrade.
+Gent owns historical readers and any in-memory conversions for its types, run schemas, registered
+framework codecs, managed checkpoints, and receipt rules. A Gent upgrade requires no storage
+migration, rewritten receipts, or replay of accepted external effects. Storage v1 and v2 predate
+this baseline.
+
+Use the permanent top-level JSON integer `formatVersion` on SaveBatch, RunStateSnapshot, and
+RunView. Read it before interpreting version-specific fields. Plain tables and Snappy blocks are
+two representations within v3. Run schema 7 is a separate identity inside the protected payload.
+A new storage writer can change the complete payload while retaining the old reader. An old reader
+can report a future version as incompatible.
+
+Keep original byte fixtures for every released storage representation. Test full batch replay,
+RunStateSnapshot plus an accepted tail, archive replay, exact retries, and new batches appended by
+the current Runner. Exercise Continue and NewTurn on restored conversations. Keep native evidence,
+compaction, custom data, and managed tool recovery in the corpus. The application still supplies
+compatible custom data readers and recovery bindings under D72/D76. Provider behavior and access
+to external systems remain outside the storage guarantee.
 
 ### Approved savepoints
 
@@ -1121,9 +1157,9 @@ saved-data changes without another conversion protocol to implement and maintain
 
 This requirement concerns custom LoopData's persisted contract, its serializers, and the code that
 uses restored values. It does not require public Gent Go APIs to remain backward compatible during
-development, settle framework-format or provider compatibility, or promise that older code can read
-newer saves. The implementation must document this guidance directly on LoopData rather than leave
-it only in this design record. D83/D84 later lock the factory and turn-reset APIs.
+development. D144 specifies Gent's framework-format guarantee. Older applications can require an
+upgrade to read newer saves. Document this guidance directly on LoopData. D83/D84 later lock the
+factory and turn-reset APIs.
 
 **Locked custom-loop restart scope D72, 2026-11-16.** The owner accepted this contract: Gent
 restores accepted framework state and custom LoopData. Continue completes the required managed
@@ -2126,15 +2162,15 @@ refactor to implement the deferred feature. Do not weaken the root guarantees to
 
 ### Recorder example
 
-RunRecorder, RunStore, and wantRunStateSnapshot are application code. RunStore.Save serializes and
+RunRecorder and RunStore are application code. RunStore.Save serializes and
 atomically accepts the complete batch and optional state, with the expected cursor, duplicate
 receipt, and writer ownership checks. A nil state keeps the earlier stored RunStateSnapshot.
-RunStateSnapshot frequency belongs to wantRunStateSnapshot; every batch is still saved.
+The recorder chooses the capture interval and saves every batch.
 
 ```go
 type RunRecorder struct {
-    Store        *RunStore
-    WantRunStateSnapshot func(*gent.SaveBatch) bool
+    Store *RunStore
+    Every uint64
 }
 
 func (r *RunRecorder) Save(
@@ -2142,7 +2178,7 @@ func (r *RunRecorder) Save(
     captureRunStateSnapshot func() (*gent.RunState, error),
 ) error {
     var state *gent.RunState
-    if r.WantRunStateSnapshot(batch) {
+    if batch.ShouldCaptureRunStateSnapshot(r.Every) {
         var err error
         state, err = captureRunStateSnapshot()
         if err != nil {

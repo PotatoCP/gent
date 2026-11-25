@@ -37,9 +37,9 @@ func repeatedFieldValue() repeatedFields {
 		Chunk: StreamChunk{SourceMessageIds: []string{}}}
 }
 
-// These reference digests came from the source before the encoding optimization. They cover
-// the whole component, storage document, and receipt, rather than selected fields. The fixture
-// crosses the text-cache bound and includes escaped text, native bytes, and nil/empty values.
+// The component and receipt keep their original reference digests. The document references use
+// the v3 envelope around the same plain or compressed payload. The fixture crosses the text-cache
+// bound and includes escaped text, native bytes, and nil/empty values.
 func TestRepeatedEncodingKeepsBytesAndReceipts(t *testing.T) {
 	type input struct{ compression CodecCompression }
 	type expected struct {
@@ -54,9 +54,9 @@ func TestRepeatedEncodingKeepsBytesAndReceipts(t *testing.T) {
 	}
 	cases := []testCase{
 		{"plain", input{CodecCompressionNone}, expected{
-			document: "81a2c25d6b70bece7f2c7e21ab687bc8958af1e6d0190852fb4f2cf0b3e18bc6", size: 54435}},
+			document: "9e274838c8c93b264b9df5c80a2bc1fc105fa0d13289d12e4c2d3530be7590a4", size: 54435}},
 		{"compressed", input{CodecCompressionSnappy}, expected{
-			document: "309d2800c6a4f63ccce5d7ebd8520d134b3e2620d3c72c79d5393021e8bad84a", size: 10113}},
+			document: "a8cfc16d6892bb8fa36dc330da021b90bde50512e88d6a8c8ab4c9e500598124", size: 10113}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

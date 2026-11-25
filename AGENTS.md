@@ -1,6 +1,6 @@
 <critical_behavior>
 # Critical Behavior
-- **IMPORTANT**: Gent is in development. Change APIs freely; no backward compatibility is needed.
+- Gent's Go API can change during development. The persistence guarantee below applies from v3.
 - **ALWAYS fully finish your tasks** when executing anything. Never stop to ask "would you like to continue?" or anything similar.
   You are given tasks, fully complete them, don't waste our time. Exception: Destructive actions with irreversible consequences.
 - **ALWAYS verify your work and assumptions**, don't just read the code, actually test what you're doing.
@@ -59,8 +59,19 @@
   a feature needs independent mutable values or a stable saved value. Document that reason.
 - Support recovery and continuation with updated agent code and configuration wherever saved state
   remains usable. Do not require a saved run to use a matching Runner version. Preserve accepted
-  evidence and counters. Allow changes to tools, limits, and steering messages. Require migration
-  or report an explicit result when saved data or provider state cannot be used.
+  evidence and counters. Allow changes to tools, limits, and steering messages. Report an explicit
+  result when application-owned data or external provider state cannot be used.
+- **Persistence compatibility.** After a Gent upgrade, an application can read every accepted
+  SaveBatch, RunStateSnapshot, and RunView written in storage v3 or later. It can replay old and
+  new batches together, Continue an unfinished turn, and call NewTurn on a completed conversation.
+  The application never has to rewrite its stored bytes or run a data migration for a Gent upgrade.
+  All storage formats have the same top-level JSON field `formatVersion`. Select the historical
+  reader before interpreting its payload. Keep support for each released format, run schema,
+  Gent-owned type and checkpoint, and its original receipt and replay rules. Adapt historical
+  values in memory when necessary. Preserve original evidence, identities, and integrity checks.
+  Keep fixed files from each released representation and test them with the current Runner.
+  Add fixtures for new representations and behaviors. Never regenerate old fixtures to pass a test.
+  Application code owns its custom codecs and external tool recovery bindings.
 - Keep loop-specific models, prompts, retries, and checks on the Loop. Put common services and
   execution policies in gent.Config. Ask the owner before moving a setting with unclear scope.
 - Store recoverable custom LoopData in checkpointed SaveBatch values. Treat RunStateSnapshots as

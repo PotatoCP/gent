@@ -3,19 +3,10 @@ package gent
 import (
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 )
-
-// The envelope detects incomplete or altered storage values before decoding application content.
-// It is an integrity check, not authentication. Applications still own trusted storage and fencing.
-type runStateSnapshotEncoding struct {
-	SchemaVersion int             `json:"schemaVersion"`
-	Digest        string          `json:"digest"`
-	State         json.RawMessage `json:"state"`
-}
 
 // MarshalRunState encodes a stable RunState as a RunStateSnapshot with format and integrity data.
 // It borrows the state. Do not mutate or transfer it until this call returns. Recorder capture
@@ -29,13 +20,9 @@ func (codecs *CodecRegistry) MarshalRunState(state *RunState) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("gent: encode RunStateSnapshot for run %q: %w", state.RunId(), err)
 	}
-	sum := sha256.Sum256(data)
-	encoded, err := json.Marshal(runStateSnapshotEncoding{SchemaVersion: RunSchemaVersion,
-		Digest: hex.EncodeToString(sum[:]), State: data})
-	if err != nil {
-		return nil, err
-	}
-	return encoded, codecs.checkEncodedSize(len(encoded))
+	// The shared storage envelope protects the complete state, including its run schema. A
+	// single discriminator lets a future reader load every kind of saved document the same way.
+	return data, nil
 }
 
 // UnmarshalRunState checks format, integrity, types, and logical state before returning Ready.
@@ -44,29 +31,14 @@ func (codecs *CodecRegistry) MarshalRunState(state *RunState) ([]byte, error) {
 // output processing, or LoopData restore callback runs here.
 //
 // Apply the accepted tail to State, then use Runner.Restore. Full batch replay and this
-// RunStateSnapshot-plus-tail path must produce the same state at the same accepted sequence.
+// RunStateSnapshot-plus-tail path must produce the same state at the same accepted sequence,
+// including when the writer was an older Gent release using storage v3 or later.
 func (codecs *CodecRegistry) UnmarshalRunState(data []byte) (*RunStateLoadResult, error) {
 	invalid := func(detail string) (*RunStateLoadResult, error) {
 		return &RunStateLoadResult{Status: RunStateInvalid, Detail: detail}, nil
 	}
-	if err := codecs.checkEncodedSize(len(data)); err != nil {
-		return invalid(err.Error())
-	}
-	var wire runStateSnapshotEncoding
-	if err := json.Unmarshal(data, &wire); err != nil {
-		return invalid(fmt.Sprintf("gent: invalid RunStateSnapshot envelope: %v", err))
-	}
-	if wire.SchemaVersion != RunSchemaVersion {
-		return &RunStateLoadResult{Status: RunStateIncompatible,
-			Detail: fmt.Sprintf("gent: expected run schema %d, received %d",
-				RunSchemaVersion, wire.SchemaVersion)}, nil
-	}
-	sum := sha256.Sum256(wire.State)
-	if wire.Digest == "" || wire.Digest != hex.EncodeToString(sum[:]) {
-		return invalid("gent: RunStateSnapshot digest mismatch")
-	}
 	decoder := valueDecoder{CodecRegistry: codecs, status: valueDecodeInvalid}
-	decoded, err := decoder.document(wire.State)
+	decoded, err := decoder.document(data)
 	if err != nil {
 		switch decoder.status {
 		case valueDecodeOperationFailed:

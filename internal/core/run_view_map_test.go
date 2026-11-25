@@ -2,7 +2,6 @@ package gent
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -125,9 +124,7 @@ func TestSavedMapRecoveryAndArchive(t *testing.T) {
 			recorder, runId, turnId := recordSavedMap(t, codecs, original)
 			compressed := false
 			for _, data := range recorder.batches {
-				var document struct{ FormatVersion int }
-				assert.NoError(t, json.Unmarshal(data, &document))
-				compressed = compressed || document.FormatVersion == 2
+				compressed = v3Compressed(t, data) || compressed
 			}
 			assert.Equal(t, test.input.compression == CodecCompressionSnappy, compressed)
 			view := NewRunView(runId)

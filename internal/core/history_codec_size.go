@@ -28,7 +28,7 @@ func (registry *CodecRegistry) uncompressedSize(value any) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	size := documentEnvelopeSize(savedDocumentVersion) + builder.dataSize(root, len(types))
+	size := v3EnvelopeSize + builder.dataSize(root, len(types))
 	return size, registry.checkEncodedSize(size)
 }
 

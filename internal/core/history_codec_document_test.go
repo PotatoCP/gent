@@ -14,6 +14,19 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+type savedDocument struct {
+	FormatVersion int             `json:"formatVersion"`
+	Data          json.RawMessage `json:"data"`
+	Digest        string          `json:"digest"`
+}
+
+type savedDocumentData struct {
+	Types   []string          `json:"types"`
+	Layouts [][][]any         `json:"layouts"`
+	Shared  []json.RawMessage `json:"shared"`
+	Root    json.RawMessage   `json:"root"`
+}
+
 func TestSavedDocumentCustomCodecOwnsEachOccurrence(t *testing.T) {
 	registry, codec := NewCodecRegistry(), &ownedJSONCodec{}
 	assert.NoError(t, registry.Register(ownedJSONValue{}, codec))
@@ -48,7 +61,7 @@ func TestSavedDocumentValidatesBeforeCustomDecode(t *testing.T) {
 	body.Shared = append(body.Shared, json.RawMessage(fmt.Sprintf(`[-2,%d]`, len(body.Shared))))
 	document.Data, err = json.Marshal(body)
 	assert.NoError(t, err)
-	document.Digest = documentDigest(document.Data)
+	document.Digest = v3DocumentDigest(document.Data)
 	data, err = json.Marshal(document)
 	assert.NoError(t, err)
 	var value ownedJSONValue
@@ -151,21 +164,21 @@ func TestRunStateDocumentLoadResults(t *testing.T) {
 		expected expected
 	}
 	cases := []testCase{
-		{"unsupported format", input{func(value *savedDocument) { value.FormatVersion = 3 }},
+		{"unsupported format", input{func(value *savedDocument) { value.FormatVersion = 4 }},
 			expected{result: &RunStateLoadResult{Status: RunStateIncompatible,
-				Detail: "gent: unsupported saved document version 3"}}},
+				Detail: "gent: unsupported saved document version 4"}}},
 		{"changed table", input{func(value *savedDocument) {
 			value.Data = bytes.Replace(value.Data, []byte(`"run:document"`), []byte(`"run:changed"`), 1)
 		}}, expected{result: &RunStateLoadResult{Status: RunStateInvalid,
 			Detail: "gent: saved document digest mismatch"}}},
 		{"invalid state with valid integrity", input{func(value *savedDocument) {
 			value.Data = bytes.Replace(value.Data, []byte(`"run:document"`), []byte(`""`), 1)
-			value.Digest = documentDigest(value.Data)
+			value.Digest = v3DocumentDigest(value.Data)
 		}}, expected{result: &RunStateLoadResult{Status: RunStateInvalid,
 			Detail: "gent: saved run ID is empty"}}},
 		{"invalid reference with valid integrity", input{func(value *savedDocument) {
 			value.Data = json.RawMessage(`{"types":[],"layouts":[],"shared":[],"root":[-2,0]}`)
-			value.Digest = documentDigest(value.Data)
+			value.Digest = v3DocumentDigest(value.Data)
 		}}, expected{result: &RunStateLoadResult{Status: RunStateInvalid,
 			Detail: "gent: invalid or forward shared reference"}}},
 	}
@@ -176,16 +189,10 @@ func TestRunStateDocumentLoadResults(t *testing.T) {
 			if !assert.NoError(t, err) {
 				return
 			}
-			var outer runStateSnapshotEncoding
-			assert.NoError(t, json.Unmarshal(data, &outer))
 			var document savedDocument
-			assert.NoError(t, json.Unmarshal(outer.State, &document))
+			assert.NoError(t, json.Unmarshal(data, &document))
 			test.input.change(&document)
-			outer.State, err = json.Marshal(document)
-			assert.NoError(t, err)
-			digest := sha256.Sum256(outer.State)
-			outer.Digest = hex.EncodeToString(digest[:])
-			data, err = json.Marshal(outer)
+			data, err = json.Marshal(document)
 			assert.NoError(t, err)
 			result, err := registry.UnmarshalRunState(data)
 			actual := expected{result: result}
@@ -193,6 +200,125 @@ func TestRunStateDocumentLoadResults(t *testing.T) {
 				actual.errorText = err.Error()
 			}
 			assert.Equal(t, test.expected, actual)
+		})
+	}
+}
+
+func TestRunStateChecksLogicalSchemaInsideStorageV3(t *testing.T) {
+	type input struct{ value any }
+	type expected struct{ result *RunStateLoadResult }
+	type testCase struct {
+		name     string
+		input    input
+		expected expected
+	}
+	cases := []testCase{
+		{"wrong document kind", input{"text"}, expected{&RunStateLoadResult{Status: RunStateInvalid,
+			Detail: "gent: RunStateSnapshot contains string, expected run state"}}},
+		{"future run schema", input{runStateData{SchemaVersion: RunSchemaVersion + 1, RunId: "saved"}},
+			expected{&RunStateLoadResult{Status: RunStateIncompatible,
+				Detail: fmt.Sprintf("gent: unsupported run schema %d", RunSchemaVersion+1)}}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			codecs := NewCodecRegistry()
+			data, err := codecs.Marshal(test.input.value)
+			if !assert.NoError(t, err) {
+				return
+			}
+			result, err := codecs.UnmarshalRunState(data)
+			assert.NoError(t, err)
+			assert.Equal(t, test.expected.result, result)
+		})
+	}
+}
+
+func TestRunStorageSharesVersionMarker(t *testing.T) {
+	codecs := NewCodecRegistry()
+	runID, batches := recordedStateFixture(t, 1, codecs, nil)
+	state, view := NewRunState(runID), NewRunView(runID)
+	for _, data := range batches {
+		applyRecordedState(t, state, codecs, data)
+		var batch SaveBatch
+		if !assert.NoError(t, codecs.Unmarshal(data, &batch)) {
+			return
+		}
+		result, err := view.Apply(&batch, codecs)
+		if !assert.NoError(t, err) || !assert.Equal(t, &ApplyStateResult{Status: ApplyApplied}, result) {
+			return
+		}
+	}
+	archive, err := codecs.Marshal(view)
+	if !assert.NoError(t, err) {
+		return
+	}
+	type input struct{ data []byte }
+	type expected struct{ version uint64 }
+	type testCase struct {
+		name     string
+		input    input
+		expected expected
+	}
+	for _, test := range []testCase{
+		{"batch", input{batches[0]}, expected{3}},
+		{"RunStateSnapshot", input{encodeRunState(t, codecs, state)}, expected{3}},
+		{"archive", input{archive}, expected{3}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var header struct {
+				FormatVersion uint64 `json:"formatVersion"`
+			}
+			assert.NoError(t, json.Unmarshal(test.input.data, &header))
+			assert.Equal(t, test.expected, expected{header.FormatVersion})
+		})
+	}
+}
+
+// Future versions can replace every v3 field except the discriminator. The dispatcher must
+// classify the version before consulting table, compression, or schema rules.
+func TestSavedDocumentVersionDispatch(t *testing.T) {
+	type input struct{ document string }
+	type expected struct {
+		status RunStateLoadStatus
+		detail string
+	}
+	type testCase struct {
+		name     string
+		input    input
+		expected expected
+	}
+	const badVersion = "gent: formatVersion must be a positive unsigned 64-bit integer"
+	cases := []testCase{
+		{"plain development format", input{`{"formatVersion":1,"data":{},"digest":""}`},
+			expected{RunStateIncompatible, "gent: unsupported saved document version 1"}},
+		{"compressed development format", input{`{"formatVersion":2,"data":"","digest":""}`},
+			expected{RunStateIncompatible, "gent: unsupported saved document version 2"}},
+		{"future payload and reordered header", input{`{"binary":"AA==","formatVersion":4}`},
+			expected{RunStateIncompatible, "gent: unsupported saved document version 4"}},
+		{"largest future version", input{`{"formatVersion":18446744073709551615}`},
+			expected{RunStateIncompatible, "gent: unsupported saved document version 18446744073709551615"}},
+		{"missing", input{`{"data":{},"digest":""}`}, expected{RunStateInvalid,
+			`gent: missing saved document field "formatVersion"`}},
+		{"duplicate", input{`{"formatVersion":4,"formatVersion":3}`}, expected{RunStateInvalid,
+			`gent: duplicate saved document field "formatVersion"`}},
+		{"zero", input{`{"formatVersion":0}`}, expected{RunStateInvalid, badVersion}},
+		{"negative", input{`{"formatVersion":-1}`}, expected{RunStateInvalid, badVersion}},
+		{"quoted", input{`{"formatVersion":"3"}`}, expected{RunStateInvalid, badVersion}},
+		{"fraction", input{`{"formatVersion":3.5}`}, expected{RunStateInvalid, badVersion}},
+		{"overflow", input{`{"formatVersion":18446744073709551616}`},
+			expected{RunStateInvalid, badVersion}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			codecs := NewCodecRegistry()
+			data := []byte(test.input.document)
+			var target any = "unchanged"
+			assert.EqualError(t, codecs.Unmarshal(data, &target), test.expected.detail)
+			assert.Equal(t, "unchanged", target)
+			loaded, err := codecs.UnmarshalRunState(data)
+			assert.NoError(t, err)
+			assert.Equal(t, &RunStateLoadResult{Status: test.expected.status,
+				Detail: test.expected.detail}, loaded)
 		})
 	}
 }
@@ -205,8 +331,8 @@ func TestFormerSavedEnvelopeIsIncompatible(t *testing.T) {
 	encoded, err := json.Marshal(envelope)
 	assert.NoError(t, err)
 	digest := sha256.Sum256(encoded)
-	data, err := json.Marshal(runStateSnapshotEncoding{SchemaVersion: RunSchemaVersion,
-		State: encoded, Digest: hex.EncodeToString(digest[:])})
+	data, err := json.Marshal(map[string]any{"schemaVersion": 7,
+		"state": json.RawMessage(encoded), "digest": hex.EncodeToString(digest[:])})
 	assert.NoError(t, err)
 	result, err := registry.UnmarshalRunState(data)
 	assert.NoError(t, err)
@@ -226,12 +352,12 @@ func expandTestDocument(t *testing.T, codecs *CodecRegistry, data []byte) []byte
 	if !assert.NoError(t, json.Unmarshal(data, &document)) {
 		t.FailNow()
 	}
-	assert.Equal(t, versionedDocumentDigest(document.FormatVersion, document.Data), document.Digest)
+	assert.Equal(t, v3DocumentDigest(document.Data), document.Digest)
 	indexed, err := indexSavedJSON(document.Data)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
-	indexed, err = codecs.documentData(document.FormatVersion, indexed)
+	indexed, err = codecs.v3DocumentData(indexed)
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
@@ -250,8 +376,8 @@ func testDocument(t *testing.T, payload string) []byte {
 		t.FailNow()
 	}
 	content := compact.Bytes()
-	data, err := json.Marshal(savedDocument{FormatVersion: savedDocumentVersion,
-		Data: content, Digest: documentDigest(content)})
+	data, err := json.Marshal(savedDocument{FormatVersion: savedDocumentV3,
+		Data: content, Digest: v3DocumentDigest(content)})
 	if !assert.NoError(t, err) {
 		t.FailNow()
 	}
@@ -423,8 +549,8 @@ func TestSavedDocumentIntegrityAndTruncation(t *testing.T) {
 			return bytes.Replace(data, []byte(`95`), []byte(`96`), 1)
 		}}, expected{"gent: saved document digest mismatch"}},
 		{"version", input{func(data []byte) []byte {
-			return bytes.Replace(data, []byte(`"formatVersion":1`), []byte(`"formatVersion":2`), 1)
-		}}, expected{"gent: saved document digest mismatch"}},
+			return bytes.Replace(data, []byte(`"formatVersion":3`), []byte(`"formatVersion":4`), 1)
+		}}, expected{"gent: unsupported saved document version 4"}},
 		{"truncated", input{func(data []byte) []byte { return data[:len(data)-1] }},
 			expected{"gent: invalid encoded JSON"}},
 	}

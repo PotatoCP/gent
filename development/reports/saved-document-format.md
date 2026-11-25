@@ -1,18 +1,24 @@
 # Saved document format
 
-Status: type tables, record layouts, and document-local shared values were implemented under the
-owner's 2026-11-19 approval. The footprint goal adds lossless compression, enabled by default
-for useful savings. This is the framework's storage format, not another public state type.
+Storage v3 is the permanent compatibility baseline approved on 2026-11-24. It keeps the type
+tables, record layouts, shared values, and lossless compression from the development formats.
 
 ## Storage boundary
 
 `CodecRegistry.Marshal` writes a versioned JSON document for SaveBatch, RunView, or a registered
-value. `MarshalRunState` puts the same document inside the existing RunStateSnapshot integrity
-envelope. Public storage calls are unchanged. Each document owns all its tables and references.
+value. `MarshalRunState` writes the same envelope around the compact state. Its payload includes
+the run schema, and the document digest protects that schema and the state together.
+
+**Permanent discriminator.** Every durable Gent format from v3 onward is a JSON object with
+exactly one top-level `formatVersion`. Its value is a positive unsigned 64-bit decimal integer.
+The writer emits it first. Readers accept any field order. They check the encoded size, JSON
+syntax, and discriminator before applying the selected version's field or integrity rules.
+All other fields belong to that version. A later version can replace the tables, compression,
+digest, and payload encoding, including storing a binary payload as a JSON string.
 
 ```json
 {
-  "formatVersion": 1,
+  "formatVersion": 3,
   "data": {
     "types": ["/uint64"],
     "layouts": [
@@ -26,14 +32,14 @@ envelope. Public storage calls are unchanged. Each document owns all its tables 
 ```
 
 The example's digest is a label, not a valid digest. The real digest covers the fixed format marker
-`gent-saved-document:1` followed by a newline, then the exact bytes of `data`. The outer object's
+`gent-saved-document:3` followed by a newline, then the exact bytes of `data`. The outer object's
 whitespace is not covered. Changing the spelling or whitespace inside `data` requires a new digest.
 The format marker is checked before decoding. A digest provides integrity, not authentication.
 
-Format version 2 stores the same `data` object as a Snappy block in a canonical base64 JSON string.
-Its digest uses `gent-saved-document:2`, a newline, and the exact quoted `data` bytes. There is no
-dictionary or dependency on an earlier document. Both versions are supported; the run schema and
-batch receipts are unchanged. A RunStateSnapshot still has its outer integrity envelope.
+In v3, an object in `data` holds plain tables. A JSON string in `data` holds the same tables in a
+Snappy block encoded in canonical base64. The digest includes the quotes and the exact encoded
+bytes. The JSON kind therefore determines the representation and is covered by integrity. Both
+forms are self-contained. The tables and each shared reference belong to this document.
 
 The default writer tries compression for table data of at least 8 KiB and keeps it only when the
 quoted base64 result is at least one eighth smaller. Count base64 overhead in this decision.
@@ -259,9 +265,24 @@ Pending-event and Subscriber byte allowances still count the uncompressed docume
 must not permit a larger live queue. Small event accounting computes this exact length without
 constructing the output buffer or hashing it. It runs the same codec and expansion validation.
 
-This development change does not add a reader for the former storage format. It preserves the
-component envelope so custom checkpoint APIs and accepted receipt semantics remain unchanged.
-RunState load reports Incompatible for the former format and unsupported document versions.
+## Reading old runs after an upgrade
+
+Keep the original bytes. New Gent releases must read all documents from v3 onward and append new
+batches to the recovered run without a storage migration. Keep the appropriate historical reader
+and convert Gent-owned data in memory as necessary. Application code continues to use
+`Unmarshal`, `UnmarshalRunState`, `Apply`, and `Restore`.
+
+Storage version, run schema, and individual component versions are separate. V3 starts with run
+schema 7. When changing a Gent-owned type or reducer, keep its historical field meanings, native
+bytes, and valid defaults. Preserve the original receipt algorithm for each saved batch schema.
+For example, adding a Go field with a zero default can still change the re-encoded batch digest.
+An old receipt must still validate, recognize an exact retry, and link the old head to a new batch.
+Verify the fixed compatibility corpus before releasing any of these changes.
+
+The application supplies readers for its own custom payloads and the bindings needed to recover an
+external operation. Storage v1, v2, and the earlier unversioned wrappers predate the guarantee.
+The RunState loader reports Incompatible for those formats or a version newer than it supports.
+Damaged v3 data remains Invalid. An application decoder failure retains its operation error.
 
 ## Requirements review and checks
 

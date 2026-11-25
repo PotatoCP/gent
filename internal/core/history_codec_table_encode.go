@@ -154,14 +154,12 @@ func (builder *tableBuilder) document(root int) ([]byte, error) {
 	data = append(data, `],"root":`...)
 	data = builder.appendValue(data, root, false)
 	data = append(data, '}')
-	version, data := builder.registry.compressDocument(data)
-	result := make([]byte, 0, documentEnvelopeSize(version)+len(data))
-	result = append(result, `{"formatVersion":`...)
-	result = strconv.AppendInt(result, int64(version), 10)
-	result = append(result, `,"data":`...)
+	data = builder.registry.compressDocument(data)
+	result := make([]byte, 0, v3EnvelopeSize+len(data))
+	result = append(result, v3DocumentPrefix...)
 	result = append(result, data...)
 	result = append(result, `,"digest":"`...)
-	result = append(result, versionedDocumentDigest(version, data)...)
+	result = append(result, v3DocumentDigest(data)...)
 	return append(result, '"', '}'), nil
 }
 
