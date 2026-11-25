@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rickchristie/gent"
+	"github.com/rickchristie/gent/output"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -70,6 +71,14 @@ func TestLiveProviderConcurrentCalls(t *testing.T) {
 // These default cloud models support image input. Local and routed models need separate model
 // selection; their media mapping is checked by the full provider fixture matrix.
 func TestLiveProviderImageInput(t *testing.T) {
+	type colorAnswer struct {
+		Color string `json:"color"`
+	}
+	// The schema fixes the reply shape. Only the image supplies the expected color.
+	out, err := output.NewJsonOutput[colorAnswer]()
+	if !assert.NoError(t, err) {
+		return
+	}
 	img := image.NewRGBA(image.Rect(0, 0, 64, 64))
 	draw.Draw(img, img.Bounds(), image.NewUniform(color.RGBA{R: 255, A: 255}), image.Point{}, draw.Src)
 	var buffer bytes.Buffer
@@ -87,11 +96,15 @@ func TestLiveProviderImageInput(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 			defer cancel()
 			request := gent.NewModelCallRequest([]*gent.ModelMessage{
+				gent.TextParts(gent.ChatMessageTypeSystem, out.Instructions()),
 				{Role: gent.ChatMessageTypeHuman, Parts: []gent.ContentPart{
-					gent.TextPart("What single color fills this image? Reply with one lowercase word."),
+					gent.TextPart("What single color fills this image? Give its lowercase name."),
 					gent.BytesPart("image/png", buffer.Bytes()),
 				}},
 			}, gent.WithMaxTokens(2048))
+			if !assert.NoError(t, out.Configure(request)) {
+				return
+			}
 			stream, err := newLiveModel(t, provider, &config).GenerateContentStream(ctx, request)
 			if !assert.NoError(t, err) {
 				return
@@ -104,7 +117,7 @@ func TestLiveProviderImageInput(t *testing.T) {
 				return
 			}
 			assert.Equal(t, gent.ModelStatusAnswer, response.Choices[0].Completion.Status)
-			assert.Equal(t, "red", gent.ContentText(response.Choices[0].CandidateContent()))
+			assert.JSONEq(t, `{"color":"red"}`, gent.ContentText(response.Choices[0].CandidateContent()))
 		})
 	}
 }
