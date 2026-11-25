@@ -14,8 +14,9 @@ import (
 
 func TestResponsesImageAnswerParts(t *testing.T) {
 	type input struct {
-		text  string
-		first bool
+		provider   string
+		modalities []string
+		items      []any
 	}
 	type expected struct {
 		parts  []gent.ContentPart
@@ -28,32 +29,64 @@ func TestResponsesImageAnswerParts(t *testing.T) {
 		expected expected
 	}
 	img := imageFixture(t, 2, color.RGBA{B: 255, A: 255})
+	imageItem := map[string]any{"type": "image_generation_call", "id": "unsaved-image",
+		"status": "completed", "output_format": "jpeg",
+		"result": base64.StdEncoding.EncodeToString(img.Data)}
+	message := func(text string) any {
+		return map[string]any{"type": "message", "role": "assistant", "content": []any{
+			map[string]any{"type": "output_text", "text": text}}}
+	}
+	source := func(ids ...string) *gent.ContentSource { return &gent.ContentSource{MessageIds: ids} }
+	imageOnly := []string{"image"}
+	const ref = `<grok type="image" image_id="68cd18bb-40fc-43ca-8dc9-01dfe69979c7" />`
+	const second = `<grok type="image" image_id="5e432785_call-b2f34d5b-07db-4029-983f-0" />`
+	const generate = `<grok type="imagine_text_to_image" prompt="A blue square" aspect_ratio="1:1" />`
+	const unknown = `<grok type="text" prompt="A blue square" />`
+	const nested = `<grok type="image" image_id="one">Here is the image.</grok>`
+	const invalid = `<grok type="image" image_id="" />`
+	const caption = "Here is the image."
 	cases := []testCase{
-		{"empty text before image", input{"", true}, expected{[]gent.ContentPart{img},
-			&gent.ContentSource{MessageIds: []string{"output:1"}}, nil}},
-		{"empty text after image", input{"", false}, expected{[]gent.ContentPart{img},
-			&gent.ContentSource{MessageIds: []string{"output:0"}}, nil}},
-		{"text before image", input{"Here is the image.", true}, expected{
-			[]gent.ContentPart{gent.TextPart("Here is the image."), img},
-			&gent.ContentSource{MessageIds: []string{"output:0", "output:1"}}, nil}},
-		{"text after image", input{"Here is the image.", false}, expected{
-			[]gent.ContentPart{img, gent.TextPart("Here is the image.")},
-			&gent.ContentSource{MessageIds: []string{"output:0", "output:1"}}, nil}},
-		{"whitespace remains content", input{" ", false}, expected{
-			[]gent.ContentPart{img, gent.TextPart(" ")},
-			&gent.ContentSource{MessageIds: []string{"output:0", "output:1"}}, nil}},
+		{"empty text before image", input{"openai", nil, []any{message(""), imageItem}},
+			expected{[]gent.ContentPart{img}, source("output:1"), nil}},
+		{"empty text after image", input{"openai", nil, []any{imageItem, message("")}},
+			expected{[]gent.ContentPart{img}, source("output:0"), nil}},
+		{"text before image", input{"openai", nil, []any{message(caption), imageItem}}, expected{
+			[]gent.ContentPart{gent.TextPart(caption), img}, source("output:0", "output:1"), nil}},
+		{"text after image", input{"openai", nil, []any{imageItem, message(caption)}}, expected{
+			[]gent.ContentPart{img, gent.TextPart(caption)}, source("output:0", "output:1"), nil}},
+		{"whitespace remains content", input{"openai", nil, []any{imageItem, message(" ")}}, expected{
+			[]gent.ContentPart{img, gent.TextPart(" ")}, source("output:0", "output:1"), nil}},
+		{"xAI reference after image", input{"xai", imageOnly, []any{imageItem, message(ref)}},
+			expected{[]gent.ContentPart{img}, source("output:0"), nil}},
+		{"xAI references before image", input{"xai", imageOnly, []any{message(ref + second), imageItem}},
+			expected{[]gent.ContentPart{img}, source("output:1"), nil}},
+		{"xAI generation markup", input{"xai", imageOnly, []any{message(generate), imageItem}},
+			expected{[]gent.ContentPart{img}, source("output:1"), nil}},
+		{"xAI generation and display markup", input{"xai", imageOnly,
+			[]any{imageItem, message(generate + ref)}}, expected{[]gent.ContentPart{img},
+			source("output:0"), nil}},
+		{"xAI reference without image", input{"xai", imageOnly, []any{message(ref)}},
+			expected{[]gent.ContentPart{gent.TextPart(ref)}, source("output:0"), nil}},
+		{"xAI reference preserves earlier caption", input{"xai", imageOnly,
+			[]any{message(caption), imageItem, message(ref)}}, expected{
+			[]gent.ContentPart{gent.TextPart(caption), img}, source("output:0", "output:1"), nil}},
+		{"xAI caption with reference", input{"xai", imageOnly, []any{imageItem, message(ref + caption)}},
+			expected{[]gent.ContentPart{img, gent.TextPart(ref + caption)}, source("output:0", "output:1"),
+				nil}},
+		{"xAI invalid reference", input{"xai", imageOnly, []any{imageItem, message(invalid)}},
+			expected{[]gent.ContentPart{img, gent.TextPart(invalid)}, source("output:0", "output:1"), nil}},
+		{"xAI unrelated markup", input{"xai", imageOnly, []any{imageItem, message(unknown)}},
+			expected{[]gent.ContentPart{img, gent.TextPart(unknown)}, source("output:0", "output:1"), nil}},
+		{"xAI nested caption", input{"xai", imageOnly, []any{imageItem, message(nested)}},
+			expected{[]gent.ContentPart{img, gent.TextPart(nested)}, source("output:0", "output:1"), nil}},
+		{"xAI mixed output", input{"xai", []string{"image", "text"}, []any{imageItem, message(ref)}},
+			expected{[]gent.ContentPart{img, gent.TextPart(ref)}, source("output:0", "output:1"), nil}},
+		{"OpenAI literal reference", input{"openai", imageOnly, []any{imageItem, message(ref)}},
+			expected{[]gent.ContentPart{img, gent.TextPart(ref)}, source("output:0", "output:1"), nil}},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			imageItem := map[string]any{"type": "image_generation_call", "id": "unsaved-image",
-				"status": "completed", "output_format": "jpeg",
-				"result": base64.StdEncoding.EncodeToString(img.Data)}
-			message := map[string]any{"type": "message", "role": "assistant", "content": []any{
-				map[string]any{"type": "output_text", "text": test.input.text}}}
-			items := []any{imageItem, message}
-			if test.input.first {
-				items = []any{message, imageItem}
-			}
+			items := test.input.items
 			payload, err := json.Marshal(map[string]any{"status": "completed", "output": items})
 			if !assert.NoError(t, err) {
 				return
@@ -61,9 +94,11 @@ func TestResponsesImageAnswerParts(t *testing.T) {
 			client := &http.Client{Transport: responseTransport(func(*http.Request) (*http.Response, error) {
 				return fixtureHTTP(string(payload), "application/json"), nil
 			})}
-			stream, err := fixtureModel("openai", client).GenerateContentStream(context.Background(),
-				gent.NewModelCallRequest([]*gent.ModelMessage{
-					gent.TextParts(gent.ChatMessageTypeHuman, "Generate an image.")}))
+			request := gent.NewModelCallRequest([]*gent.ModelMessage{
+				gent.TextParts(gent.ChatMessageTypeHuman, "Generate an image.")})
+			request.Options.ResponseModalities = test.input.modalities
+			stream, err := fixtureModel(test.input.provider, client).GenerateContentStream(
+				context.Background(), request)
 			if !assert.Equal(t, test.expected.err, err) {
 				return
 			}

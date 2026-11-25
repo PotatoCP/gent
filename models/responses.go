@@ -403,7 +403,7 @@ func (m *Responses) readResponse(ctx context.Context, response *http.Response,
 		if err := decodeProviderJSON(response.Body, &envelope); err != nil {
 			return nil, err
 		}
-		result, err := m.convertResponse(&envelope)
+		result, err := m.convertResponse(&envelope, options)
 		if err != nil {
 			return nil, err
 		}
@@ -471,7 +471,7 @@ func (m *Responses) readResponse(ctx context.Context, response *http.Response,
 				fmt.Sprintf("output:%d", event.OutputIndex), event.Delta)
 		case "response.completed", "response.incomplete", "response.failed":
 			var err error
-			result, err = m.convertResponse(&event.Response)
+			result, err = m.convertResponse(&event.Response, options)
 			return true, err
 		case "error":
 			return false, &responseError{Code: event.Code, Message: event.Message}
@@ -484,7 +484,8 @@ func (m *Responses) readResponse(ctx context.Context, response *http.Response,
 	return result, nil
 }
 
-func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCallResponse, error) {
+func (m *Responses) convertResponse(response *responseEnvelope, options *gent.CallOptions,
+) (*gent.ModelCallResponse, error) {
 	if response.Error != nil {
 		return nil, response.Error
 	}
@@ -501,6 +502,9 @@ func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCall
 		choice.Completion.ProviderReason = response.IncompleteDetails.Reason
 	}
 	var imageIDs []string
+	var lastImageMarkupID string
+	xaiImageOnly := m.config.Provider == "xai" && len(options.ResponseModalities) == 1 &&
+		options.ResponseModalities[0] == "image"
 	for index, raw := range response.Output {
 		var item struct {
 			Type      string `json:"type"`
@@ -576,13 +580,6 @@ func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCall
 			if item.Phase == "" {
 				kind = gent.AssistantContentFinalAnswerCandidate
 			}
-			// A new message supersedes earlier text candidates. Generated images remain ordered
-			// answer parts even when the provider also emits an assistant message.
-			choice.CandidateSource = nil
-			if len(imageIDs) > 0 {
-				choice.CandidateSource = &gent.ContentSource{
-					MessageIds: append([]string(nil), imageIDs...)}
-			}
 			var text strings.Builder
 			for _, part := range item.Content {
 				if part.Type != "output_text" && part.Type != "refusal" {
@@ -607,12 +604,27 @@ func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCall
 					Content:   []gent.ContentPart{gent.TextContent{Text: text.String()}},
 					MessageId: id,
 				})
+			answerPhase := item.Phase == "" || item.Phase == "final_answer"
+			if xaiImageOnly && answerPhase && xaiImageMarkupOnly(text.String()) {
+				// Image bytes can follow this message. Keep the markup in Parts and in native
+				// history. It must not displace a real caption during answer selection.
+				lastImageMarkupID = id
+				continue
+			}
+			lastImageMarkupID = ""
+			// A new message supersedes earlier text candidates. Generated images remain ordered
+			// answer parts even when the provider also emits an assistant message.
+			choice.CandidateSource = nil
+			if len(imageIDs) > 0 {
+				choice.CandidateSource = &gent.ContentSource{
+					MessageIds: append([]string(nil), imageIDs...)}
+			}
 			// Image generation can end with an empty assistant text block. It has no answer
 			// bytes. Keep the raw item and metadata, but do not reject an image for empty text.
 			if text.Len() == 0 {
 				continue
 			}
-			if item.Phase == "" || item.Phase == "final_answer" {
+			if answerPhase {
 				// A Responses output can contain multiple assistant messages. Only the last
 				// message can be the answer candidate; earlier messages remain previews.
 				if choice.CandidateSource == nil {
@@ -643,6 +655,10 @@ func (m *Responses) convertResponse(response *responseEnvelope) (*gent.ModelCall
 		default:
 			return nil, fmt.Errorf("unsupported Responses output item %q", item.Type)
 		}
+	}
+	if lastImageMarkupID != "" && len(imageIDs) == 0 {
+		// Without a completed image item, keep the literal answer for normal validation.
+		choice.CandidateSource = &gent.ContentSource{MessageIds: []string{lastImageMarkupID}}
 	}
 	if choice.Completion.Refusal != nil {
 		choice.Completion.Status = gent.ModelStatusRefused

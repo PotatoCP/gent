@@ -26,6 +26,11 @@ Application Default Credentials. Use only trusted credential configuration and e
 
 {{example:model-xai}}
 
+With `ImageOutput`, the xAI adapter selects the generated image bytes. Grok can also send image
+generation or display tags in an assistant message. Gent keeps this message in the history. If
+the response includes a completed image, a message containing only those tags adds no text to
+the image output. A caption still goes through output validation.
+
 ## OpenRouter
 
 {{example:model-openrouter}}

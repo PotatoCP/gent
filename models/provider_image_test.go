@@ -64,6 +64,12 @@ func imageResponse(provider string, images []gent.BinaryContent, reference, extr
 				"url": uri}})
 		}
 	}
+	if provider == "xai" {
+		// The first response has a caption and must fail. The second has only images and
+		// their display references and must pass, including when the result is restored.
+		parts = append(parts, map[string]any{"type": "message", "role": "assistant", "content": []any{
+			map[string]any{"type": "output_text", "text": `<grok type="image" image_id="image-1" />`}}})
+	}
 	var value any
 	switch provider {
 	case "openai", "xai":
