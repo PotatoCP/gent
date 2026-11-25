@@ -179,6 +179,11 @@ func TestProvidersNativeRefusal(t *testing.T) {
 		case "gemini", "vertexai":
 			payload = `{"promptFeedback":{"blockReason":"SAFETY"}}`
 			refusal = &gent.ModelRefusal{Code: "SAFETY"}
+			cases = append(cases, testCase{
+				provider + "/image recitation",
+				input{provider, `{"candidates":[{"finishReason":"IMAGE_RECITATION"}]}`},
+				expected{&gent.ModelRefusal{Code: "IMAGE_RECITATION"}},
+			})
 		case "ollama":
 			// /api/chat has no native refusal field. Text that says no remains ordinary text.
 			continue

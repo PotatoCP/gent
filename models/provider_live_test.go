@@ -280,6 +280,8 @@ func checkLiveOutputs(t *testing.T, model gent.Model, native bool) {
 
 // Image models are separate because text-only models cannot exercise image generation. Use a
 // Responses model with the image tool for OpenAI/xAI, and an image model for Gemini/OpenRouter.
+// A solid square can end with an IMAGE_RECITATION refusal before the validator receives an image.
+// Request an original scene and then a specific edit to exercise both validation calls.
 func TestLiveImages(t *testing.T) {
 	for _, provider := range liveProviders() {
 		if !provider.images {
@@ -299,12 +301,13 @@ func TestLiveImages(t *testing.T) {
 				validations++
 				if validations == 1 {
 					return &gent.OutputValidationResult{Steering: []gent.ContentPart{gent.TextPart(
-						"Generate the blue square again. Return only the JPEG image, with no text.")}}, nil
+						"Add a green leaf beside the can. Return only the new JPEG image, with no text.")}}, nil
 				}
 				return &gent.OutputValidationResult{Accepted: true}, nil
 			})
 			task := liveTask(out.Instructions(),
-				`Generate one 512 by 512 image of a solid blue square. Return only the JPEG image.
+				`Draw one original 512 by 512 illustration of an orange watering can on a blue stool.
+Place two white stones beside the stool. Return only the JPEG image.
 The image_generation tool output is the complete answer. Do not send any assistant text,
 including a caption, a link, a description, or a completion message.`)
 			agent := react.NewWithOutput(newLiveModel(t, provider, &config), out).

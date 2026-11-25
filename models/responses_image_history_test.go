@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"image/color"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/rickchristie/gent"
@@ -41,6 +42,11 @@ func TestResponsesImageAnswerParts(t *testing.T) {
 	const ref = `<grok type="image" image_id="68cd18bb-40fc-43ca-8dc9-01dfe69979c7" />`
 	const second = `<grok type="image" image_id="5e432785_call-b2f34d5b-07db-4029-983f-0" />`
 	const generate = `<grok type="imagine_text_to_image" prompt="A blue square" aspect_ratio="1:1" />`
+	const render = `<grok type="render_image" image_id="picture-1" />`
+	const function = `<grok:function_call name="imagine_text_to_image">
+<parameter name="prompt">An orange can &amp; two stones</parameter>
+<parameter name="aspect_ratio">1:1</parameter>
+</grok:function_call>`
 	const unknown = `<grok type="text" prompt="A blue square" />`
 	const nested = `<grok type="image" image_id="one">Here is the image.</grok>`
 	const invalid = `<grok type="image" image_id="" />`
@@ -62,6 +68,19 @@ func TestResponsesImageAnswerParts(t *testing.T) {
 			expected{[]gent.ContentPart{img}, source("output:1"), nil}},
 		{"xAI generation markup", input{"xai", imageOnly, []any{message(generate), imageItem}},
 			expected{[]gent.ContentPart{img}, source("output:1"), nil}},
+		{"xAI function before image", input{"xai", imageOnly, []any{message(function), imageItem}},
+			expected{[]gent.ContentPart{img}, source("output:1"), nil}},
+		{"xAI render and image function after image", input{"xai", imageOnly,
+			[]any{imageItem, message(render + function)}}, expected{[]gent.ContentPart{img},
+			source("output:0"), nil}},
+		{"xAI render keeps earlier caption", input{"xai", imageOnly,
+			[]any{message(caption), imageItem, message(render)}}, expected{
+			[]gent.ContentPart{gent.TextPart(caption), img}, source("output:0", "output:1"), nil}},
+		{"xAI image function without native image", input{"xai", imageOnly, []any{message(function)}},
+			expected{[]gent.ContentPart{gent.TextPart(function)}, source("output:0"), nil}},
+		{"xAI mixed output includes image function", input{"xai", []string{"image", "text"},
+			[]any{imageItem, message(function)}}, expected{[]gent.ContentPart{img, gent.TextPart(function)},
+			source("output:0", "output:1"), nil}},
 		{"xAI generation and display markup", input{"xai", imageOnly,
 			[]any{imageItem, message(generate + ref)}}, expected{[]gent.ContentPart{img},
 			source("output:0"), nil}},
@@ -83,6 +102,23 @@ func TestResponsesImageAnswerParts(t *testing.T) {
 			expected{[]gent.ContentPart{img, gent.TextPart(ref)}, source("output:0", "output:1"), nil}},
 		{"OpenAI literal reference", input{"openai", imageOnly, []any{imageItem, message(ref)}},
 			expected{[]gent.ContentPart{img, gent.TextPart(ref)}, source("output:0", "output:1"), nil}},
+	}
+	type literalCase struct{ name, text string }
+	for _, literal := range []literalCase{
+		{"caption beside function", function + caption},
+		{"caption inside function", strings.Replace(function, "</grok:", caption+"</grok:", 1)},
+		{"unrelated function", strings.Replace(function, "imagine_text_to_image", "lookup", 1)},
+		{"missing prompt", strings.Replace(function, `name="prompt"`, `name="size"`, 1)},
+		{"empty prompt", strings.Replace(function, "An orange can &amp; two stones", " ", 1)},
+		{"duplicate prompt", strings.Replace(function, `name="aspect_ratio"`, `name="prompt"`, 1)},
+		{"missing render image ID", `<grok type="render_image" />`},
+		{"nested argument", strings.Replace(function, "two stones", "<caption>stones</caption>", 1)},
+		{"unrecognized element", strings.ReplaceAll(function, "parameter", "caption")},
+		{"incomplete function", strings.TrimSuffix(function, ">")},
+	} {
+		cases = append(cases, testCase{literal.name, input{"xai", imageOnly,
+			[]any{imageItem, message(literal.text)}}, expected{[]gent.ContentPart{img,
+			gent.TextPart(literal.text)}, source("output:0", "output:1"), nil}})
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
