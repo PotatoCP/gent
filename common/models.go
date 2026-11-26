@@ -300,13 +300,13 @@ var ModelRegistry = []ModelInfo{
 	},
 	{
 		Name: "bekko-embedding-v1-a8m", HuggingFace: "hotchpotch/bekko-embedding-v1-a8m",
-		Params: "106M", Size: "124MB", Languages: "100+ languages", MaxTokenChunks: 8192,
+		Params: "106M", Size: "130MB", Languages: "100+ languages", MaxTokenChunks: 8192,
 		ModelFile: "model.onnx",
 		ModelURL: "https://huggingface.co/hotchpotch/bekko-embedding-v1-a8m/" +
 			"resolve/main/onnx/model.onnx",
 		TokenizerURL: "https://huggingface.co/hotchpotch/bekko-embedding-v1-a8m/" +
 			"resolve/main/tokenizer.json",
-		Notes: "7.7M active parameters; static embedding table INT8, transformer FP32; MIT.",
+		Notes: "7.7M active parameters. INT8 static embedding table. FP32 transformer. MIT.",
 	},
 }
 
